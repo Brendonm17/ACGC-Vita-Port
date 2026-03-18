@@ -31,6 +31,7 @@
 #include "libforest/osreport.h"
 #ifdef TARGET_PC
 #include "m_field_make.h"
+#include "m_map_ovl.h"
 #include "pc_bswap.h"
 
 /* Raw binary display lists (u8[] with BE data from ROM .inc files).
@@ -92,6 +93,20 @@ static void pc_bswap_u8_tlut_palettes(void) {
     int i;
     for (i = 0; i < 14; i++) {
         pc_bswap16_array((u16*)palettes[i], 16);
+    }
+}
+
+/* mMP_house_pos_list is raw binary ROM data (u8[0x978]) cast to mMP_HousePos_c[].
+   Each entry has a u16 fgblock_name that needs BE/LE swap. The u8 fields (ut_x, ut_z, idx)
+   are fine. Without this, the map overlay can't match buildings => wrong icon positions. */
+extern mMP_HousePos_c mMP_house_pos_list[];
+static void pc_bswap_house_pos_list(void) {
+    mMP_HousePos_c* p = mMP_house_pos_list;
+    /* 0x03B8 is the sentinel in BE. After swap, sentinel becomes native 0x03B8. */
+    int count = 0x978 / sizeof(mMP_HousePos_c);
+    int i;
+    for (i = 0; i < count; i++) {
+        p[i].fgblock_name = pc_bswap16(p[i].fgblock_name);
     }
 }
 #endif
@@ -761,6 +776,7 @@ int main(int argc, const char** argv) {
   pc_bswap_raw_display_lists();
   mFM_InitActableEndian();
   pc_bswap_u8_tlut_palettes();
+  pc_bswap_house_pos_list();
   OSReport("[PC] boot: entering HotStartEntry loop (entry=%08x)...\n", (u32)HotStartEntry);
 #endif
   while (HotStartEntry != nullptr) {
