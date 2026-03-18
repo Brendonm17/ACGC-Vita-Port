@@ -358,7 +358,11 @@ void aPG_deposit_before(NPC_POSTGIRL_ACTOR *postgirl, GAME_PLAY *play) {
 
 void aPG_deposit_menu_close_wait(NPC_POSTGIRL_ACTOR *postgirl, GAME_PLAY *play) {
     if (play->submenu.open_flag == FALSE) {
+#ifdef TARGET_PC
+        u8 str[0xb]; /* BUGFIX: original declares str[8] but writes 0xb(11) bytes */
+#else
         u8 str[8];
+#endif
         aPG_ChangeMsgData(postgirl, 0x2de2);
         mMsg_Set_ForceNext(mMsg_Get_base_window_p());
         mFont_UnintToString(str, 0xb, Now_Private->bank_account, 0x9, 0x1, 0x0, 0x1);
