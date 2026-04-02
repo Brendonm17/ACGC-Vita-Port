@@ -1,0 +1,81 @@
+/* Specialized shader for CFG20: 2-stage register*(1+tex) color + TEXA alpha.
+ * Stage 0: color = C2 + A0*C1 (all registers), alpha = 0
+ * Stage 1: color = CPREV*(1+TEXC), alpha = TEXA
+ * Final: color = saturate((C2+A0*C1) * (1+tex.rgb)), alpha = tex.a
+ *
+ * TEV inputs:
+ *   S0 c(15,B,C,D) a(7,7,7,7) — register blend, zero alpha
+ *   S1 c(15,0,8,0) a(4,7,7,7) — prev*(1+tex), TEXA passthrough
+ *
+ * NOTE: Stage 0 has NO texture reference, so the game does not bind a texture
+ * to GL_TEXTURE0. The CPU remaps stage 1's texture to TEXUNIT0 for this shader.
+ * Only TEXUNIT0 is declared — avoids psp2cgc sampler remapping issues.
+ *
+ * Uses half precision for 2x throughput on SGX543.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+
+    /* Stage 0: B=C1, C=A0, D=C2 pre-resolved registers */
+    uniform half3 u_tev0_cb,
+    uniform half3 u_tev0_cc,
+    uniform half3 u_tev0_cd,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform float3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Stage 1's texture remapped to TEXUNIT0 by CPU */
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    /* Stage 0: color = C2 + A0*C1 (all registers) */
+    half3 s0_c = u_tev0_cd + u_tev0_cc * u_tev0_cb;
+
+    /* Stage 1: color = prev*(1+tex), alpha = TEXA
+     * S1 c(15,0,8,0): D=CPREV, C=TEXC, B=CPREV, A=ZERO
+     * result = CPREV + TEXC*CPREV = CPREV*(1+TEXC) */
+    half3 prev_c = saturate(s0_c * (1.0h + tex0.rgb));
+    half prev_a = tex0.a;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

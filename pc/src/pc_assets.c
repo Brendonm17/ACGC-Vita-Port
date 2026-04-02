@@ -1,5 +1,5 @@
 /* pc_assets.c - Runtime binary asset loader (auto-generated) */
-#ifdef TARGET_PC
+#if defined(TARGET_PC) || defined(TARGET_VITA)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29864,7 +29864,7 @@ void pc_assets_init(void) {
     int i, loaded = 0, failed = 0, rom_mode = 0;
     int total = (int)(sizeof(s_assets) / sizeof(s_assets[0]));
 
-    /* Try disc image (CISO/ISO/GCM) — pc_disc_init() already called from main */
+    /* Try disc image (CISO/ISO/GCM) -pc_disc_init() already called from main */
     if (pc_disc_is_open()) {
         g_dol_data = pc_disc_extract_dol();
         g_rel_data = pc_disc_extract_rel();
@@ -30674,4 +30674,4 @@ void pc_assets_init(void) {
         printf("[PC] Assets: %d loaded (%s)\n", loaded, rom_mode ? "ROM-direct" : ".bin fallback");
 }
 
-#endif /* TARGET_PC */
+#endif /* TARGET_PC || TARGET_VITA */

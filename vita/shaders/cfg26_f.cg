@@ -1,0 +1,75 @@
+/* Specialized shader for CFG26
+ * Stage 0: color = C1 (register passthrough), alpha = RASA * A1
+ * TEV inputs: S0 c(15,15,15,4) a(7,5,2,7)
+ *   color: D + (1-C)*A + C*B = C1 + 0 = C1
+ *   alpha: D + (1-C)*A + C*B = 0 + A1 * RASA = RASA * A1
+ *
+ * RASA must be resolved per-pixel (vertex alpha from lighting/material).
+ * A1 is pre-resolved on CPU into u_tev0_aval.z.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    /* Stage 0: D input = pre-resolved C1 color */
+    uniform half3 u_tev0_cd,
+    /* Stage 0: alpha values — .z = pre-resolved A1 */
+    uniform half4 u_tev0_aval,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Material alpha (needed for RASA) */
+    half matA = lerp(u_mat_color.a, v_color.a, step(0.5h, u_alpha_mat_src));
+
+#ifdef LIGHTING
+    matA = lerp(matA, matA * u_amb_color.a, step(0.5h, u_alpha_lighting_enabled));
+#endif
+
+    half ras_a = lerp(1.0h, matA, step(0.5h, u_num_chans));
+
+    /* Stage 0: color = register C1 (passthrough D) */
+    half3 prev_c = u_tev0_cd;
+
+    /* Stage 0: alpha = RASA * A1
+     * aval.z = pre-resolved A1 register value */
+    half prev_a = ras_a * u_tev0_aval.z;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    half fd = max(u_fog_end - u_fog_start, (half)0.001);
+    half ff = saturate((v_fog_z - u_fog_start) / fd);
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

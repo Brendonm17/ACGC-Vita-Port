@@ -31,7 +31,13 @@ PCKeybindings g_pc_keybindings = {
     .dpad_right = SDL_SCANCODE_L,
 };
 
+#ifdef TARGET_VITA
+/* Vita has no keyboard -keybindings are less relevant but still loaded for
+ * SDL2 GameController mapping compatibility */
+static const char* KEYBINDINGS_FILE = "ux0:data/AnimalCrossing/keybindings.ini";
+#else
 static const char* KEYBINDINGS_FILE = "keybindings.ini";
+#endif
 
 /* mapping table: ini key name -> offset into PCKeybindings */
 typedef struct {
@@ -142,6 +148,26 @@ static void write_defaults(const char* path) {
     FILE* f = fopen(path, "w");
     if (!f) return;
 
+#ifdef TARGET_VITA
+    fprintf(f, "# Animal Crossing Vita - Button Mapping\n");
+    fprintf(f, "#\n");
+    fprintf(f, "# PS Vita → GameCube button mapping (handled by SDL2 GameController)\n");
+    fprintf(f, "# This file is for reference. The mapping is built into SDL2.\n");
+    fprintf(f, "#\n");
+    fprintf(f, "# Vita Button    → GameCube Button\n");
+    fprintf(f, "# ──────────────────────────────────\n");
+    fprintf(f, "# Cross (X)      → A (confirm/interact)\n");
+    fprintf(f, "# Circle (O)     → B (cancel/run)\n");
+    fprintf(f, "# Square         → X\n");
+    fprintf(f, "# Triangle       → Y\n");
+    fprintf(f, "# Start          → Start (pause/menu)\n");
+    fprintf(f, "# Select         → Z (inventory)\n");
+    fprintf(f, "# L Trigger      → L\n");
+    fprintf(f, "# R Trigger      → R\n");
+    fprintf(f, "# D-Pad          → D-Pad\n");
+    fprintf(f, "# Left Stick     → Control Stick (movement)\n");
+    fprintf(f, "# Right Stick    → C-Stick (camera)\n");
+#else
     fprintf(f, "[Keyboard]\n");
     fprintf(f, "# Key names use SDL2 scancode names.\n");
     fprintf(f, "# Common names: Space, Left Shift, Right Shift, Left Ctrl, Right Ctrl,\n");
@@ -157,11 +183,11 @@ static void write_defaults(const char* path) {
         const char* name = input_code_name(code);
         fprintf(f, "%s = %s\n", s_entries[i].ini_key, name);
 
-        /* blank line separators between sections */
         if (i == 7)  fprintf(f, "\n# Main Stick\n");
         if (i == 11) fprintf(f, "\n# C-Stick (Camera)\n");
         if (i == 15) fprintf(f, "\n# D-Pad\n");
     }
+#endif
 
     fclose(f);
 }

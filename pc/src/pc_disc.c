@@ -1,6 +1,6 @@
 /* pc_disc.c - Read files from GC disc images (CISO/ISO/GCM)
  * Used by pc_assets.c for DOL+REL extraction and pc_dvd.c for runtime file reads. */
-#ifdef TARGET_PC
+#if defined(TARGET_PC) || defined(TARGET_VITA)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +66,11 @@ static int disc_open(DiscFile* df, const char* path) {
             int i, phys = 0;
             df->num_blocks = CISO_HDR_SIZE - CISO_MAP_OFF;
             df->block_phys = (int*)malloc(df->num_blocks * sizeof(int));
+            if (!df->block_phys) {
+                fclose(df->fp);
+                df->fp = NULL;
+                return 0;
+            }
             for (i = 0; i < df->num_blocks; i++)
                 df->block_phys[i] = hdr[CISO_MAP_OFF + i] ? phys++ : -1;
             df->is_ciso = 1;
@@ -281,7 +286,16 @@ static int str_ends_ci(const char* s, const char* suffix) {
 }
 
 static int find_disc_image(char* out_path, int out_sz) {
+#ifdef TARGET_VITA
+    static const char* dirs[] = {
+        "ux0:data/AnimalCrossing/rom",
+        "ux0:data/AnimalCrossing",
+        "app0:rom",
+        NULL
+    };
+#else
     static const char* dirs[] = { ".", "orig", "rom", NULL };
+#endif
     int d;
 
     for (d = 0; dirs[d]; d++) {
@@ -421,4 +435,4 @@ void pc_disc_shutdown(void) {
     }
 }
 
-#endif /* TARGET_PC */
+#endif /* TARGET_PC || TARGET_VITA */

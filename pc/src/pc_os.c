@@ -207,7 +207,7 @@ void osCreateThread2(void* thread, int id, void (*entry)(void*), void* arg,
 }
 
 void osStartThread(void* thread) {
-    /* don't actually start threads — single-threaded mode */
+    /* don't actually start threads -single-threaded mode */
     (void)thread;
     pending_thread_entry = NULL;
     pending_thread_arg = NULL;
@@ -239,13 +239,23 @@ void LCDisable(void) {}
 void OSInit(void) {
     if (!arena_memory) {
         /* alloc arena at >=0x10000000 to avoid collision with N64 segment addresses */
+#ifdef TARGET_VITA
+        /* Vita: Use memalign for aligned allocation. ARM32 addresses are in the
+         * right range naturally (Vita user heap starts well above 0x10000000). */
+        arena_memory = (u8*)memalign(4096, PC_MAIN_MEMORY_SIZE);
+#elif defined(_WIN32)
         {
             u32 base;
             for (base = 0x10000000; base <= 0x50000000; base += 0x01000000) {
-#ifdef _WIN32
                 arena_memory = (u8*)VirtualAlloc((void*)(uintptr_t)base,
                     PC_MAIN_MEMORY_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                if (arena_memory) break;
+            }
+        }
 #else
+        {
+            u32 base;
+            for (base = 0x10000000; base <= 0x50000000; base += 0x01000000) {
                 #ifndef MAP_FIXED_NOREPLACE
                 #define MAP_FIXED_NOREPLACE 0x100000
                 #endif
@@ -253,13 +263,13 @@ void OSInit(void) {
                     PROT_READ | PROT_WRITE,
                     MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED_NOREPLACE, -1, 0);
                 if (arena_memory == MAP_FAILED) arena_memory = NULL;
-#endif
                 if (arena_memory) break;
             }
         }
+#endif
         if (!arena_memory) {
             /* fallback (may cause seg2k0 issues) */
-            fprintf(stderr, "[PC] WARNING: VirtualAlloc at high address failed, "
+            fprintf(stderr, "[OS] WARNING: Preferred allocation failed, "
                             "falling back to malloc (seg2k0 may misfire)\n");
             arena_memory = (u8*)malloc(PC_MAIN_MEMORY_SIZE);
         }

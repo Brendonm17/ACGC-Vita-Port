@@ -21,8 +21,15 @@ orig/*/*
 # Build files
 build/
 build32/
+vita/build/
 .ninja_*
 build.ninja
+
+# Vita build artifacts
+*.vpk
+*.gxp
+vita/shaders/gxp/
+vita/include/vita_gxp_shaders.h
 
 # decompctx output
 ctx.*

@@ -9,8 +9,15 @@
 #endif
 
 #define SDL_MAIN_HANDLED
+
+#ifdef TARGET_VITA
+// VitaGL provides GL functions directly, no GLAD needed
+#include <vitaGL.h>
+#include <SDL2/SDL.h>
+#else
 #include <SDL.h>
 #include <glad/gl.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,13 +27,29 @@
 #include <math.h>
 #include <time.h>
 
+// valid pointer range for crash protection
+#ifdef TARGET_VITA
+#define PLATFORM_VALID_PTR_LO 0x81000000u
+#define PLATFORM_VALID_PTR_HI 0x9FFFFFFFu
+#else
+#define PLATFORM_VALID_PTR_LO 0x00010000u
+#define PLATFORM_VALID_PTR_HI 0xFFFEFFFFu
+#endif
+
 #include "pc_types.h"
 
 /* --- Configuration --- */
 #define PC_GC_WIDTH       640
 #define PC_GC_HEIGHT      480
+#ifdef TARGET_VITA
+#define VITA_SCREEN_WIDTH   960
+#define VITA_SCREEN_HEIGHT  544
+#define PC_SCREEN_WIDTH   VITA_SCREEN_WIDTH
+#define PC_SCREEN_HEIGHT  VITA_SCREEN_HEIGHT
+#else
 #define PC_SCREEN_WIDTH   PC_GC_WIDTH
 #define PC_SCREEN_HEIGHT  PC_GC_HEIGHT
+#endif
 #define PC_WINDOW_TITLE   "Animal Crossing"
 
 #define PC_MAIN_MEMORY_SIZE   (24 * 1024 * 1024)
@@ -44,7 +67,16 @@
 #define GC_TIMER_CLOCK        (GC_BUS_CLOCK / 4)
 
 /* --- Platform headers --- */
-#ifdef _WIN32
+#ifdef TARGET_VITA
+#include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/power.h>
+#include <psp2/ctrl.h>
+#include <psp2/touch.h>
+#include <psp2/io/fcntl.h>
+#include <psp2/io/stat.h>
+#include <signal.h>
+#elif defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -117,7 +149,11 @@ extern int pc_emu64_frame_vtx_cmds;
 extern int pc_emu64_frame_dl_cmds;
 extern int pc_emu64_frame_cull_visible;
 extern int pc_emu64_frame_cull_rejected;
+#ifndef TARGET_VITA
 extern int pc_gx_draw_call_count;
+extern int pc_gx_shader_switch_count;
+extern int pc_gx_deferred_tex_uploads;
+#endif
 
 /* --- Audio --- */
 extern int pc_save_loaded;
@@ -127,6 +163,11 @@ void pc_audio_shutdown(void);
 void pc_audio_start_producer_thread(void);
 void pc_audio_mq_init(void);
 void pc_audio_mq_shutdown(void);
+
+#ifdef TARGET_VITA
+// --- Vita-specific ---
+void vita_init(void);
+#endif
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,66 @@
+/* Specialized shader for CFG3 (4.5% of draws)
+ * Stage 0: color = C1 (constant), alpha = TEXA * A0
+ * Uses same uniform names as complex shader — CPU pre-resolve works unchanged.
+ * Optimized: rcp() fog.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+
+    /* Stage 0: D input = pre-resolved C1 color */
+    uniform half3 u_tev0_cd,
+    /* Stage 0: alpha values — .z = pre-resolved A0 alpha */
+    uniform half4 u_tev0_aval,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform float3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Texture sample (needed for alpha) */
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    /* Stage 0: color = register (D), alpha = TEXA * register (B or C slot) */
+    half3 prev_c = u_tev0_cd;
+    half prev_a = tex0.a * (u_tev0_aval.y + u_tev0_aval.z);
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

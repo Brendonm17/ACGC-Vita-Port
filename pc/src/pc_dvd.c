@@ -38,6 +38,14 @@ static void dvd_init_fallback_path(void) {
     if (assets_fallback_inited) return;
     assets_fallback_inited = 1;
 
+#ifdef TARGET_VITA
+    const char* candidates[] = {
+        "ux0:data/AnimalCrossing/assets/files",
+        "ux0:data/AnimalCrossing/assets",
+        "app0:assets/files",
+        "app0:assets",
+    };
+#else
     const char* candidates[] = {
         "assets/files",
         "assets",
@@ -46,6 +54,7 @@ static void dvd_init_fallback_path(void) {
         "../../assets/files",
         "../../assets",
     };
+#endif
     for (int i = 0; i < (int)(sizeof(candidates)/sizeof(candidates[0])); i++) {
         char test[768];
         snprintf(test, sizeof(test), "%s/COPYDATE", candidates[i]);

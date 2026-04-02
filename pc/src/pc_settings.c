@@ -3,16 +3,62 @@
 #include "pc_platform.h"
 
 PCSettings g_pc_settings = {
+#ifdef TARGET_VITA
+    .msaa          = 2,
+#else
+    .msaa          = 4,
+#endif
+    .preload_textures = 0,
     .window_width  = PC_SCREEN_WIDTH,
     .window_height = PC_SCREEN_HEIGHT,
     .fullscreen    = 0,
     .vsync         = 0,
-    .msaa          = 4,
-    .preload_textures = 0,
+#ifdef TARGET_VITA
+    .render_scale  = 100,
+    .render_w      = 960,
+    .render_h      = 544,
+    .aspect_mode   = 0,
+    .banner_name   = "",
+    .multithread   = 1,
+    .texture_pack  = "",
+#endif
 };
 
+#ifdef TARGET_VITA
+static const char* SETTINGS_FILE = "ux0:data/AnimalCrossing/settings.ini";
+#else
 static const char* SETTINGS_FILE = "settings.ini";
+#endif
 
+#ifdef TARGET_VITA
+static const char* DEFAULT_SETTINGS =
+    "# Animal Crossing Vita Settings\n"
+    "\n"
+    "[Graphics]\n"
+    "# render_scale: 100 (native 960x544), 75 (720x408), 50 (480x272)\n"
+    "render_scale = 100\n"
+    "\n"
+    "# msaa: 0 (off), 2 (2x), 4 (4x) - anti-aliasing, costs GPU performance\n"
+    "msaa = 2\n"
+    "\n"
+    "# aspect_mode: 0 = widescreen (16:9), 1 = original (4:3)\n"
+    "aspect_mode = 0\n"
+    "\n"
+    "# banner: filename in ux0:data/AnimalCrossing/banners/ (empty = none)\n"
+    "banner = \n"
+    "\n"
+    "[Performance]\n"
+    "# multithread: 1 = emu64 on core 1 for ~2x performance, 0 = single-threaded\n"
+    "multithread = 1\n"
+    "\n"
+    "[Textures]\n"
+    "# preload_textures: 0 = off, 1 = load on demand, 2 = preload + cache (recommended)\n"
+    "preload_textures = 0\n"
+    "\n"
+    "# texture_pack: name of .vtc file in ux0:data/AnimalCrossing/texture_packs/ (without .vtc)\n"
+    "# Leave empty for no texture pack. Can also be set in-game Options menu.\n"
+    "texture_pack = \n";
+#else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
     "# Window size (ignored in fullscreen)\n"
@@ -31,6 +77,7 @@ static const char* DEFAULT_SETTINGS =
     "[Enhancements]\n"
     "# Preload HD textures at startup: 0 = off (load on demand), 1 = preload, 2 = preload + cache file (fastest)\n"
     "preload_textures = 0\n";
+#endif
 
 static const char* skip_ws(const char* s) {
     while (*s == ' ' || *s == '\t') s++;
@@ -45,6 +92,17 @@ static void trim_end(char* s) {
     }
 }
 
+#ifdef TARGET_VITA
+static void update_render_dims(int scale) {
+    switch (scale) {
+        case 75:  g_pc_settings.render_w = 720; g_pc_settings.render_h = 408; break;
+        case 50:  g_pc_settings.render_w = 480; g_pc_settings.render_h = 272; break;
+        default:  g_pc_settings.render_w = 960; g_pc_settings.render_h = 544; scale = 100; break;
+    }
+    g_pc_settings.render_scale = scale;
+}
+#endif
+
 static void apply_setting(const char* key, const char* value) {
     int val = atoi(value);
 
@@ -57,11 +115,32 @@ static void apply_setting(const char* key, const char* value) {
     } else if (strcmp(key, "vsync") == 0) {
         if (val == 0 || val == 1) g_pc_settings.vsync = val;
     } else if (strcmp(key, "msaa") == 0) {
+#ifdef TARGET_VITA
+        if (val == 4) g_pc_settings.msaa = 4;
+        else if (val == 2) g_pc_settings.msaa = 2;
+        else g_pc_settings.msaa = 0;
+#else
         if (val == 0 || val == 2 || val == 4 || val == 8)
             g_pc_settings.msaa = val;
+#endif
     } else if (strcmp(key, "preload_textures") == 0) {
         if (val >= 0 && val <= 2) g_pc_settings.preload_textures = val;
     }
+#ifdef TARGET_VITA
+    else if (strcmp(key, "render_scale") == 0) {
+        update_render_dims(val);
+    } else if (strcmp(key, "aspect_mode") == 0) {
+        g_pc_settings.aspect_mode = (val == 1) ? 1 : 0;
+    } else if (strcmp(key, "banner") == 0) {
+        strncpy(g_pc_settings.banner_name, value, sizeof(g_pc_settings.banner_name) - 1);
+        g_pc_settings.banner_name[sizeof(g_pc_settings.banner_name) - 1] = '\0';
+    } else if (strcmp(key, "multithread") == 0) {
+        g_pc_settings.multithread = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "texture_pack") == 0) {
+        strncpy(g_pc_settings.texture_pack, value, sizeof(g_pc_settings.texture_pack) - 1);
+        g_pc_settings.texture_pack[sizeof(g_pc_settings.texture_pack) - 1] = '\0';
+    }
+#endif
 }
 
 static void write_defaults(const char* path) {
@@ -78,6 +157,24 @@ void pc_settings_save(void) {
         printf("[Settings] Failed to write %s\n", SETTINGS_FILE);
         return;
     }
+#ifdef TARGET_VITA
+    fprintf(f, "# Animal Crossing Vita Settings\n\n");
+    fprintf(f, "[Graphics]\n");
+    fprintf(f, "# render_scale: 100 (native 960x544), 75 (720x408), 50 (480x272)\n");
+    fprintf(f, "render_scale = %d\n\n", g_pc_settings.render_scale);
+    fprintf(f, "# msaa: 0 (off), 2 (2x), 4 (4x) - anti-aliasing, costs GPU performance\n");
+    fprintf(f, "msaa = %d\n\n", g_pc_settings.msaa);
+    fprintf(f, "# aspect_mode: 0 = widescreen (16:9), 1 = original (4:3)\n");
+    fprintf(f, "aspect_mode = %d\n\n", g_pc_settings.aspect_mode);
+    fprintf(f, "# banner: filename in ux0:data/AnimalCrossing/banners/ (empty = none)\n");
+    fprintf(f, "banner = %s\n\n", g_pc_settings.banner_name);
+    fprintf(f, "[Performance]\n");
+    fprintf(f, "# multithread: 1 = emu64 on core 1 for ~2x performance, 0 = single-threaded\n");
+    fprintf(f, "multithread = %d\n\n", g_pc_settings.multithread);
+    fprintf(f, "[Textures]\n");
+    fprintf(f, "# texture_pack: name of .vtc file in texture_packs/ (without .vtc), empty = none\n");
+    fprintf(f, "texture_pack = %s\n", g_pc_settings.texture_pack);
+#else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");
     fprintf(f, "window_width = %d\n", g_pc_settings.window_width);
@@ -95,6 +192,7 @@ void pc_settings_save(void) {
     fprintf(f, "[Enhancements]\n");
     fprintf(f, "# Preload HD textures at startup: 0 = off (load on demand), 1 = preload, 2 = preload + cache file (fastest)\n");
     fprintf(f, "preload_textures = %d\n", g_pc_settings.preload_textures);
+#endif
     fclose(f);
     printf("[Settings] Saved %s\n", SETTINGS_FILE);
 }
@@ -125,6 +223,10 @@ void pc_settings_load(void) {
     if (!f) {
         write_defaults(SETTINGS_FILE);
         printf("[Settings] Created default %s\n", SETTINGS_FILE);
+#ifdef TARGET_VITA
+        // apply defaults that need computed fields
+        update_render_dims(g_pc_settings.render_scale);
+#endif
         return;
     }
 
@@ -148,8 +250,16 @@ void pc_settings_load(void) {
         }
     }
     fclose(f);
+
+#ifdef TARGET_VITA
+    printf("[Settings] Loaded %s: render=%dx%d msaa=%d multithread=%d texpack=%s\n",
+           SETTINGS_FILE, g_pc_settings.render_w, g_pc_settings.render_h,
+           g_pc_settings.msaa, g_pc_settings.multithread,
+           g_pc_settings.texture_pack[0] ? g_pc_settings.texture_pack : "(none)");
+#else
     printf("[Settings] Loaded %s: %dx%d fullscreen=%d vsync=%d msaa=%d preload_textures=%d\n",
            SETTINGS_FILE, g_pc_settings.window_width, g_pc_settings.window_height,
            g_pc_settings.fullscreen, g_pc_settings.vsync, g_pc_settings.msaa,
            g_pc_settings.preload_textures);
+#endif
 }

@@ -1,0 +1,109 @@
+/* Specialized shader for CFG10 (perf-CFG1, 4445 draws)
+ * Stage 0: color = lerp(C2, C1, TEXC0), alpha = A1 + TEXA0 * A0
+ * Stage 1: color = TEXC1 + RASC * CPREV, alpha = APREV + TEXA1 * A0
+ * Final: color = tex1.rgb + ras.rgb * lerp(C2, C1, tex0.rgb)
+ *        alpha = A1 + (tex0.a + tex1.a) * A0
+ *
+ * TEV inputs:
+ *   S0 c(6,4,8,15) a(7,4,1,2)  — TEXMAP0
+ *   S1 c(15,10,0,8) a(7,4,1,0) — TEXMAP1
+ *
+ * Two-texture water shader: tex0 and tex1 scroll independently.
+ * Uses half precision for 2x throughput on SGX543.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture1,
+    uniform half u_tev1_tc_src,
+
+    /* Stage 0: A = pre-resolved C2 color, B = pre-resolved C1 color */
+    uniform half3 u_tev0_ca,
+    uniform half3 u_tev0_cb,
+    /* Stage 0: alpha values — .z = pre-resolved A0, .w = pre-resolved A1 (D input) */
+    uniform half4 u_tev0_aval,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Texture sample — stage 0 (TEXMAP0) */
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step((half)0.5, u_use_texture0));
+
+    /* Texture sample — stage 1 (TEXMAP1) */
+    float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step((half)0.5, u_use_texture1));
+
+    /* Rasterizer color */
+    half3 matC = lerp(u_mat_color.rgb, v_color.rgb, step((half)0.5, u_chan_mat_src));
+    half matA = lerp(u_mat_color.a, v_color.a, step((half)0.5, u_alpha_mat_src));
+
+#ifdef LIGHTING
+    half3 n = (half3)normalize(v_normal);
+    half3 ambC_h = lerp(u_amb_color.rgb, v_color.rgb, step(0.5h, u_chan_amb_src));
+    half3 lA = ambC_h;
+    lA += max(dot(n, u_light_pos[0]), 0.0h) * u_light_color[0].rgb;
+    lA += max(dot(n, u_light_pos[1]), 0.0h) * u_light_color[1].rgb;
+    lA += max(dot(n, u_light_pos[2]), 0.0h) * u_light_color[2].rgb;
+    lA += max(dot(n, u_light_pos[3]), 0.0h) * u_light_color[3].rgb;
+    lA += max(dot(n, u_light_pos[4]), 0.0h) * u_light_color[4].rgb;
+    lA += max(dot(n, u_light_pos[5]), 0.0h) * u_light_color[5].rgb;
+    lA += max(dot(n, u_light_pos[6]), 0.0h) * u_light_color[6].rgb;
+    lA += max(dot(n, u_light_pos[7]), 0.0h) * u_light_color[7].rgb;
+    matC *= saturate(lA);
+    matA = lerp(matA, matA * u_amb_color.a, step((half)0.5, u_alpha_lighting_enabled));
+#endif
+
+    half3 ras_c = lerp(half3(1,1,1), matC, step((half)0.5, u_num_chans));
+
+    /* S0: color = lerp(C2, C1, tex0), then S1: color = tex1 + ras * S0 */
+    half3 s0_c = lerp(u_tev0_ca, u_tev0_cb, tex0.rgb);
+    half3 prev_c = tex1.rgb + ras_c * s0_c;
+
+    /* S0 alpha: A1 + tex0.a * A0, S1 alpha: S0 + tex1.a * A0
+     * Final: A1 + (tex0.a + tex1.a) * A0 = aval.w + (tex0.a + tex1.a) * aval.z */
+    half prev_a = u_tev0_aval.w + (tex0.a + tex1.a) * u_tev0_aval.z;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    half fd = max(u_fog_end - u_fog_start, (half)0.001);
+    half ff = saturate((v_fog_z - u_fog_start) / fd);
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

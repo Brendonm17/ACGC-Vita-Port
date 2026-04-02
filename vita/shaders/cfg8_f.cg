@@ -1,0 +1,77 @@
+/* Specialized shader for CFG8: Ocean edge 1-stage.
+ * Stage 0: color = lerp(reg_A, reg_B, TEXC), alpha = reg_B_alpha * TEXA
+ *
+ * Covers ocean edge draws (72/frame near ocean):
+ *   S0 c(6,4,8,15) a(7,2,4,7) = lerp(C2,C1,tex) color, A2*TEXA alpha
+ *
+ * Similar to CFG5 but alpha inputs B/C are swapped:
+ *   CFG5: a(7,4,C,7) = TEXA * register  (B=TEXA, C=register)
+ *   CFG8: a(7,B,4,7) = register * TEXA  (B=register, C=TEXA)
+ *
+ * Uses half precision for 2x throughput on SGX543.
+ * Optimized: rcp() fog.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+
+    /* Stage 0: A and B pre-resolved colors for lerp */
+    uniform half3 u_tev0_ca,
+    uniform half3 u_tev0_cb,
+    /* Stage 0: alpha values — .y = B register (pre-resolved, e.g. A2) */
+    uniform half4 u_tev0_aval,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform float3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Texture sample */
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    /* Stage 0 color: lerp(A, B, tex.rgb) = (1-tex)*A + tex*B */
+    half3 prev_c = lerp(u_tev0_ca, u_tev0_cb, tex0.rgb);
+
+    /* Stage 0 alpha: register * TEXA (B=register in aval.y, C=TEXA) */
+    half prev_a = u_tev0_aval.y * tex0.a;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

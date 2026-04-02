@@ -1,0 +1,10 @@
+/* composite_v.cg — fullscreen quad vertex shader for water FBO compositing.
+ * Positions are in clip space (-1 to 1), texcoords computed from position. */
+void main(
+    float2 a_position : ATTR0,
+    out float4 out_position : POSITION,
+    out float2 v_texcoord : TEXCOORD0
+) {
+    v_texcoord = a_position * 0.5 + 0.5;
+    out_position = float4(a_position, 0.0, 1.0);
+}

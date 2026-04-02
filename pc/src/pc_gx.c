@@ -1,6 +1,12 @@
-/* pc_gx.c - GX API → OpenGL 3.3: state management, vertex submission, draw dispatch */
+// pc_gx.c - GX API -> OpenGL: state machine, vertex submission, draw dispatch
 #include "pc_gx_internal.h"
+#include "pc_gx_backend.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#include "vita_banner.h"
+#endif
 #include <stddef.h>
+#include <stdlib.h>
 static GLushort quad_index_buf[(PC_GX_MAX_VERTS / 4) * 6];
 #include <math.h>
 #include <dolphin/gx/GXEnum.h>
@@ -16,11 +22,12 @@ typedef struct { u8 r, g, b, a; } GXColor;
 /* --- Global GX State --- */
 PCGXState g_gx;
 
+
 #ifdef PC_ENHANCEMENTS
 /* Aspect correction: factor = gc_aspect/actual_aspect, offset = content left edge in GC coords */
-static float g_aspect_factor = 1.0f;
-static float g_aspect_offset = 0.0f;
-static int   g_aspect_active = 0;
+float g_aspect_factor = 1.0f;
+float g_aspect_offset = 0.0f;
+int   g_aspect_active = 0;
 
 static void pc_gx_update_aspect(void) {
     float gc_aspect = (float)PC_GC_WIDTH / (float)PC_GC_HEIGHT;
@@ -36,7 +43,7 @@ static void pc_gx_update_aspect(void) {
     }
 }
 
-/* EFB capture: keep full-res GL textures from GXCopyTex instead of downsampling to 640x480 */
+// EFB capture: keep full-res GL textures from GXCopyTex
 #define MAX_EFB_CAPTURES 4
 static struct {
     u32 dest_ptr;
@@ -48,14 +55,14 @@ void pc_gx_efb_capture_store(u32 dest_ptr, GLuint gl_tex) {
     for (int i = 0; i < s_efb_capture_count; i++) {
         if (s_efb_captures[i].dest_ptr == dest_ptr) {
             if (s_efb_captures[i].gl_tex)
-                glDeleteTextures(1, &s_efb_captures[i].gl_tex);
+                PC_DELETE_TEXTURE(s_efb_captures[i].gl_tex);
             s_efb_captures[i].gl_tex = gl_tex;
             return;
         }
     }
     if (s_efb_capture_count >= MAX_EFB_CAPTURES) {
         if (s_efb_captures[0].gl_tex)
-            glDeleteTextures(1, &s_efb_captures[0].gl_tex);
+            PC_DELETE_TEXTURE(s_efb_captures[0].gl_tex);
         memmove(&s_efb_captures[0], &s_efb_captures[1],
                 (MAX_EFB_CAPTURES - 1) * sizeof(s_efb_captures[0]));
         s_efb_capture_count = MAX_EFB_CAPTURES - 1;
@@ -76,7 +83,7 @@ GLuint pc_gx_efb_capture_find(u32 data_ptr) {
 void pc_gx_efb_capture_cleanup(void) {
     for (int i = 0; i < s_efb_capture_count; i++) {
         if (s_efb_captures[i].gl_tex)
-            glDeleteTextures(1, &s_efb_captures[i].gl_tex);
+            PC_DELETE_TEXTURE(s_efb_captures[i].gl_tex);
     }
     s_efb_capture_count = 0;
 }
@@ -137,17 +144,32 @@ static int pc_tex_mtx_id_to_slot(int id) {
 /* Commit pending vertex + flush batch to GL. Used by GXBegin/GXEnd/GXCopyDisp/etc. */
 static void pc_gx_commit_pending_and_flush(void) {
     if (!g_gx.in_begin) return;
+#ifdef TARGET_VITA
+    if (g_gx.vertex_pending) {
+        g_gx.current_vertex_idx++;
+        g_gx.vertex_pending = 0;
+    }
+#else
     if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_MAX_VERTS) {
         g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
         g_gx.current_vertex_idx++;
         g_gx.vertex_pending = 0;
     }
+#endif
     g_gx.in_begin = 0;
     if (g_gx.current_vertex_idx > 0)
         pc_gx_flush_vertices();
 }
 
-/* emu64 omits GXEnd() — flush when expected vertex count is reached so the
+// discard in-progress batch after crash recovery (prevent garbage draws)
+void pc_gx_abort_batch(void) {
+    g_gx.in_begin = 0;
+    g_gx.vertex_pending = 0;
+    g_gx.current_vertex_idx = 0;
+    g_gx.expected_vertex_count = 0;
+}
+
+/* emu64 omits GXEnd() -flush when expected vertex count is reached so the
  * batch renders with the state it was built with, not subsequent state changes. */
 void pc_gx_flush_if_begin_complete(void) {
     if (!g_gx.in_begin || g_gx.expected_vertex_count <= 0) return;
@@ -169,6 +191,18 @@ int pc_emu64_frame_cull_rejected = 0;
 
 void pc_gx_init(void) {
     memset(&g_gx, 0, sizeof(g_gx));
+    for (int i = 0; i < 8; i++) g_gx.gl_tex_deferred[i] = -1;
+
+    // default to GC dimensions so first draw before GXSetViewport works
+    g_gx.viewport[2] = 640.0f;
+    g_gx.viewport[3] = 480.0f;
+    g_gx.viewport[5] = 1.0f;
+    g_gx.scissor[2] = 640;
+    g_gx.scissor[3] = 480;
+
+#ifdef TARGET_VITA
+    vita_cmdbuf_init();
+#endif
 
     g_gx.projection_type = GX_PERSPECTIVE;
     g_gx.num_tev_stages = 1;
@@ -224,6 +258,23 @@ void pc_gx_init(void) {
         quad_index_buf[q * 6 + 5] = base + 3;
     }
 
+#ifdef TARGET_VITA
+    gl_cache_reset();
+    // no VAO on VitaGL
+    glGenBuffers(1, &g_gx.vbo);
+    glGenBuffers(1, &g_gx.ebo);
+    g_gx.vao = 0;
+    glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+    glBufferData(GL_ARRAY_BUFFER, PC_GX_MAX_VERTS * sizeof(PCGXVertex), NULL, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
+    glEnableVertexAttribArray(3);
+    vita_set_vertex_attrib_pointers();
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_index_buf), quad_index_buf, GL_STATIC_DRAW);
+#else
     glGenVertexArrays(1, &g_gx.vao);
     glGenBuffers(1, &g_gx.vbo);
     glGenBuffers(1, &g_gx.ebo);
@@ -248,6 +299,7 @@ void pc_gx_init(void) {
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(quad_index_buf), quad_index_buf, GL_STATIC_DRAW);
 
     glBindVertexArray(0);
+#endif
 
     pc_gx_tev_init();
     pc_gx_texture_init();
@@ -261,6 +313,11 @@ void pc_gx_init(void) {
 }
 
 void pc_gx_begin_frame(void) {
+    // deferred tex deletes happen at end of submit_frame, not here
+
+#ifdef TARGET_VITA
+    vita_cmdbuf_begin_frame();
+#endif
     pc_emu64_frame_cmds = 0;
     pc_emu64_frame_crashes = 0;
     pc_emu64_frame_noop_cmds = 0;
@@ -269,19 +326,58 @@ void pc_gx_begin_frame(void) {
     pc_emu64_frame_dl_cmds = 0;
     pc_emu64_frame_cull_visible = 0;
     pc_emu64_frame_cull_rejected = 0;
+#ifdef TARGET_VITA
+    vita_stats.draw_calls = 0;
+    vita_stats.shader_switches = 0;
+#else
     pc_gx_draw_call_count = 0;
+    pc_gx_shader_switch_count = 0;
+#endif
+    vita_tev_specialized_draws = 0;
+    vita_tev_complex_draws = 0;
+    vita_tev_alpha_test_draws = 0;
     g_pc_widescreen_stretch = 0;
-    /* glClear respects write masks — must enable all before clearing */
+    // glClear respects write masks, enable all before clearing
     glDepthMask(GL_TRUE);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 #ifdef PC_ENHANCEMENTS
     pc_gx_update_aspect();
     glDisable(GL_SCISSOR_TEST);
+#ifdef TARGET_VITA
+    banner_update();
+    if (g_pc_settings.aspect_mode == 1 && g_aspect_active) {
+        int content_w, bar_w;
+        vita_get_43_layout(&content_w, &bar_w);
+
+        // clear full screen black first
+        glViewport(0, 0, g_pc_window_w, g_pc_window_h);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // scissor to 4:3 content area so game clear won't touch bars
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(bar_w, 0, content_w, g_pc_window_h);
+        glViewport(bar_w, 0, content_w, g_pc_window_h);
+    } else
+#endif
     glViewport(0, 0, g_pc_window_w, g_pc_window_h);
 #endif
-    glClearDepth(g_gx.clear_depth);
+    PC_CLEAR_DEPTH(g_gx.clear_depth);
+#ifdef TARGET_VITA
+    // alpha must be 1.0 on Vita (GXM requirement)
+    glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], 1.0f);
+#else
     glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], g_gx.clear_color[3]);
+#endif
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+#ifdef TARGET_VITA
+    glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+
+    // glClear clobbers the active shader in VitaGL
+    if (g_gx.current_shader) {
+        glUseProgram(g_gx.current_shader);
+    }
+#endif
 }
 
 void pc_gx_shutdown(void) {
@@ -293,12 +389,18 @@ void pc_gx_shutdown(void) {
 
     if (g_gx.ebo) glDeleteBuffers(1, &g_gx.ebo);
     if (g_gx.vbo) glDeleteBuffers(1, &g_gx.vbo);
+#ifndef TARGET_VITA
     if (g_gx.vao) glDeleteVertexArrays(1, &g_gx.vao);
+#endif
+
+#ifdef TARGET_VITA
+    vita_cmdbuf_shutdown();
+#endif
 }
 
 /* --- Vertex Submission --- */
 void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
-    /* Auto-flush previous batch if GXEnd was omitted (normal on real HW) */
+    // auto-flush if GXEnd was omitted (normal on real HW)
     pc_gx_commit_pending_and_flush();
 
     g_gx.current_primitive = primitive;
@@ -307,11 +409,29 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     g_gx.current_vertex_idx = 0;
     g_gx.in_begin = 1;
     g_gx.vertex_pending = 0;
-    memset(&g_gx.current_vertex, 0, sizeof(PCGXVertex));
+#ifdef TARGET_VITA
+    // direct-write path
+#else
+    /* Clear vertex without full memset -position/normal/texcoord zeroed,
+     * color0 set to white (GX default). Avoids 48-byte memset per batch. */
+    g_gx.current_vertex.position[0] = 0.0f;
+    g_gx.current_vertex.position[1] = 0.0f;
+    g_gx.current_vertex.position[2] = 0.0f;
+    g_gx.current_vertex.normal[0] = 0.0f;
+    g_gx.current_vertex.normal[1] = 0.0f;
+    g_gx.current_vertex.normal[2] = 0.0f;
     g_gx.current_vertex.color0[0] = 255;
     g_gx.current_vertex.color0[1] = 255;
     g_gx.current_vertex.color0[2] = 255;
     g_gx.current_vertex.color0[3] = 255;
+#ifndef TARGET_VITA
+    g_gx.current_vertex.color1[0] = 0;
+    g_gx.current_vertex.color1[1] = 0;
+    g_gx.current_vertex.color1[2] = 0;
+    g_gx.current_vertex.color1[3] = 0;
+#endif
+    memset(g_gx.current_vertex.texcoord, 0, sizeof(g_gx.current_vertex.texcoord));
+#endif
 }
 
 void GXEnd(void) {
@@ -319,27 +439,56 @@ void GXEnd(void) {
 }
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
+#ifdef TARGET_VITA
+    // direct-write to vertex_buffer[]
+    if (g_gx.vertex_pending) {
+        g_gx.current_vertex_idx++;
+    }
+    if (g_gx.current_vertex_idx >= PC_GX_MAX_VERTS) {
+        g_gx.vertex_pending = 0;
+        return;
+    }
+    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    v->position[0] = x;
+    v->position[1] = y;
+    v->position[2] = z;
+    v->normal[0] = 0.0f;
+    v->normal[1] = 0.0f;
+    v->normal[2] = 0.0f;
+    *(u32*)v->color0 = 0xFFFFFFFF;
+#ifndef TARGET_VITA
+    *(u32*)v->color1 = 0;          /* single 32-bit store */
+#endif
+    v->texcoord[0][0] = 0.0f;
+    v->texcoord[0][1] = 0.0f;
+    v->texcoord[1][0] = 0.0f;
+    v->texcoord[1][1] = 0.0f;
+    g_gx.vertex_pending = 1;
+#else
     /* Deferred commit: position call commits the previous vertex */
     if (g_gx.vertex_pending && g_gx.current_vertex_idx < PC_GX_MAX_VERTS) {
         g_gx.vertex_buffer[g_gx.current_vertex_idx] = g_gx.current_vertex;
         g_gx.current_vertex_idx++;
     }
 
-    /* Reset vertex but carry last color forward */
-    u8 r = g_gx.current_vertex.color0[0];
-    u8 g = g_gx.current_vertex.color0[1];
-    u8 b = g_gx.current_vertex.color0[2];
-    u8 a = g_gx.current_vertex.color0[3];
-    memset(&g_gx.current_vertex, 0, sizeof(PCGXVertex));
-    g_gx.current_vertex.color0[0] = r;
-    g_gx.current_vertex.color0[1] = g;
-    g_gx.current_vertex.color0[2] = b;
-    g_gx.current_vertex.color0[3] = a;
-
+    /* Reset vertex: only zero fields not immediately overwritten.
+     * Position is set below. Color0 carries forward. Only normal/color1/texcoord need clearing. */
     g_gx.current_vertex.position[0] = x;
     g_gx.current_vertex.position[1] = y;
     g_gx.current_vertex.position[2] = z;
+    g_gx.current_vertex.normal[0] = 0.0f;
+    g_gx.current_vertex.normal[1] = 0.0f;
+    g_gx.current_vertex.normal[2] = 0.0f;
+#ifndef TARGET_VITA
+    g_gx.current_vertex.color1[0] = 0;
+    g_gx.current_vertex.color1[1] = 0;
+    g_gx.current_vertex.color1[2] = 0;
+    g_gx.current_vertex.color1[3] = 0;
+#endif
+    memset(g_gx.current_vertex.texcoord, 0, sizeof(g_gx.current_vertex.texcoord));
+    /* color0 carries forward from previous vertex (no save/restore needed) */
     g_gx.vertex_pending = 1;
+#endif
 }
 
 void GXPosition3u16(u16 x, u16 y, u16 z) { GXPosition3f32((f32)x, (f32)y, (f32)z); }
@@ -363,9 +512,16 @@ void GXPosition1x16(u16 index) {
 void GXPosition1x8(u8 index) { GXPosition1x16(index); }
 
 void GXNormal3f32(f32 x, f32 y, f32 z) {
+#ifdef TARGET_VITA
+    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    v->normal[0] = x;
+    v->normal[1] = y;
+    v->normal[2] = z;
+#else
     g_gx.current_vertex.normal[0] = x;
     g_gx.current_vertex.normal[1] = y;
     g_gx.current_vertex.normal[2] = z;
+#endif
 }
 void GXNormal3s16(s16 x, s16 y, s16 z) {
     GXNormal3f32(x / 32767.0f, y / 32767.0f, z / 32767.0f);
@@ -383,10 +539,18 @@ void GXNormal1x16(u16 index) {
 void GXNormal1x8(u8 index) { GXNormal1x16(index); }
 
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
+#ifdef TARGET_VITA
+    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    v->color0[0] = r;
+    v->color0[1] = g;
+    v->color0[2] = b;
+    v->color0[3] = a;
+#else
     g_gx.current_vertex.color0[0] = r;
     g_gx.current_vertex.color0[1] = g;
     g_gx.current_vertex.color0[2] = b;
     g_gx.current_vertex.color0[3] = a;
+#endif
 }
 void GXColor3u8(u8 r, u8 g, u8 b) { GXColor4u8(r, g, b, 255); }
 void GXColor1u32(u32 clr) {
@@ -408,13 +572,19 @@ void GXColor4f32(float r, float g, float b, float a) {
 }
 
 void GXTexCoord2f32(f32 s, f32 t) {
-    /* Channel 0 only — emu64 emits one texcoord; multi-tex uses matrix transforms */
+#ifdef TARGET_VITA
+    // EFB V-flip: VitaGL glCopyTexImage2D is flipped vs desktop GL
+    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    v->texcoord[0][0] = s;
+    v->texcoord[0][1] = g_gx.efb_v_flip ? (1.0f - t) : t;
+#else
     g_gx.current_vertex.texcoord[0][0] = s;
     g_gx.current_vertex.texcoord[0][1] = t;
+#endif
 }
 void GXTexCoord2u16(u16 s, u16 t) { GXTexCoord2f32((f32)s, (f32)t); }
 void GXTexCoord2s16(s16 s, s16 t) {
-    /* No frac scaling — emu64 already provides pre-scaled texcoords */
+    // emu64 already provides pre-scaled texcoords
     GXTexCoord2f32((f32)s, (f32)t);
 }
 void GXTexCoord2u8(u8 s, u8 t) { GXTexCoord2f32((f32)s, (f32)t); }
@@ -435,8 +605,23 @@ void GXTexCoord1x16(u16 index) {
 }
 void GXTexCoord1x8(u8 index) { GXTexCoord1x16(index); }
 
-/* --- Uniform Location Cache --- */
-static void pc_gx_cache_uniform_locations(GLuint shader) {
+// per-shader uniform location cache (avoids ~800 string lookups/frame)
+#define ULOC_CACHE_MAX 256
+typedef struct { GLuint shader; typeof(g_gx.uloc) locs; } ULocCacheEntry;
+static ULocCacheEntry uloc_cache[ULOC_CACHE_MAX];
+static int uloc_cache_count = 0;
+
+void pc_gx_cache_uniform_locations(GLuint shader) {
+    /* Per-shader uloc cache -uniform locations are stable after link,
+     * so no probe needed. Just match by shader ID. */
+    for (int c = 0; c < uloc_cache_count; c++) {
+        if (uloc_cache[c].shader == shader) {
+            g_gx.uloc = uloc_cache[c].locs;
+            return;
+        }
+    }
+
+    // not cached, do full lookup
     char name[48];
     int i;
     #define UL(n) glGetUniformLocation(shader, n)
@@ -493,6 +678,21 @@ static void pc_gx_cache_uniform_locations(GLuint shader) {
         snprintf(name, sizeof(name), "u_light_color[%d]", i);
         g_gx.uloc.light_color[i] = UL(name);
     }
+    // vertex shader lighting uniforms (u_vs_* prefix)
+    g_gx.uloc.vs_mat_color = UL("u_vs_mat_color");
+    g_gx.uloc.vs_amb_color = UL("u_vs_amb_color");
+    g_gx.uloc.vs_chan_mat_src = UL("u_vs_chan_mat_src");
+    g_gx.uloc.vs_chan_amb_src = UL("u_vs_chan_amb_src");
+    g_gx.uloc.vs_alpha_mat_src = UL("u_vs_alpha_mat_src");
+    g_gx.uloc.vs_alpha_lit = UL("u_vs_alpha_lit");
+    {
+        const char* ldir_names[] = {"u_vs_ldir0","u_vs_ldir1","u_vs_ldir2","u_vs_ldir3","u_vs_ldir4","u_vs_ldir5","u_vs_ldir6","u_vs_ldir7"};
+        const char* lcol_names[] = {"u_vs_lcol0","u_vs_lcol1","u_vs_lcol2","u_vs_lcol3","u_vs_lcol4","u_vs_lcol5","u_vs_lcol6","u_vs_lcol7"};
+        for (i = 0; i < 8; i++) {
+            g_gx.uloc.vs_ldir[i] = UL(ldir_names[i]);
+            g_gx.uloc.vs_lcol[i] = UL(lcol_names[i]);
+        }
+    }
 
     g_gx.uloc.texmtx_enable[0] = UL("u_texmtx_enable");
     g_gx.uloc.texmtx_row0[0]  = UL("u_texmtx_row0");
@@ -529,7 +729,7 @@ static void pc_gx_cache_uniform_locations(GLuint shader) {
     g_gx.uloc.fog_end   = UL("u_fog_end");
     g_gx.uloc.fog_color = UL("u_fog_color");
 
-    /* Per-stage bias/scale/clamp/output */
+    // per-stage bias/scale/clamp/output
     for (i = 0; i < PC_GX_MAX_TEV_STAGES; i++) {
         snprintf(name, sizeof(name), "u_tev%d_bsc", i);
         g_gx.uloc.tev_bsc[i] = UL(name);
@@ -540,17 +740,62 @@ static void pc_gx_cache_uniform_locations(GLuint shader) {
     }
     g_gx.uloc.swap_table = UL("u_swap_table");
 
+#ifdef TARGET_VITA
+    // pre-resolved TEV input uniforms (CG specialized shaders only)
+    for (i = 0; i < 3; i++) {
+        snprintf(name, sizeof(name), "u_tev%d_csrc", i);
+        g_gx.uloc.tev_csrc[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_ca", i);
+        g_gx.uloc.tev_ca[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_cb", i);
+        g_gx.uloc.tev_cb[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_cc", i);
+        g_gx.uloc.tev_cc[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_cd", i);
+        g_gx.uloc.tev_cd[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_asrc", i);
+        g_gx.uloc.tev_asrc[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_aval", i);
+        g_gx.uloc.tev_aval[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_param", i);
+        g_gx.uloc.tev_param[i] = UL(name);
+        snprintf(name, sizeof(name), "u_tev%d_aparam", i);
+        g_gx.uloc.tev_aparam[i] = UL(name);
+    }
+#endif
+
     #undef UL
+
+    // cache for this shader
+    if (uloc_cache_count < ULOC_CACHE_MAX) {
+        uloc_cache[uloc_cache_count].shader = shader;
+        uloc_cache[uloc_cache_count].locs = g_gx.uloc;
+        uloc_cache_count++;
+    }
 }
 
 /* --- Vertex Flush --- */
+#ifndef TARGET_VITA
 int pc_gx_draw_call_count = 0;
+int pc_gx_merged_draw_count = 0;  /* actual glDrawElements calls in submit_frame */
+int pc_gx_dropped_draws = 0;      /* draws dropped due to buffer overflow */
+int pc_gx_shader_switch_count = 0; /* shader program switches in submit_frame */
+#endif
+
+#ifdef TARGET_VITA
+void vita_dump_lighting(void) { }
+#endif
 
 void pc_gx_flush_vertices(void) {
     int count = g_gx.current_vertex_idx;
     if (count == 0) return;
 
-    pc_gx_draw_call_count++;
+    PC_STAT_DRAW_INC();
+
+#ifdef TARGET_VITA
+    vita_gx_flush_vertices_cmdbuf(count);
+    return;
+#endif
 
     GLuint shader = pc_gx_tev_get_shader(&g_gx);
     if (shader && shader != g_gx.current_shader) {
@@ -558,6 +803,13 @@ void pc_gx_flush_vertices(void) {
         PC_GL_CHECK("glUseProgram");
         g_gx.current_shader = shader;
         pc_gx_cache_uniform_locations(shader);
+        // sampler units never change, set once per shader switch
+        {
+            GLint sloc;
+            sloc = g_gx.uloc.texture0; if (sloc >= 0) glUniform1i(sloc, 0);
+            sloc = g_gx.uloc.texture1; if (sloc >= 0) glUniform1i(sloc, 1);
+            sloc = g_gx.uloc.texture2; if (sloc >= 0) glUniform1i(sloc, 2);
+        }
         g_gx.dirty = PC_GX_DIRTY_ALL;
     }
 
@@ -565,15 +817,21 @@ void pc_gx_flush_vertices(void) {
     glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
     glBufferData(GL_ARRAY_BUFFER, count * sizeof(PCGXVertex), g_gx.vertex_buffer, GL_STREAM_DRAW);
 
-    /* Upload only dirty state groups */
+    // upload only dirty state groups
     if (shader) {
         GLint loc;
         unsigned int dirty = g_gx.dirty;
         #define UL(field) g_gx.uloc.field
+        #define UNI1I(v)         glUniform1i(loc, (v))
+        #define UNI2I(a,b)       glUniform2i(loc, (a),(b))
+        #define UNI3I(a,b,c)     glUniform3i(loc, (a),(b),(c))
+        #define UNI4I(a,b,c,d)   glUniform4i(loc, (a),(b),(c),(d))
 
         if (dirty & PC_GX_DIRTY_PROJECTION) {
             loc = UL(projection);
-            if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_TRUE, (float*)g_gx.projection_mtx);
+            if (loc >= 0) {
+                glUniformMatrix4fv(loc, 1, GL_TRUE, (float*)g_gx.projection_mtx);
+            }
         }
 
         if (dirty & PC_GX_DIRTY_MODELVIEW) {
@@ -588,7 +846,9 @@ void pc_gx_flush_vertices(void) {
                 glUniformMatrix4fv(loc, 1, GL_TRUE, mv44);
             }
             loc = UL(normal_mtx);
-            if (loc >= 0) glUniformMatrix3fv(loc, 1, GL_TRUE, (const float*)g_gx.nrm_mtx[g_gx.current_mtx]);
+            if (loc >= 0) {
+                glUniformMatrix3fv(loc, 1, GL_TRUE, (const float*)g_gx.nrm_mtx[g_gx.current_mtx]);
+            }
         }
 
         if (dirty & PC_GX_DIRTY_TEV_COLORS) {
@@ -599,16 +859,16 @@ void pc_gx_flush_vertices(void) {
         }
 
         if (dirty & PC_GX_DIRTY_TEV_STAGES) {
-            loc = UL(num_tev_stages); if (loc >= 0) glUniform1i(loc, g_gx.num_tev_stages);
+            loc = UL(num_tev_stages); if (loc >= 0) UNI1I(g_gx.num_tev_stages);
             for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < g_gx.num_tev_stages; s++) {
                 PCGXTevStage* ts = &g_gx.tev_stages[s];
-                loc = UL(tev_color_in[s]); if (loc >= 0) glUniform4i(loc, ts->color_a, ts->color_b, ts->color_c, ts->color_d);
-                loc = UL(tev_alpha_in[s]); if (loc >= 0) glUniform4i(loc, ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
-                loc = UL(tev_color_op[s]); if (loc >= 0) glUniform1i(loc, ts->color_op);
-                loc = UL(tev_alpha_op[s]); if (loc >= 0) glUniform1i(loc, ts->alpha_op);
-                loc = UL(tev_bsc[s]);  if (loc >= 0) glUniform4i(loc, ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
-                loc = UL(tev_out[s]);  if (loc >= 0) glUniform4i(loc, ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
-                loc = UL(tev_swap[s]); if (loc >= 0) glUniform2i(loc, ts->ras_swap, ts->tex_swap);
+                loc = UL(tev_color_in[s]); if (loc >= 0) UNI4I(ts->color_a, ts->color_b, ts->color_c, ts->color_d);
+                loc = UL(tev_alpha_in[s]); if (loc >= 0) UNI4I(ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
+                loc = UL(tev_color_op[s]); if (loc >= 0) UNI1I(ts->color_op);
+                loc = UL(tev_alpha_op[s]); if (loc >= 0) UNI1I(ts->alpha_op);
+                loc = UL(tev_bsc[s]);  if (loc >= 0) UNI4I(ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
+                loc = UL(tev_out[s]);  if (loc >= 0) UNI4I(ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
+                loc = UL(tev_swap[s]); if (loc >= 0) UNI2I(ts->ras_swap, ts->tex_swap);
             }
             loc = UL(tev_ksel);
             if (loc >= 0) {
@@ -627,7 +887,7 @@ void pc_gx_flush_vertices(void) {
                     if (tc >= 0 && tc < 8) tc_src = tc;
                     else tc_src = s;
                 }
-                loc = UL(tev_tc_src[s]); if (loc >= 0) glUniform1i(loc, tc_src);
+                loc = UL(tev_tc_src[s]); if (loc >= 0) UNI1I(tc_src);
             }
         }
 
@@ -648,31 +908,35 @@ void pc_gx_flush_vertices(void) {
         if (dirty & PC_GX_DIRTY_KONST) {
             loc = UL(kcolor); if (loc >= 0) glUniform4fv(loc, 4, (const float*)g_gx.tev_k_colors);
         }
-
         if (dirty & PC_GX_DIRTY_ALPHA_CMP) {
             loc = UL(alpha_comp0); if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp0);
-            loc = UL(alpha_ref0);  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref0);
             loc = UL(alpha_op);    if (loc >= 0) glUniform1i(loc, g_gx.alpha_op);
             loc = UL(alpha_comp1); if (loc >= 0) glUniform1i(loc, g_gx.alpha_comp1);
+            loc = UL(alpha_ref0);  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref0);
             loc = UL(alpha_ref1);  if (loc >= 0) glUniform1i(loc, g_gx.alpha_ref1);
         }
 
         if (dirty & PC_GX_DIRTY_LIGHTING) {
-            loc = UL(lighting_enabled); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_enable[0]);
+            loc = UL(lighting_enabled); if (loc >= 0) UNI1I(g_gx.chan_ctrl_enable[0]);
             loc = UL(mat_color);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.chan_mat_color[0]);
             loc = UL(amb_color);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.chan_amb_color[0]);
-            loc = UL(chan_mat_src); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_mat_src[0]);
-            loc = UL(chan_amb_src); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_amb_src[0]);
-            loc = UL(num_chans);  if (loc >= 0) glUniform1i(loc, g_gx.num_chans);
-            loc = UL(alpha_lighting_enabled); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_enable[1]);
-            loc = UL(alpha_mat_src); if (loc >= 0) glUniform1i(loc, g_gx.chan_ctrl_mat_src[1]);
+            loc = UL(chan_mat_src); if (loc >= 0) UNI1I(g_gx.chan_ctrl_mat_src[0]);
+            loc = UL(chan_amb_src); if (loc >= 0) UNI1I(g_gx.chan_ctrl_amb_src[0]);
+            loc = UL(num_chans);  if (loc >= 0) UNI1I(g_gx.num_chans);
+            loc = UL(alpha_lighting_enabled); if (loc >= 0) UNI1I(g_gx.chan_ctrl_enable[1]);
+            loc = UL(alpha_mat_src); if (loc >= 0) UNI1I(g_gx.chan_ctrl_mat_src[1]);
             {
                 int color_light_mask = g_gx.chan_ctrl_light_mask[0];
-                loc = UL(light_mask); if (loc >= 0) glUniform1i(loc, color_light_mask);
+                loc = UL(light_mask); if (loc >= 0) UNI1I(color_light_mask);
                 float lpos[8][3], lcol[8][4];
                 for (int i = 0; i < 8; i++) {
-                    memcpy(lpos[i], g_gx.lights[i].pos, sizeof(lpos[i]));
-                    memcpy(lcol[i], g_gx.lights[i].color, sizeof(lcol[i]));
+                    if (color_light_mask & (1 << i)) {
+                        pc_normalize_light_dir(g_gx.lights[i].pos, lpos[i]);
+                        memcpy(lcol[i], g_gx.lights[i].color, sizeof(lcol[i]));
+                    } else {
+                        lpos[i][0] = 0.0f; lpos[i][1] = 0.0f; lpos[i][2] = 1.0f;
+                        lcol[i][0] = lcol[i][1] = lcol[i][2] = lcol[i][3] = 0.0f;
+                    }
                 }
                 loc = UL(light_pos[0]);   if (loc >= 0) glUniform3fv(loc, 8, &lpos[0][0]);
                 loc = UL(light_color[0]); if (loc >= 0) glUniform4fv(loc, 8, &lcol[0][0]);
@@ -684,13 +948,13 @@ void pc_gx_flush_vertices(void) {
                 int mtx_id = g_gx.tex_gen_mtx[tg];
                 int slot = pc_tex_mtx_id_to_slot(mtx_id);
                 int has_mtx = (slot >= 0 && slot < 10);
-                loc = g_gx.uloc.texmtx_enable[tg]; if (loc >= 0) glUniform1i(loc, has_mtx);
+                loc = g_gx.uloc.texmtx_enable[tg]; if (loc >= 0) UNI1I(has_mtx);
                 if (has_mtx) {
                     const float* tm = (const float*)g_gx.tex_mtx[slot];
                     loc = g_gx.uloc.texmtx_row0[tg]; if (loc >= 0) glUniform4f(loc, tm[0], tm[1], tm[2], tm[3]);
                     loc = g_gx.uloc.texmtx_row1[tg]; if (loc >= 0) glUniform4f(loc, tm[4], tm[5], tm[6], tm[7]);
                 }
-                loc = g_gx.uloc.texgen_src[tg]; if (loc >= 0) glUniform1i(loc, g_gx.tex_gen_src[tg]);
+                loc = g_gx.uloc.texgen_src[tg]; if (loc >= 0) UNI1I(g_gx.tex_gen_src[tg]);
             }
         }
 
@@ -709,59 +973,64 @@ void pc_gx_flush_vertices(void) {
                     glBindTexture(GL_TEXTURE_2D, tex_obj_stage[s]);
                 }
             }
-            loc = UL(use_texture0); if (loc >= 0) glUniform1i(loc, use_tex_stage[0]);
-            loc = UL(use_texture1); if (loc >= 0) glUniform1i(loc, use_tex_stage[1]);
-            loc = UL(use_texture2); if (loc >= 0) glUniform1i(loc, use_tex_stage[2]);
-            loc = UL(texture0); if (loc >= 0) glUniform1i(loc, 0);
-            loc = UL(texture1); if (loc >= 0) glUniform1i(loc, 1);
-            loc = UL(texture2); if (loc >= 0) glUniform1i(loc, 2);
+            loc = UL(use_texture0); if (loc >= 0) UNI1I(use_tex_stage[0]);
+            loc = UL(use_texture1); if (loc >= 0) UNI1I(use_tex_stage[1]);
+            loc = UL(use_texture2); if (loc >= 0) UNI1I(use_tex_stage[2]);
+            /* Sampler unit assignments (texture0=0, texture1=1, texture2=2)
+             * are now set once in the shader-switch block above. */
         }
 
-        /* Indirect textures on units 3-6 */
+        // indirect textures on units 3-6
         if (dirty & (PC_GX_DIRTY_INDIRECT | PC_GX_DIRTY_TEXTURES)) {
-            loc = UL(num_ind_stages); if (loc >= 0) glUniform1i(loc, g_gx.num_ind_stages);
-            for (int i = 0; i < g_gx.num_ind_stages && i < 4; i++) {
-                int ind_tex_map = g_gx.ind_order[i].tex_map;
-                if (ind_tex_map >= 0 && ind_tex_map < 8) {
-                    GLuint ind_tex = g_gx.gl_textures[ind_tex_map];
-                    if (ind_tex) {
-                        glActiveTexture(GL_TEXTURE3 + i);
-                        glBindTexture(GL_TEXTURE_2D, ind_tex);
+            loc = UL(num_ind_stages); if (loc >= 0) UNI1I(g_gx.num_ind_stages);
+            if (g_gx.num_ind_stages > 0) {
+                for (int i = 0; i < g_gx.num_ind_stages && i < 4; i++) {
+                    int ind_tex_map = g_gx.ind_order[i].tex_map;
+                    if (ind_tex_map >= 0 && ind_tex_map < 8) {
+                        GLuint ind_tex = g_gx.gl_textures[ind_tex_map];
+                        if (ind_tex) {
+                            glActiveTexture(GL_TEXTURE3 + i);
+                            glBindTexture(GL_TEXTURE_2D, ind_tex);
+                        }
+                    }
+                    loc = UL(ind_tex[i]); if (loc >= 0) glUniform1i(loc, 3 + i);
+                    loc = UL(ind_scale[i]);
+                    if (loc >= 0) {
+                        float s_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_s);
+                        float t_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_t);
+                        glUniform2f(loc, s_scale, t_scale);
                     }
                 }
-                loc = UL(ind_tex[i]); if (loc >= 0) glUniform1i(loc, 3 + i);
-                loc = UL(ind_scale[i]);
-                if (loc >= 0) {
-                    float s_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_s);
-                    float t_scale = 1.0f / (float)(1 << g_gx.ind_order[i].scale_t);
-                    glUniform2f(loc, s_scale, t_scale);
+                for (int i = 0; i < 3; i++) {
+                    float scale_val = ldexpf(1.0f, g_gx.ind_mtx_scale[i] + 17) / 1024.0f;
+                    float packed[6];
+                    for (int j = 0; j < 6; j++)
+                        packed[j] = ((float*)g_gx.ind_mtx[i])[j] * scale_val;
+                    loc = UL(ind_mtx_r0[i]); if (loc >= 0) glUniform3f(loc, packed[0], packed[1], packed[2]);
+                    loc = UL(ind_mtx_r1[i]); if (loc >= 0) glUniform3f(loc, packed[3], packed[4], packed[5]);
                 }
-            }
-            for (int i = 0; i < 3; i++) {
-                float scale_val = ldexpf(1.0f, g_gx.ind_mtx_scale[i] + 17) / 1024.0f;
-                float packed[6];
-                for (int j = 0; j < 6; j++)
-                    packed[j] = ((float*)g_gx.ind_mtx[i])[j] * scale_val;
-                loc = UL(ind_mtx_r0[i]); if (loc >= 0) glUniform3f(loc, packed[0], packed[1], packed[2]);
-                loc = UL(ind_mtx_r1[i]); if (loc >= 0) glUniform3f(loc, packed[3], packed[4], packed[5]);
-            }
-            for (int s = 0; s < g_gx.num_tev_stages && s < PC_GX_MAX_TEV_STAGES; s++) {
-                PCGXTevStage* ts = &g_gx.tev_stages[s];
-                loc = UL(tev_ind_cfg[s]);
-                if (loc >= 0) glUniform4i(loc, ts->ind_stage, ts->ind_mtx, ts->ind_bias, ts->ind_alpha);
-                loc = UL(tev_ind_wrap[s]);
-                if (loc >= 0) glUniform3i(loc, ts->ind_wrap_s, ts->ind_wrap_t, ts->ind_add_prev);
+                for (int s = 0; s < g_gx.num_tev_stages && s < PC_GX_MAX_TEV_STAGES; s++) {
+                    PCGXTevStage* ts = &g_gx.tev_stages[s];
+                    loc = UL(tev_ind_cfg[s]);
+                    if (loc >= 0) UNI4I(ts->ind_stage, ts->ind_mtx, ts->ind_bias, ts->ind_alpha);
+                    loc = UL(tev_ind_wrap[s]);
+                    if (loc >= 0) UNI3I(ts->ind_wrap_s, ts->ind_wrap_t, ts->ind_add_prev);
+                }
             }
         }
         glActiveTexture(GL_TEXTURE0);
 
         if (dirty & PC_GX_DIRTY_FOG) {
-            loc = UL(fog_type);  if (loc >= 0) glUniform1i(loc, g_gx.fog_type);
+            loc = UL(fog_type);  if (loc >= 0) UNI1I(g_gx.fog_type);
             loc = UL(fog_start); if (loc >= 0) glUniform1f(loc, g_gx.fog_start);
             loc = UL(fog_end);   if (loc >= 0) glUniform1f(loc, g_gx.fog_end);
             loc = UL(fog_color);  if (loc >= 0) glUniform4fv(loc, 1, g_gx.fog_color);
         }
 
+        #undef UNI4I
+        #undef UNI3I
+        #undef UNI2I
+        #undef UNI1I
         #undef UL
     }
 
@@ -800,12 +1069,9 @@ void pc_gx_flush_vertices(void) {
     }
 
     if (g_gx.dirty & PC_GX_DIRTY_COLOR_MASK) {
-        glColorMask(
-            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
-            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
-            g_gx.color_update_enable ? GL_TRUE : GL_FALSE,
-            g_gx.alpha_update_enable ? GL_TRUE : GL_FALSE
-        );
+        int rgb = g_gx.color_update_enable ? 1 : 0;
+        int a = g_gx.alpha_update_enable ? 1 : 0;
+        glColorMask(rgb, rgb, rgb, a);
     }
 
     if (g_gx.dirty & PC_GX_DIRTY_CULL) {
@@ -823,7 +1089,6 @@ void pc_gx_flush_vertices(void) {
                 glDisable(GL_BLEND);
                 break;
             case GX_BM_BLEND:
-                glEnable(GL_BLEND);
                 {
                     GLenum src, dst;
                     switch (g_gx.blend_src) {
@@ -848,11 +1113,11 @@ void pc_gx_flush_vertices(void) {
                         case GX_BL_INVDSTALPHA: dst = GL_ONE_MINUS_DST_ALPHA; break;
                         default:                dst = GL_ZERO; break;
                     }
-                    /* DST_ALPHA→SRC_ALPHA: GC EFB alpha semantics differ from GL */
                     if (g_gx.blend_src == GX_BL_DSTALPHA && g_gx.blend_dst == GX_BL_INVDSTALPHA) {
                         src = GL_SRC_ALPHA;
                         dst = GL_ONE_MINUS_SRC_ALPHA;
                     }
+                    glEnable(GL_BLEND);
                     glBlendFunc(src, dst);
                 }
                 break;
@@ -877,8 +1142,9 @@ void pc_gx_flush_vertices(void) {
         PC_GL_CHECK("glDrawArrays");
     }
 
-    if (g_gx.blend_mode == GX_BM_SUBTRACT)
+    if (g_gx.blend_mode == GX_BM_SUBTRACT) {
         glBlendEquation(GL_FUNC_ADD);
+    }
 
     g_gx.dirty = 0;
 }
@@ -922,7 +1188,7 @@ void GXSetProjection(const void* mtx, u32 type) {
     DIRTY(PC_GX_DIRTY_PROJECTION);
     g_gx.projection_type = type;
     memcpy(g_gx.projection_mtx, mtx, sizeof(float) * 12);
-    /* GX only stores 3 rows — 4th row is implicit based on projection type */
+    /* GX only stores 3 rows -4th row is implicit based on projection type */
     if (type == GX_PERSPECTIVE) {
         g_gx.projection_mtx[3][0] = 0.0f;
         g_gx.projection_mtx[3][1] = 0.0f;
@@ -936,7 +1202,10 @@ void GXSetProjection(const void* mtx, u32 type) {
     }
 
 #ifdef PC_ENHANCEMENTS
-    /* Widescreen: 0=hor+ (both), 1=stretch (none), 2=UI (ortho only) */
+    // widescreen: 0=hor+, 1=stretch, 2=UI (ortho only); skip if 4:3 mode
+#ifdef TARGET_VITA
+    if (g_pc_settings.aspect_mode == 0)
+#endif
     if (g_pc_widescreen_stretch == 0 ||
         (g_pc_widescreen_stretch == 2 && type == GX_ORTHOGRAPHIC)) {
         if (g_aspect_active) {
@@ -944,40 +1213,74 @@ void GXSetProjection(const void* mtx, u32 type) {
         }
     }
 #endif
+#ifdef TARGET_VITA
+    {   // pre-transpose for VitaGL column-major upload
+        const float* p = (const float*)g_gx.projection_mtx;
+        float* t = g_gx.projection_mtx_t;
+        t[ 0]=p[ 0]; t[ 1]=p[ 4]; t[ 2]=p[ 8]; t[ 3]=p[12];
+        t[ 4]=p[ 1]; t[ 5]=p[ 5]; t[ 6]=p[ 9]; t[ 7]=p[13];
+        t[ 8]=p[ 2]; t[ 9]=p[ 6]; t[10]=p[10]; t[11]=p[14];
+        t[12]=p[ 3]; t[13]=p[ 7]; t[14]=p[11]; t[15]=p[15];
+    }
+#endif
 }
 
 void GXLoadPosMtxImm(const void* mtx, u32 id) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_MODELVIEW);
     int slot = id / 3;
-    if (slot < 10) memcpy(g_gx.pos_mtx[slot], mtx, sizeof(float) * 12);
+    if (slot < 10) {
+        memcpy(g_gx.pos_mtx[slot], mtx, sizeof(float) * 12);
+#ifdef TARGET_VITA
+        {   // pre-transpose for VitaGL column-major upload
+            const float* s = (const float*)g_gx.pos_mtx[slot];
+            float* t = g_gx.pos_mtx_t[slot];
+            t[ 0]=s[0]; t[ 1]=s[4]; t[ 2]=s[8]; t[ 3]=0.0f;
+            t[ 4]=s[1]; t[ 5]=s[5]; t[ 6]=s[9]; t[ 7]=0.0f;
+            t[ 8]=s[2]; t[ 9]=s[6]; t[10]=s[10]; t[11]=0.0f;
+            t[12]=s[3]; t[13]=s[7]; t[14]=s[11]; t[15]=1.0f;
+        }
+#endif
+        DIRTY(PC_GX_DIRTY_MODELVIEW);
+    }
 }
 
 void GXLoadNrmMtxImm(const void* mtx, u32 id) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_MODELVIEW);
     int slot = id / 3;
     if (slot < 10) {
-        /* Extract upper-left 3x3 from 3x4 row-major Mtx (stride 4, not contiguous) */
         const float* src = (const float*)mtx;
-        g_gx.nrm_mtx[slot][0][0] = src[0]; g_gx.nrm_mtx[slot][0][1] = src[1]; g_gx.nrm_mtx[slot][0][2] = src[2];
-        g_gx.nrm_mtx[slot][1][0] = src[4]; g_gx.nrm_mtx[slot][1][1] = src[5]; g_gx.nrm_mtx[slot][1][2] = src[6];
-        g_gx.nrm_mtx[slot][2][0] = src[8]; g_gx.nrm_mtx[slot][2][1] = src[9]; g_gx.nrm_mtx[slot][2][2] = src[10];
+        float* n = (float*)g_gx.nrm_mtx[slot];
+        n[0] = src[0]; n[1] = src[1]; n[2] = src[2];
+        n[3] = src[4]; n[4] = src[5]; n[5] = src[6];
+        n[6] = src[8]; n[7] = src[9]; n[8] = src[10];
+#ifdef TARGET_VITA
+        {   // pre-transpose for VitaGL column-major upload
+            float* t = g_gx.nrm_mtx_t[slot];
+            t[0]=n[0]; t[1]=n[3]; t[2]=n[6];
+            t[3]=n[1]; t[4]=n[4]; t[5]=n[7];
+            t[6]=n[2]; t[7]=n[5]; t[8]=n[8];
+        }
+#endif
+        DIRTY(PC_GX_DIRTY_MODELVIEW);
     }
 }
 
 void GXLoadTexMtxImm(const void* mtx, u32 id, u32 type) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEXGEN);
     int slot = pc_tex_mtx_id_to_slot((int)id);
-    if (slot >= 0 && slot < 10) memcpy(g_gx.tex_mtx[slot], mtx, sizeof(float) * 12);
+    if (slot >= 0 && slot < 10) {
+        memcpy(g_gx.tex_mtx[slot], mtx, sizeof(float) * 12);
+        DIRTY(PC_GX_DIRTY_TEXGEN);
+    }
 }
 
 void GXSetCurrentMtx(u32 id) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_MODELVIEW);
     u32 slot = id / 3;
-    if (slot < 10) g_gx.current_mtx = slot;
+    if (slot < 10) {
+        DIRTY(PC_GX_DIRTY_MODELVIEW);
+        g_gx.current_mtx = slot;
+    }
 }
 
 void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
@@ -989,12 +1292,19 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
     g_gx.viewport[5] = farz;
 #ifdef PC_ENHANCEMENTS
     {
-        float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
-        float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+        int target_w = g_pc_window_w;
+        int target_h = g_pc_window_h;
+        int vp_offset_x = 0;
+#ifdef TARGET_VITA
+        if (g_pc_settings.aspect_mode == 1 && g_aspect_active)
+            vita_get_43_layout(&target_w, &vp_offset_x);
+#endif
+        float sx = (float)target_w / (float)PC_GC_WIDTH;
+        float sy = (float)target_h / (float)PC_GC_HEIGHT;
         float adj_left = left;
         float adj_wd = wd;
 
-        /* UI mode: remap sub-viewports to match aspect-corrected content */
+        // remap sub-viewports to match aspect-corrected content
         if (g_pc_widescreen_stretch == 2 && g_aspect_active) {
             int is_full = (left < 1.0f && top < 1.0f &&
                            wd > (float)(PC_GC_WIDTH - 1) &&
@@ -1005,17 +1315,22 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
             }
         }
 
-        int gl_x = (int)(adj_left * sx);
+        int gl_x = vp_offset_x + (int)(adj_left * sx);
         int gl_w = (int)(adj_wd * sx);
         int gl_h = (int)(ht * sy);
-        int gl_y = g_pc_window_h - (int)(top * sy) - gl_h;
+        int gl_y = target_h - (int)(top * sy) - gl_h;
+#ifdef TARGET_VITA
+        if (!vita_on_worker_thread)
+#endif
         glViewport(gl_x, gl_y, gl_w, gl_h);
     }
 #else
-    /* GX is Y-down, GL is Y-up */
     glViewport((int)left, PC_GC_HEIGHT - (int)top - (int)ht, (int)wd, (int)ht);
 #endif
-    glDepthRange((double)nearz, (double)farz);
+#ifdef TARGET_VITA
+    if (!vita_on_worker_thread)
+#endif
+    PC_DEPTH_RANGE(nearz, farz);
 }
 
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field) {
@@ -1027,15 +1342,23 @@ void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
     g_gx.scissor[1] = top;
     g_gx.scissor[2] = wd;
     g_gx.scissor[3] = ht;
+    PC_WORKER_GUARD();
     glEnable(GL_SCISSOR_TEST);
 #ifdef PC_ENHANCEMENTS
     {
-        float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
-        float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
-        int gl_x = (int)(left * sx);
+        int target_w = g_pc_window_w;
+        int target_h = g_pc_window_h;
+        int sc_offset_x = 0;
+#ifdef TARGET_VITA
+        if (g_pc_settings.aspect_mode == 1 && g_aspect_active)
+            vita_get_43_layout(&target_w, &sc_offset_x);
+#endif
+        float sx = (float)target_w / (float)PC_GC_WIDTH;
+        float sy = (float)target_h / (float)PC_GC_HEIGHT;
+        int gl_x = sc_offset_x + (int)(left * sx);
         int gl_w = (int)(wd * sx);
         int gl_h = (int)(ht * sy);
-        int gl_y = g_pc_window_h - (int)(top * sy) - gl_h;
+        int gl_y = target_h - (int)(top * sy) - gl_h;
         glScissor(gl_x, gl_y, gl_w, gl_h);
     }
 #else
@@ -1060,6 +1383,7 @@ void GXGetVtxAttrFmt(u32 idx, u32 attr, u32* compCnt, u32* compType, u8* shift) 
 /* --- TEV Configuration --- */
 void GXSetNumTevStages(u8 nStages) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_1(g_gx.num_tev_stages, nStages);
     DIRTY(PC_GX_DIRTY_TEV_STAGES);
     g_gx.num_tev_stages = nStages;
 }
@@ -1099,8 +1423,12 @@ void GXSetTevOp(u32 stage, u32 mode) {
 
 void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
     if (stage < 16) {
+        GX_SKIP_IF_SAME_4(g_gx.tev_stages[stage].color_a, a,
+            g_gx.tev_stages[stage].color_b, b,
+            g_gx.tev_stages[stage].color_c, c,
+            g_gx.tev_stages[stage].color_d, d);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
         g_gx.tev_stages[stage].color_a = a;
         g_gx.tev_stages[stage].color_b = b;
         g_gx.tev_stages[stage].color_c = c;
@@ -1110,8 +1438,12 @@ void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
 
 void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
     if (stage < 16) {
+        GX_SKIP_IF_SAME_4(g_gx.tev_stages[stage].alpha_a, a,
+            g_gx.tev_stages[stage].alpha_b, b,
+            g_gx.tev_stages[stage].alpha_c, c,
+            g_gx.tev_stages[stage].alpha_d, d);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
         g_gx.tev_stages[stage].alpha_a = a;
         g_gx.tev_stages[stage].alpha_b = b;
         g_gx.tev_stages[stage].alpha_c = c;
@@ -1121,8 +1453,13 @@ void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
 
 void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
     if (stage < 16) {
+        GX_SKIP_IF_SAME_5(g_gx.tev_stages[stage].color_op, op,
+            g_gx.tev_stages[stage].color_bias, bias,
+            g_gx.tev_stages[stage].color_scale, scale,
+            g_gx.tev_stages[stage].color_clamp, clamp,
+            g_gx.tev_stages[stage].color_out, out_reg);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
         g_gx.tev_stages[stage].color_op = op;
         g_gx.tev_stages[stage].color_bias = bias;
         g_gx.tev_stages[stage].color_scale = scale;
@@ -1133,8 +1470,13 @@ void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 o
 
 void GXSetTevAlphaOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
     if (stage < 16) {
+        GX_SKIP_IF_SAME_5(g_gx.tev_stages[stage].alpha_op, op,
+            g_gx.tev_stages[stage].alpha_bias, bias,
+            g_gx.tev_stages[stage].alpha_scale, scale,
+            g_gx.tev_stages[stage].alpha_clamp, clamp,
+            g_gx.tev_stages[stage].alpha_out, out_reg);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
         g_gx.tev_stages[stage].alpha_op = op;
         g_gx.tev_stages[stage].alpha_bias = bias;
         g_gx.tev_stages[stage].alpha_scale = scale;
@@ -1145,8 +1487,11 @@ void GXSetTevAlphaOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 o
 
 void GXSetTevOrder(u32 stage, u32 coord, u32 map, u32 color) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES);
     if (stage < 16) {
+        GX_SKIP_IF_SAME_3(g_gx.tev_stages[stage].tex_coord, coord,
+            g_gx.tev_stages[stage].tex_map, map,
+            g_gx.tev_stages[stage].color_chan, color);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES);
         g_gx.tev_stages[stage].tex_coord = coord;
         g_gx.tev_stages[stage].tex_map = map;
         g_gx.tev_stages[stage].color_chan = color;
@@ -1155,51 +1500,62 @@ void GXSetTevOrder(u32 stage, u32 coord, u32 map, u32 color) {
 
 void GXSetTevColor(u32 id, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_COLORS);
-    /* TEVREG0 uses GXColor fields (byte unpack), others come from EmuColor.raw (shift unpack) */
     if (id < GX_MAX_TEVREG) {
-        if (id == GX_TEVREG0) {
-            pc_unpack_gxcolor_f(color_packed, g_gx.tev_colors[id]);
-        } else {
-            pc_unpack_rgba8f(color_packed, g_gx.tev_colors[id]);
-        }
+#ifdef TARGET_VITA
+        if (g_gx.tev_color_packed_cache[id] == color_packed) return;
+        g_gx.tev_color_packed_cache[id] = color_packed;
+#endif
+        if (id == GX_TEVREG0) pc_unpack_gxcolor_f(color_packed, g_gx.tev_colors[id]);
+        else pc_unpack_rgba8f(color_packed, g_gx.tev_colors[id]);
+        DIRTY(PC_GX_DIRTY_TEV_COLORS);
+        PC_DIRTY_TEV_IF_VITA();
     }
 }
 
 void GXSetTevColorS10(u32 id, s16 r, s16 g, s16 b, s16 a) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_COLORS);
     if (id < GX_MAX_TEVREG) {
         g_gx.tev_colors[id][0] = r / 255.0f;
         g_gx.tev_colors[id][1] = g / 255.0f;
         g_gx.tev_colors[id][2] = b / 255.0f;
         g_gx.tev_colors[id][3] = a / 255.0f;
+        DIRTY(PC_GX_DIRTY_TEV_COLORS);
+        PC_DIRTY_TEV_IF_VITA();
     }
 }
 
 void GXSetTevKColor(u32 id, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_KONST);
     if (id < 4) {
         pc_unpack_rgba8f(color_packed, g_gx.tev_k_colors[id]);
+        DIRTY(PC_GX_DIRTY_KONST);
+        PC_DIRTY_TEV_IF_VITA();
     }
 }
 
 void GXSetTevKColorSel(u32 stage, u32 sel) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
-    if (stage < 16) g_gx.tev_stages[stage].k_color_sel = sel;
+    if (stage < 16) {
+        GX_SKIP_IF_SAME_1(g_gx.tev_stages[stage].k_color_sel, sel);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
+        g_gx.tev_stages[stage].k_color_sel = sel;
+    }
 }
 void GXSetTevKAlphaSel(u32 stage, u32 sel) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
-    if (stage < 16) g_gx.tev_stages[stage].k_alpha_sel = sel;
+    if (stage < 16) {
+        GX_SKIP_IF_SAME_1(g_gx.tev_stages[stage].k_alpha_sel, sel);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
+        g_gx.tev_stages[stage].k_alpha_sel = sel;
+    }
 }
 
 void GXSetTevSwapMode(u32 stage, u32 ras_sel, u32 tex_sel) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEV_STAGES);
     if (stage < 16) {
+        GX_SKIP_IF_SAME_2(g_gx.tev_stages[stage].ras_swap, ras_sel,
+            g_gx.tev_stages[stage].tex_swap, tex_sel);
+        DIRTY(PC_GX_DIRTY_TEV_STAGES);
         g_gx.tev_stages[stage].ras_swap = ras_sel;
         g_gx.tev_stages[stage].tex_swap = tex_sel;
     }
@@ -1219,6 +1575,8 @@ void GXSetTevSwapModeTable(u32 table, u32 red, u32 green, u32 blue, u32 alpha) {
 /* --- Alpha / Depth / Blend --- */
 void GXSetAlphaCompare(u32 comp0, u8 ref0, u32 op, u32 comp1, u8 ref1) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_5(g_gx.alpha_comp0, comp0, g_gx.alpha_ref0, ref0,
+        g_gx.alpha_op, op, g_gx.alpha_comp1, comp1, g_gx.alpha_ref1, ref1);
     DIRTY(PC_GX_DIRTY_ALPHA_CMP);
     g_gx.alpha_comp0 = comp0;
     g_gx.alpha_ref0 = ref0;
@@ -1229,6 +1587,8 @@ void GXSetAlphaCompare(u32 comp0, u8 ref0, u32 op, u32 comp1, u8 ref1) {
 
 void GXSetBlendMode(u32 type, u32 src, u32 dst, u32 logic_op) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_4(g_gx.blend_mode, type, g_gx.blend_src, src,
+        g_gx.blend_dst, dst, g_gx.blend_logic_op, logic_op);
     DIRTY(PC_GX_DIRTY_BLEND);
     g_gx.blend_mode = type;
     g_gx.blend_src = src;
@@ -1238,6 +1598,8 @@ void GXSetBlendMode(u32 type, u32 src, u32 dst, u32 logic_op) {
 
 void GXSetZMode(GXBool compare_enable, u32 func, GXBool update_enable) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_3(g_gx.z_compare_enable, compare_enable,
+        g_gx.z_compare_func, func, g_gx.z_update_enable, update_enable);
     DIRTY(PC_GX_DIRTY_DEPTH);
     g_gx.z_compare_enable = compare_enable;
     g_gx.z_compare_func = func;
@@ -1246,11 +1608,13 @@ void GXSetZMode(GXBool compare_enable, u32 func, GXBool update_enable) {
 
 void GXSetColorUpdate(GXBool enable) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_1(g_gx.color_update_enable, enable);
     DIRTY(PC_GX_DIRTY_COLOR_MASK);
     g_gx.color_update_enable = enable;
 }
 void GXSetAlphaUpdate(GXBool enable) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_1(g_gx.alpha_update_enable, enable);
     DIRTY(PC_GX_DIRTY_COLOR_MASK);
     g_gx.alpha_update_enable = enable;
 }
@@ -1263,24 +1627,28 @@ void GXSetPixelFmt(u32 pix_fmt, u32 z_fmt) { (void)pix_fmt; (void)z_fmt; }
 
 void GXSetCullMode(u32 mode) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_CULL);
-    g_gx.cull_mode = g_pc_model_viewer_no_cull ? GX_CULL_NONE : mode;
+    {
+        int effective = g_pc_model_viewer_no_cull ? GX_CULL_NONE : (int)mode;
+        GX_SKIP_IF_SAME_1(g_gx.cull_mode, effective);
+        DIRTY(PC_GX_DIRTY_CULL);
+        g_gx.cull_mode = effective;
+    }
 }
 void GXSetCoPlanar(GXBool enable) { (void)enable; }
 
 /* --- Fog --- */
 void GXSetFog(u32 type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
     pc_gx_flush_if_begin_complete();
+    g_gx.fog_color[0] = color.r / 255.0f;
+    g_gx.fog_color[1] = color.g / 255.0f;
+    g_gx.fog_color[2] = color.b / 255.0f;
+    g_gx.fog_color[3] = color.a / 255.0f;
     DIRTY(PC_GX_DIRTY_FOG);
     g_gx.fog_type = type;
     g_gx.fog_start = startz;
     g_gx.fog_end = endz;
     g_gx.fog_near = nearz;
     g_gx.fog_far = farz;
-    g_gx.fog_color[0] = color.r / 255.0f;
-    g_gx.fog_color[1] = color.g / 255.0f;
-    g_gx.fog_color[2] = color.b / 255.0f;
-    g_gx.fog_color[3] = color.a / 255.0f;
 }
 
 void GXInitFogAdjTable(void* table, u16 width, f32 projmtx[4][4]) {
@@ -1308,6 +1676,7 @@ static int pc_gx_chan_index(u32 chan) {
 
 void GXSetNumChans(u8 nChans) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_1(g_gx.num_chans, nChans);
     DIRTY(PC_GX_DIRTY_LIGHTING);
     g_gx.num_chans = nChans;
 }
@@ -1315,7 +1684,6 @@ void GXSetNumChans(u8 nChans) {
 void GXSetChanCtrl(u32 chan, GXBool enable, u32 amb_src, u32 mat_src,
                    u32 light_mask, u32 diff_fn, u32 attn_fn) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_LIGHTING);
     int idx = pc_gx_chan_index(chan);
     if (idx >= 0) {
         int is_combined = (chan >= GX_COLOR0A0);
@@ -1337,24 +1705,25 @@ void GXSetChanCtrl(u32 chan, GXBool enable, u32 amb_src, u32 mat_src,
             g_gx.chan_ctrl_diff_fn[idx * 2 + 1] = diff_fn;
             g_gx.chan_ctrl_attn_fn[idx * 2 + 1] = attn_fn;
         }
+        DIRTY(PC_GX_DIRTY_LIGHTING);
     }
 }
 
 void GXSetChanAmbColor(u32 chan, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_LIGHTING);
     int idx = pc_gx_chan_index(chan);
     if (idx >= 0 && idx < 2) {
         pc_unpack_gxcolor_f(color_packed, g_gx.chan_amb_color[idx]);
+        DIRTY(PC_GX_DIRTY_LIGHTING);
     }
 }
 
 void GXSetChanMatColor(u32 chan, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_LIGHTING);
     int idx = pc_gx_chan_index(chan);
     if (idx >= 0 && idx < 2) {
         pc_unpack_gxcolor_f(color_packed, g_gx.chan_mat_color[idx]);
+        DIRTY(PC_GX_DIRTY_LIGHTING);
     }
 }
 
@@ -1502,6 +1871,9 @@ void GXLoadLightObjImm(void* lt, u32 light) {
     g_gx.lights[slot].k1 = l->k1;
     g_gx.lights[slot].k2 = l->k2;
     pc_unpack_gxcolor_f(l->color, g_gx.lights[slot].color);
+#ifdef TARGET_VITA
+    vita_normalize_light(slot);
+#endif
 }
 void GXGetLightPos(void* lt, f32* x, f32* y, f32* z) {
     PCGXLightObjInternal* l = (PCGXLightObjInternal*)lt;
@@ -1515,20 +1887,29 @@ void GXGetLightColor(void* lt, void* color) {
 /* --- Texture Coordinate Generation --- */
 void GXSetNumTexGens(u8 n) {
     pc_gx_flush_if_begin_complete();
+    GX_SKIP_IF_SAME_1(g_gx.num_tex_gens, n);
     DIRTY(PC_GX_DIRTY_TEXGEN);
     g_gx.num_tex_gens = n;
 }
 void GXSetTexCoordGen2(u32 dst, u32 func, u32 src, u32 mtx, GXBool normalize, u32 postmtx) {
     pc_gx_flush_if_begin_complete();
-    DIRTY(PC_GX_DIRTY_TEXGEN);
     if (dst < 8) {
+        GX_SKIP_IF_SAME_3(g_gx.tex_gen_type[dst], func,
+            g_gx.tex_gen_src[dst], src, g_gx.tex_gen_mtx[dst], mtx);
+        DIRTY(PC_GX_DIRTY_TEXGEN);
         g_gx.tex_gen_type[dst] = func;
         g_gx.tex_gen_src[dst] = src;
         g_gx.tex_gen_mtx[dst] = mtx;
     }
 }
-void GXSetLineWidth(u8 width, u32 texOffsets) { glLineWidth(width / 16.0f); }
-void GXSetPointSize(u8 size, u32 texOffsets) { glPointSize(size / 16.0f); }
+void GXSetLineWidth(u8 width, u32 texOffsets) {
+    PC_WORKER_GUARD();
+    glLineWidth(width / 16.0f);
+}
+void GXSetPointSize(u8 size, u32 texOffsets) {
+    PC_WORKER_GUARD();
+    glPointSize(size / 16.0f);
+}
 void GXEnableTexOffsets(u32 coord, GXBool line, GXBool point) {
     (void)coord; (void)line; (void)point;
 }
@@ -1548,7 +1929,7 @@ void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
 
 void GXCopyDisp(void* dest, GXBool clear) {
     /* On PC we render to the back buffer directly; swap happens in VIWaitForRetrace.
-     * Just flush pending geometry — do NOT swap or clear here. */
+     * Just flush pending geometry -do NOT swap or clear here. */
     pc_gx_commit_pending_and_flush();
     (void)dest;
     (void)clear;
@@ -1611,6 +1992,40 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
     int gl_y = g_pc_window_h - (read_top + read_ht);
     if (gl_y < 0) return;
 
+#ifdef TARGET_VITA
+    if (vita_on_worker_thread) {
+        // queue EFB capture for replay in submit_frame (after preceding draws)
+        if (efb_capture_count < EFB_CAPTURE_MAX) {
+            PCGXEfbCapture* cap = &efb_captures[efb_capture_count++];
+            cap->after_draw_idx = (cmd_queue_count > 0) ? cmd_queue_count - 1 : 0;
+            cap->dest_ptr = (u32)(uintptr_t)dest;
+            cap->src_left = read_left;
+            cap->src_top = read_top;
+            cap->src_w = read_wd;
+            cap->src_h = read_ht;
+            cap->clear_after = clear ? 1 : 0;
+        }
+        return;
+    }
+    // GPU-only copy via glCopyTexImage2D (avoids slow glReadPixels readback)
+    {
+        GLuint efb_tex;
+        glGenTextures(1, &efb_tex);
+        glActiveTexture(GL_TEXTURE7);
+        glBindTexture(GL_TEXTURE_2D, efb_tex);
+        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, read_left, gl_y, read_wd, read_ht, 0);
+        vita_efb_setup_texture((u32)(uintptr_t)dest, efb_tex);
+        glActiveTexture(GL_TEXTURE0);
+    }
+    // skip CPU readback path below
+    if (clear) {
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        if (g_gx.current_shader)
+            glUseProgram(g_gx.current_shader);
+    }
+    // water FBO already composited above, don't re-bind
+    return;
+#else
     size_t rgba_size = (size_t)read_wd * (size_t)read_ht * 4;
     u8* rgba = (u8*)malloc(rgba_size);
     if (!rgba) return;
@@ -1680,6 +2095,7 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
 
     free(rgba);
     (void)clear;
+#endif /* !TARGET_VITA */
 }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
@@ -1726,7 +2142,10 @@ void* GXInit(void* base, u32 size) {
 }
 
 void GXSetMisc(u32 token, u32 val) { (void)token; (void)val; }
-void GXFlush(void) { glFlush(); }
+void GXFlush(void) {
+    PC_WORKER_GUARD();
+    glFlush();
+}
 void GXResetWriteGatherPipe(void) {}
 void GXAbortFrame(void) {}
 void GXSetDrawSync(u16 token) { (void)token; }

@@ -50,11 +50,18 @@ static int pc_audio_producer_func(void* data) {
 void pc_audio_start_producer_thread(void) {
     if (audio_producer_thread) return;
     SDL_AtomicSet(&audio_thread_running, 1);
+#ifdef TARGET_VITA
+    // Vita SDL2 default stack is too small for jaudio_NES, set 1MB
+    SDL_SetHint(SDL_HINT_THREAD_STACK_SIZE, "1048576");
+#endif
     audio_producer_thread = SDL_CreateThread(pc_audio_producer_func, "AudioProducer", NULL);
     if (audio_producer_thread) {
         printf("[AUDIO] Producer thread started\n");
     } else {
-        printf("[AUDIO] Failed to create producer thread: %s\n", SDL_GetError());
+        fprintf(stderr, "[AUDIO] Failed to create producer thread: %s\n", SDL_GetError());
+#ifdef TARGET_VITA
+        sceKernelExitProcess(1);
+#endif
     }
 }
 
@@ -109,7 +116,10 @@ void AIInit(u8* stack) {
         printf("[AUDIO] Opened: freq=%d fmt=0x%04X ch=%d samples=%d (requested: freq=%d)\n",
                have.freq, have.format, have.channels, have.samples, want.freq);
     } else {
-        printf("[AUDIO] Failed to open: %s\n", SDL_GetError());
+        fprintf(stderr, "[AUDIO] Failed to open audio device: %s\n", SDL_GetError());
+#ifdef TARGET_VITA
+        sceKernelExitProcess(1);
+#endif
     }
 }
 

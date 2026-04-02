@@ -72,7 +72,11 @@ static void card_slot_free(CARDFileInfo_PC* fi) {
     }
 }
 
+#ifdef TARGET_VITA
+static char save_dir[256] = "ux0:data/AnimalCrossing/saves";
+#else
 static char save_dir[256] = "save";
+#endif
 static int card_mounted[2] = {0, 0};
 
 /* reject path traversal */
@@ -88,6 +92,8 @@ static int card_filename_safe(const char* name) {
 void CARDInit(void) {
 #ifdef _WIN32
     _mkdir(save_dir);
+#elif defined(TARGET_VITA)
+    sceIoMkdir(save_dir, 0777);
 #else
     mkdir(save_dir, 0755);
 #endif
@@ -216,7 +222,7 @@ s32 CARDDelete(s32 chan, const char* fileName) {
     char path[512];
     if (!card_filename_safe(fileName)) return CARD_RESULT_NAMETOOLONG;
     snprintf(path, sizeof(path), "%s/%s", save_dir, fileName);
-    remove(path);
+    if (remove(path) != 0) return CARD_RESULT_IOERROR;
     return CARD_RESULT_READY;
 }
 
@@ -289,7 +295,7 @@ s32 CARDRename(s32 chan, const char* oldName, const char* newName) {
     if (!card_filename_safe(oldName) || !card_filename_safe(newName)) return CARD_RESULT_NAMETOOLONG;
     snprintf(oldPath, sizeof(oldPath), "%s/%s", save_dir, oldName);
     snprintf(newPath, sizeof(newPath), "%s/%s", save_dir, newName);
-    rename(oldPath, newPath);
+    if (rename(oldPath, newPath) != 0) return CARD_RESULT_IOERROR;
     return CARD_RESULT_READY;
 }
 

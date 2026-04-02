@@ -23,11 +23,20 @@
 #ifdef _WIN32
 #include <direct.h>  /* _mkdir */
 #endif
+#ifdef TARGET_VITA
+#include <psp2/io/stat.h>  /* sceIoMkdir */
+#endif
 #include <dolphin/os.h>  /* OSReport */
 
+#ifdef TARGET_VITA
+#define PC_GCI_PATH     "ux0:data/AnimalCrossing/saves/DobutsunomoriP_MURA.gci"
+#define PC_GCI_TMP_PATH "ux0:data/AnimalCrossing/saves/DobutsunomoriP_MURA.gci.tmp"
+#define PC_SAVE_DIR     "ux0:data/AnimalCrossing/saves"
+#else
 #define PC_GCI_PATH     "save/DobutsunomoriP_MURA.gci"
 #define PC_GCI_TMP_PATH "save/DobutsunomoriP_MURA.gci.tmp"
 #define PC_SAVE_DIR     "save"
+#endif
 #define PC_SAVE_MAX_BACKUPS 3
 
 #define GCI_HEADER_SIZE      sizeof(CARDDir)        /* 64 bytes */
@@ -40,7 +49,7 @@
 int pc_save_loaded = 0;
 static int pc_save_ready = 0;
 
-/* ARAM data blocks (mail/diary/original designs) — malloc'd instead of ARAM DMA */
+/* ARAM data blocks (mail/diary/original designs) -malloc'd instead of ARAM DMA */
 
 static u32 l_aram_alloc_size_table[mCD_ARAM_DATA_NUM] = {
     ALIGN_NEXT(sizeof(mCD_keep_original_c), 32),
@@ -79,13 +88,16 @@ void mCD_save_data_aram_malloc(void) {
     for (i = 0; i < mCD_ARAM_DATA_NUM; i++) {
         if (l_aram_block_p_table[i] == NULL) {
             l_aram_block_p_table[i] = malloc(l_aram_alloc_size_table[i]);
-            if (l_aram_block_p_table[i]) {
-                memset(l_aram_block_p_table[i], 0, l_aram_alloc_size_table[i]);
-                if (i == mCD_ARAM_DATA_DIARY) {
-                    pc_init_diary_entries(l_aram_block_p_table[i]);
-                } else if (i == mCD_ARAM_DATA_MAIL) {
-                    pc_init_mail_entries(l_aram_block_p_table[i]);
-                }
+            if (!l_aram_block_p_table[i]) {
+                fprintf(stderr, "[SAVE] Failed to allocate ARAM block %d (%u bytes)\n",
+                        i, (unsigned)l_aram_alloc_size_table[i]);
+                exit(1);
+            }
+            memset(l_aram_block_p_table[i], 0, l_aram_alloc_size_table[i]);
+            if (i == mCD_ARAM_DATA_DIARY) {
+                pc_init_diary_entries(l_aram_block_p_table[i]);
+            } else if (i == mCD_ARAM_DATA_MAIL) {
+                pc_init_mail_entries(l_aram_block_p_table[i]);
             }
         }
     }
@@ -93,7 +105,10 @@ void mCD_save_data_aram_malloc(void) {
 
 int mCD_save_data_aram_to_main(void* dst, u32 size, u32 idx) {
     void* block;
-    if (idx >= mCD_ARAM_DATA_NUM) idx = 0;
+    if (idx >= mCD_ARAM_DATA_NUM) {
+        fprintf(stderr, "[SAVE] Invalid ARAM data index %u (max %d)\n", idx, mCD_ARAM_DATA_NUM);
+        return FALSE;
+    }
     block = l_aram_block_p_table[idx];
     if (block != NULL) {
         u32 copy_size = size < l_aram_alloc_size_table[idx] ? size : l_aram_alloc_size_table[idx];
@@ -105,7 +120,10 @@ int mCD_save_data_aram_to_main(void* dst, u32 size, u32 idx) {
 
 int mCD_save_data_main_to_aram(void* src, u32 size, u32 idx) {
     void* block;
-    if (idx >= mCD_ARAM_DATA_NUM) idx = 0;
+    if (idx >= mCD_ARAM_DATA_NUM) {
+        fprintf(stderr, "[SAVE] Invalid ARAM data index %u (max %d)\n", idx, mCD_ARAM_DATA_NUM);
+        return FALSE;
+    }
     block = l_aram_block_p_table[idx];
     if (block != NULL) {
         u32 copy_size = size < l_aram_alloc_size_table[idx] ? size : l_aram_alloc_size_table[idx];
@@ -177,6 +195,8 @@ static int pc_save_write_gci(void) {
 
 #ifdef _WIN32
     _mkdir(PC_SAVE_DIR);
+#elif defined(TARGET_VITA)
+    sceIoMkdir(PC_SAVE_DIR, 0777);
 #else
     mkdir(PC_SAVE_DIR, 0755);
 #endif
@@ -188,7 +208,7 @@ static int pc_save_write_gci(void) {
     file_data = (u8*)calloc(1, GCI_FILE_DATA_SIZE);
     if (!file_data) return FALSE;
 
-    /* Others block (offset 0) — comment, banner, ARAM blocks */
+    /* Others block (offset 0) -comment, banner, ARAM blocks */
     others_ptr = file_data + GCI_OTHERS_OFFSET;
     {
         const char* title = "DobutsunomoriP (AC PC Port)";
@@ -297,6 +317,7 @@ static int pc_save_write_gci(void) {
     }
 
     OSReport("[PC] GCI save: written successfully (backups rotated)\n");
+    pc_save_loaded = 1;
     return TRUE;
 }
 
@@ -494,7 +515,7 @@ void mCD_init_card(void) {
 }
 
 void mCD_InitAll(void) {
-    /* ARAM blocks must persist — don't null them */
+    /* ARAM blocks must persist -don't null them */
 }
 
 int mCD_InitGameStart_bg(int player_no, int card_private_idx, int start_cond, s32* mounted_chan) {
@@ -509,7 +530,7 @@ int mCD_InitGameStart_bg(int player_no, int card_private_idx, int start_cond, s3
     }
 
     if (!init_done) {
-        init_done = 1; /* before call — prevents re-entry via crash recovery */
+        init_done = 1; /* before call -prevents re-entry via crash recovery */
 
         if (pc_save_loaded) {
             static int init_mode_table[] = { mSDI_INIT_MODE_NEW, mSDI_INIT_MODE_FROM,

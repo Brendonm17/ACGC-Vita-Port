@@ -1,0 +1,77 @@
+/* Specialized shader for CFG34: TEXA_clr as color + A1 register alpha (2-stage).
+ * Stage 0: color = TEXA_clr (tex.aaa grayscale), alpha = 0
+ * Stage 1: color = PREV (passthrough = TEXA_clr), alpha = A1 (register)
+ * Final: color = tex.aaa, alpha = A1
+ * Was "old CFG0" — 650+ hits per session.
+ *
+ * TEV inputs:
+ *   S0 c(15,15,15,4) a(7,7,7,7) — TEXA_clr passthrough, alpha=0
+ *   S1 c(15,15,15,0) a(7,7,7,2) — PREV passthrough, alpha=A1
+ *
+ * u_tev1_aval: .w=A1_alpha (D input of stage 1)
+ * Uses 1 texture. No RASC. Needs all 8 L/F/A variants.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color    : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal  : TEXCOORD2,
+    float  v_fog_z   : TEXCOORD3,
+
+    uniform sampler2D u_texture0  : TEXUNIT0,
+    uniform half      u_use_texture0,
+    uniform half      u_tev0_tc_src,
+
+    /* C1 register color (S0 color_d=4 = GX_CC_C1) */
+    uniform half4 u_tev_reg1,
+    /* Stage 1 alpha: .w=A1 (D passthrough) */
+    uniform half4 u_tev1_aval,
+
+    uniform half  u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half  u_chan_mat_src,
+    uniform half  u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half  u_chan_amb_src,
+    uniform half  u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half  u_fog_start,
+    uniform half  u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    /* Stage 0: color = C1 register, alpha = 0
+     * c(15,15,15,4): A=0, B=0, C=0, D=C1 (GX_CC_C1=4) -> C1 */
+    half3 prev_c = u_tev_reg1.rgb;
+
+    /* Stage 1: color = PREV (passthrough), alpha = A1
+     * a(7,7,7,2): A=0, B=0, C=0, D=A1 -> A1 */
+    half prev_a = u_tev1_aval.w;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

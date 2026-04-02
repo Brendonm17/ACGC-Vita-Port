@@ -1,0 +1,121 @@
+/* Specialized shader for CFG24: 3-stage waterfall/river pattern.
+ * Stage 0: color = C1*RASC, alpha = TEXA
+ * Stage 1: color = CPREV (passthrough), alpha = lerp(APREV, TEXA, A0)
+ * Stage 2: color = CPREV (passthrough), alpha = A1*APREV
+ * Final: color = C1*ras, alpha = A1 * ((1-A0)*tex0.a + A0*tex1.a)
+ *
+ * TEV inputs:
+ *   S0 c(15,10,4,15) a(7,7,7,4) — C1*ras color, TEXA alpha
+ *   S1 c(15,15,15,0) a(0,4,1,7) — passthrough, lerp(APREV,TEXA,A0)
+ *   S2 c(15,15,15,0) a(7,0,2,7) — passthrough, A1*APREV
+ *
+ * Uses 2 textures (tex0 for stage 0 TEXA, tex1 for stage 1 TEXA).
+ * Uses RASC in stage 0 — needs all 8 L/F/A variants.
+ * Uses half precision for 2x throughput on SGX543.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture1,
+    uniform half u_tev1_tc_src,
+
+    /* Stage 0 color C input: pre-resolved C1 register */
+    uniform half3 u_tev0_cc,
+    /* Stage 1 alpha: A0 register for lerp factor */
+    uniform half4 u_tev1_aval,
+    /* Stage 2 alpha: A1 register for final multiply */
+    uniform half4 u_tev2_aval,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Texture samples for stages 0 and 1 */
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
+
+    /* Rasterizer color */
+    half3 matC = lerp(u_mat_color.rgb, v_color.rgb, step(0.5h, u_chan_mat_src));
+    half matA = lerp(u_mat_color.a, v_color.a, step(0.5h, u_alpha_mat_src));
+
+#ifdef LIGHTING
+    half3 n = (half3)normalize(v_normal);
+    half3 ambC_h = lerp(u_amb_color.rgb, v_color.rgb, step(0.5h, u_chan_amb_src));
+    half3 lA = ambC_h;
+    lA += max(dot(n, u_light_pos[0]), 0.0h) * u_light_color[0].rgb;
+    lA += max(dot(n, u_light_pos[1]), 0.0h) * u_light_color[1].rgb;
+    lA += max(dot(n, u_light_pos[2]), 0.0h) * u_light_color[2].rgb;
+    lA += max(dot(n, u_light_pos[3]), 0.0h) * u_light_color[3].rgb;
+    lA += max(dot(n, u_light_pos[4]), 0.0h) * u_light_color[4].rgb;
+    lA += max(dot(n, u_light_pos[5]), 0.0h) * u_light_color[5].rgb;
+    lA += max(dot(n, u_light_pos[6]), 0.0h) * u_light_color[6].rgb;
+    lA += max(dot(n, u_light_pos[7]), 0.0h) * u_light_color[7].rgb;
+    matC *= saturate(lA);
+    matA = lerp(matA, matA * u_amb_color.a, step(0.5h, u_alpha_lighting_enabled));
+#endif
+
+    half3 ras_c = lerp(half3(1,1,1), matC, step(0.5h, u_num_chans));
+
+    /* Stage 0: color = C1 * RASC, alpha = tex0.a
+     * c(15,10,4,15): A=ZERO, B=RASC, C=C1, D=ZERO → C1*RASC */
+    half3 prev_c = u_tev0_cc * ras_c;
+    half prev_a = tex0.a;
+
+    /* Stage 1: color = CPREV (passthrough), alpha = lerp(APREV, TEXA, A0)
+     * a(0,4,1,7): A=APREV, B=TEXA, C=A0, D=ZERO
+     * result = 0 + (1-A0)*APREV + A0*TEXA = lerp(APREV, TEXA, A0)
+     * A0 = u_tev1_aval.y + u_tev1_aval.z (y+z trick) */
+    half a0_val = u_tev1_aval.y + u_tev1_aval.z;
+    prev_a = lerp(prev_a, tex1.a, a0_val);
+
+    /* Stage 2: color = CPREV (passthrough), alpha = A1 * APREV
+     * a(7,0,2,7): A=ZERO, B=APREV, C=A1, D=ZERO → A1*APREV
+     * NOTE: y+z trick does NOT work here — B=APREV is nonzero on CPU.
+     * Use aval.z directly since C=A1 is always in slot 2 (exact match). */
+    half a1_val = u_tev2_aval.z;
+    prev_a = a1_val * prev_a;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

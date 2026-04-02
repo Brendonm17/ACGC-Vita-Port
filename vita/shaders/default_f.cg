@@ -1,0 +1,177 @@
+/* CG fragment shader — CPU-resolved branchless TEV combiner.
+ * ALL TEV input selection done on CPU. Shader uses lerp/step only.
+ * Uses half precision for 2x throughput on SGX543.
+ * Optimized: rcp() fog, frac/floor light mask, swizzle splats.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST -DTEV2 */
+#pragma warning (disable:7203)
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+
+    /* TEV stage 0 CPU pre-resolved inputs */
+    uniform half4 u_tev0_csrc,
+    uniform half3 u_tev0_ca,
+    uniform half3 u_tev0_cb,
+    uniform half3 u_tev0_cc,
+    uniform half3 u_tev0_cd,
+    uniform half4 u_tev0_asrc,
+    uniform half4 u_tev0_aval,
+    uniform half4 u_tev0_param,
+    uniform half2 u_tev0_aparam, /* [alpha_scale, alpha_op] */
+
+#ifdef TEV2
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture1,
+    uniform half u_tev1_tc_src,
+    uniform half4 u_tev1_csrc,
+    uniform half3 u_tev1_ca,
+    uniform half3 u_tev1_cb,
+    uniform half3 u_tev1_cc,
+    uniform half3 u_tev1_cd,
+    uniform half4 u_tev1_asrc,
+    uniform half4 u_tev1_aval,
+    uniform half4 u_tev1_param,
+    uniform half2 u_tev1_aparam, /* [alpha_scale, alpha_op] */
+#endif
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_comp0,
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    half3 matC = lerp(u_mat_color.rgb, v_color.rgb, step(0.5h, u_chan_mat_src));
+    half matA = lerp(u_mat_color.a, v_color.a, step(0.5h, u_alpha_mat_src));
+
+#ifdef LIGHTING
+    half3 n = (half3)normalize(v_normal);
+    half3 ambC_h = lerp(u_amb_color.rgb, v_color.rgb, step(0.5h, u_chan_amb_src));
+    half3 lA = ambC_h;
+    lA += max(dot(n, u_light_pos[0]), 0.0h) * u_light_color[0].rgb;
+    lA += max(dot(n, u_light_pos[1]), 0.0h) * u_light_color[1].rgb;
+    lA += max(dot(n, u_light_pos[2]), 0.0h) * u_light_color[2].rgb;
+    lA += max(dot(n, u_light_pos[3]), 0.0h) * u_light_color[3].rgb;
+    lA += max(dot(n, u_light_pos[4]), 0.0h) * u_light_color[4].rgb;
+    lA += max(dot(n, u_light_pos[5]), 0.0h) * u_light_color[5].rgb;
+    lA += max(dot(n, u_light_pos[6]), 0.0h) * u_light_color[6].rgb;
+    lA += max(dot(n, u_light_pos[7]), 0.0h) * u_light_color[7].rgb;
+    matC *= saturate(lA);
+    matA = lerp(matA, matA * u_amb_color.a, step(0.5h, u_alpha_lighting_enabled));
+#endif
+
+    half3 ras_c = lerp(half3(1,1,1), matC, step(0.5h, u_num_chans));
+    half ras_a = lerp(1.0h, matA, step(0.5h, u_num_chans));
+
+    /* Stage 0 color: src 0=fixed 1=tex.rgb 2=tex.aaa 3=ras.rgb 4=ras.aaa */
+    half3 s0ca = lerp(lerp(lerp(u_tev0_ca, tex0.rgb, step(0.5h,u_tev0_csrc.x)),
+                    tex0.aaa, step(1.5h,u_tev0_csrc.x)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev0_csrc.x)),
+                    step(2.5h,u_tev0_csrc.x));
+    half3 s0cb = lerp(lerp(lerp(u_tev0_cb, tex0.rgb, step(0.5h,u_tev0_csrc.y)),
+                    tex0.aaa, step(1.5h,u_tev0_csrc.y)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev0_csrc.y)),
+                    step(2.5h,u_tev0_csrc.y));
+    half3 s0cc = lerp(lerp(lerp(u_tev0_cc, tex0.rgb, step(0.5h,u_tev0_csrc.z)),
+                    tex0.aaa, step(1.5h,u_tev0_csrc.z)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev0_csrc.z)),
+                    step(2.5h,u_tev0_csrc.z));
+    half3 s0cd = lerp(lerp(lerp(u_tev0_cd, tex0.rgb, step(0.5h,u_tev0_csrc.w)),
+                    tex0.aaa, step(1.5h,u_tev0_csrc.w)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev0_csrc.w)),
+                    step(2.5h,u_tev0_csrc.w));
+
+    /* Stage 0 alpha: src 0=fixed 1=tex.a 2=ras.a */
+    half s0aa = lerp(lerp(u_tev0_aval.x, tex0.a, step(0.5h,u_tev0_asrc.x)), ras_a, step(1.5h,u_tev0_asrc.x));
+    half s0ab = lerp(lerp(u_tev0_aval.y, tex0.a, step(0.5h,u_tev0_asrc.y)), ras_a, step(1.5h,u_tev0_asrc.y));
+    half s0ac = lerp(lerp(u_tev0_aval.z, tex0.a, step(0.5h,u_tev0_asrc.z)), ras_a, step(1.5h,u_tev0_asrc.z));
+    half s0ad = lerp(lerp(u_tev0_aval.w, tex0.a, step(0.5h,u_tev0_asrc.w)), ras_a, step(1.5h,u_tev0_asrc.w));
+
+    /* TEV: result = clamp((D + op*lerp(A,B,C) + bias) * scale) */
+    half3 prev_c = saturate((s0cd + u_tev0_param.w * lerp(s0ca, s0cb, s0cc) + u_tev0_param.xxx) * u_tev0_param.z);
+    half prev_a = saturate((s0ad + u_tev0_aparam.y * lerp(s0aa, s0ab, s0ac) + u_tev0_param.y) * u_tev0_aparam.x);
+
+#ifdef TEV2
+    float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
+
+    /* Stage 1 color: add src 5=prev.rgb 6=prev.aaa */
+    half3 s1ca = lerp(lerp(lerp(lerp(u_tev1_ca, tex1.rgb, step(0.5h,u_tev1_csrc.x)),
+                    tex1.aaa, step(1.5h,u_tev1_csrc.x)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev1_csrc.x)),
+                    step(2.5h,u_tev1_csrc.x)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev1_csrc.x)),
+                    step(4.5h,u_tev1_csrc.x));
+    half3 s1cb = lerp(lerp(lerp(lerp(u_tev1_cb, tex1.rgb, step(0.5h,u_tev1_csrc.y)),
+                    tex1.aaa, step(1.5h,u_tev1_csrc.y)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev1_csrc.y)),
+                    step(2.5h,u_tev1_csrc.y)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev1_csrc.y)),
+                    step(4.5h,u_tev1_csrc.y));
+    half3 s1cc = lerp(lerp(lerp(lerp(u_tev1_cc, tex1.rgb, step(0.5h,u_tev1_csrc.z)),
+                    tex1.aaa, step(1.5h,u_tev1_csrc.z)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev1_csrc.z)),
+                    step(2.5h,u_tev1_csrc.z)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev1_csrc.z)),
+                    step(4.5h,u_tev1_csrc.z));
+    half3 s1cd = lerp(lerp(lerp(lerp(u_tev1_cd, tex1.rgb, step(0.5h,u_tev1_csrc.w)),
+                    tex1.aaa, step(1.5h,u_tev1_csrc.w)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev1_csrc.w)),
+                    step(2.5h,u_tev1_csrc.w)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev1_csrc.w)),
+                    step(4.5h,u_tev1_csrc.w));
+
+    /* Stage 1 alpha: src 0=fixed 1=tex.a 2=ras.a 3=prev.a */
+    half s1aa = lerp(lerp(u_tev1_aval.x, tex1.a, step(0.5h,u_tev1_asrc.x)), lerp(ras_a, prev_a, step(2.5h,u_tev1_asrc.x)), step(1.5h,u_tev1_asrc.x));
+    half s1ab = lerp(lerp(u_tev1_aval.y, tex1.a, step(0.5h,u_tev1_asrc.y)), lerp(ras_a, prev_a, step(2.5h,u_tev1_asrc.y)), step(1.5h,u_tev1_asrc.y));
+    half s1ac = lerp(lerp(u_tev1_aval.z, tex1.a, step(0.5h,u_tev1_asrc.z)), lerp(ras_a, prev_a, step(2.5h,u_tev1_asrc.z)), step(1.5h,u_tev1_asrc.z));
+    half s1ad = lerp(lerp(u_tev1_aval.w, tex1.a, step(0.5h,u_tev1_asrc.w)), lerp(ras_a, prev_a, step(2.5h,u_tev1_asrc.w)), step(1.5h,u_tev1_asrc.w));
+
+    prev_c = saturate((s1cd + u_tev1_param.w * lerp(s1ca, s1cb, s1cc) + u_tev1_param.xxx) * u_tev1_param.z);
+    prev_a = saturate((s1ad + u_tev1_aparam.y * lerp(s1aa, s1ab, s1ac) + u_tev1_param.y) * u_tev1_aparam.x);
+#endif
+
+#ifdef ALPHA_TEST
+    /* Alpha test: GEQUAL (comp0=0) or LESS (comp0=1). ref0 pre-adjusted by CPU. */
+    half at_pass = step(u_alpha_ref0, prev_a);
+    at_pass = lerp(at_pass, 1.0h - at_pass, step(0.5h, u_alpha_comp0));
+    if (at_pass < 0.5h) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

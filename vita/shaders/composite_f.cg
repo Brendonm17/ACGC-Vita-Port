@@ -1,0 +1,27 @@
+/* composite_f.cg — depth-aware water FBO composite fragment shader.
+ * Compares main FB depth vs water FBO depth per-pixel.
+ * Discards water where terrain is closer (prevents water overdrawing terrain).
+ * Uses premultiplied alpha output for GL_ONE / GL_ONE_MINUS_SRC_ALPHA blend. */
+void main(
+    float2 v_texcoord : TEXCOORD0,
+    uniform sampler2D water_color : TEXUNIT0,
+    uniform sampler2D main_depth  : TEXUNIT1,
+    uniform sampler2D water_depth : TEXUNIT2,
+    out float4 out_color : COLOR
+) {
+    float4 wc = tex2D(water_color, v_texcoord);
+
+    /* Discard fully transparent pixels (FBO cleared to alpha=0) */
+    if (wc.a < 0.001)
+        discard;
+
+    /* Per-pixel depth comparison: discard water where terrain is closer.
+     * Depth values: 0.0 = near, 1.0 = far.
+     * If main_depth < water_depth, terrain is in front of water. */
+    float md = tex2D(main_depth, v_texcoord).r;
+    float wd = tex2D(water_depth, v_texcoord).r;
+    if (md < wd)
+        discard;
+
+    out_color = wc;
+}

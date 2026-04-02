@@ -1,0 +1,82 @@
+/* CG vertex shader for Animal Crossing Vita — compiled offline via psp2cgc.
+ * Always computes per-vertex lighting. For non-lit draws, the CPU sets
+ * identity values (amb=1, lights=0, mat_src=vtx) so lighting is a no-op.
+ * Uses u_vs_* prefix to avoid type collision with fragment shader uniforms. */
+
+void main(
+    float3 a_position : ATTR0,
+    float3 a_normal : ATTR1,
+    float4 a_color0 : ATTR2,
+    float2 a_texcoord0 : ATTR3,
+
+    uniform float4x4 u_projection,
+    uniform float4x4 u_modelview,
+    uniform float3x3 u_normal_mtx,
+
+    uniform float4 u_texmtx_row0,
+    uniform float4 u_texmtx_row1,
+    uniform float u_texmtx_enable,
+    uniform float4 u_texmtx1_row0,
+    uniform float4 u_texmtx1_row1,
+    uniform float u_texmtx1_enable,
+    uniform float u_texgen_src0,
+    uniform float u_texgen_src1,
+
+    /* Vertex lighting — u_vs_ prefix avoids FS half/float type collision */
+    uniform float4 u_vs_mat_color,
+    uniform float4 u_vs_amb_color,
+    uniform float u_vs_chan_mat_src,
+    uniform float u_vs_chan_amb_src,
+    uniform float u_vs_alpha_mat_src,
+    uniform float u_vs_alpha_lit,
+    uniform float3 u_vs_ldir0, uniform float3 u_vs_ldir1,
+    uniform float3 u_vs_ldir2, uniform float3 u_vs_ldir3,
+    uniform float3 u_vs_ldir4, uniform float3 u_vs_ldir5,
+    uniform float3 u_vs_ldir6, uniform float3 u_vs_ldir7,
+    uniform float4 u_vs_lcol0, uniform float4 u_vs_lcol1,
+    uniform float4 u_vs_lcol2, uniform float4 u_vs_lcol3,
+    uniform float4 u_vs_lcol4, uniform float4 u_vs_lcol5,
+    uniform float4 u_vs_lcol6, uniform float4 u_vs_lcol7,
+
+    out float4 out_position : POSITION,
+    out float4 v_color : COLOR0,
+    out float2 v_texcoord0 : TEXCOORD0,
+    out float2 v_texcoord1 : TEXCOORD1,
+    out float3 v_normal : TEXCOORD2,
+    out float v_fog_z : TEXCOORD3
+) {
+    float4 eyePos = mul(float4(a_position, 1.0), u_modelview);
+    out_position = mul(eyePos, u_projection);
+    v_fog_z = -eyePos.z;
+    float3 n = normalize(mul(a_normal, u_normal_mtx));
+    v_normal = n;
+
+    /* Per-vertex lighting — always computed. For non-lit draws, CPU sets
+     * identity values (amb=1, lights=0, mat_src=vtx) so result = a_color0. */
+    float3 matC = lerp(u_vs_mat_color.rgb, a_color0.rgb, step(0.5, u_vs_chan_mat_src));
+    float matA  = lerp(u_vs_mat_color.a,   a_color0.a,   step(0.5, u_vs_alpha_mat_src));
+    float3 ambC = lerp(u_vs_amb_color.rgb, a_color0.rgb, step(0.5, u_vs_chan_amb_src));
+
+    float3 lA = ambC;
+    lA += max(dot(n, u_vs_ldir0), 0.0) * u_vs_lcol0.rgb;
+    lA += max(dot(n, u_vs_ldir1), 0.0) * u_vs_lcol1.rgb;
+    lA += max(dot(n, u_vs_ldir2), 0.0) * u_vs_lcol2.rgb;
+    lA += max(dot(n, u_vs_ldir3), 0.0) * u_vs_lcol3.rgb;
+    lA += max(dot(n, u_vs_ldir4), 0.0) * u_vs_lcol4.rgb;
+    lA += max(dot(n, u_vs_ldir5), 0.0) * u_vs_lcol5.rgb;
+    lA += max(dot(n, u_vs_ldir6), 0.0) * u_vs_lcol6.rgb;
+    lA += max(dot(n, u_vs_ldir7), 0.0) * u_vs_lcol7.rgb;
+
+    v_color.rgb = matC * saturate(lA);
+    v_color.a = matA * lerp(1.0, u_vs_amb_color.a, step(0.5, u_vs_alpha_lit));
+
+    /* Texcoord 0 */
+    float4 tc0 = (u_texgen_src0 == 1.0) ? float4(n, 1.0) : float4(a_texcoord0, 0.0, 1.0);
+    v_texcoord0 = (u_texmtx_enable != 0.0) ?
+        float2(dot(u_texmtx_row0, tc0), dot(u_texmtx_row1, tc0)) : tc0.xy;
+
+    /* Texcoord 1 */
+    float4 tc1 = (u_texgen_src1 == 1.0) ? float4(n, 1.0) : float4(a_texcoord0, 0.0, 1.0);
+    v_texcoord1 = (u_texmtx1_enable != 0.0) ?
+        float2(dot(u_texmtx1_row0, tc1), dot(u_texmtx1_row1, tc1)) : tc1.xy;
+}

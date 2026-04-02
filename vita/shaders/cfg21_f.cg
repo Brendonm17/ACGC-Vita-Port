@@ -1,0 +1,82 @@
+/* Specialized shader for CFG21: 2-stage register color + TEXA*reg*TEXA alpha.
+ * Stage 0: color = C1 (register passthrough via A slot), alpha = A0*TEXA
+ * Stage 1: color = CPREV (passthrough), alpha = TEXA*APREV
+ * Final: color = C1, alpha = A0*tex0.a*tex1.a
+ *
+ * TEV inputs:
+ *   S0 c(4,15,15,15) a(7,4,1,7) — C1 via A passthrough, A0*TEXA alpha
+ *   S1 c(15,15,15,0) a(7,0,4,7) — color passthrough, TEXA*APREV alpha
+ *
+ * Similar to cfg16 but S0 color uses A slot (c(4,15,15,15)) instead of D slot.
+ * Uses half precision for 2x throughput on SGX543.
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture1,
+    uniform half u_tev1_tc_src,
+
+    /* Stage 0: A=C1 pre-resolved register color */
+    uniform half3 u_tev0_ca,
+    /* Stage 0: aval.y=0(TEXA), aval.z=A0 register value */
+    uniform half4 u_tev0_aval,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform float3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    /* Texture samples for both stages */
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
+
+    /* Stage 0: color = C1 (register), alpha = A0*tex0.a */
+    half3 prev_c = u_tev0_ca;
+    half prev_a = (u_tev0_aval.y + u_tev0_aval.z) * tex0.a;
+
+    /* Stage 1: color = passthrough, alpha = TEXA*APREV = tex1.a * prev_a */
+    prev_a *= tex1.a;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}
