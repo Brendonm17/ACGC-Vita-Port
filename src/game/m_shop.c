@@ -1312,7 +1312,7 @@ extern int mSP_RenewShopLevel() {
 extern int mSP_GetRealShopLevel() {
     u32 sales_sum = mSP_GetSalesSum();
 
-    if (sales_sum >= mSP_DSUPER_SUM && Save_Get(shop).visitor_flag != FALSE) {
+    if (sales_sum >= mSP_DSUPER_SUM) {
         return mSP_SHOP_TYPE_DSUPER;
     } else if (sales_sum >= mSP_SUPER_SUM) {
         return mSP_SHOP_TYPE_SUPER;
