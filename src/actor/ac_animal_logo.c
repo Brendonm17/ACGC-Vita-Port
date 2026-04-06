@@ -26,6 +26,11 @@
 #include "main.h"
 #include <stdio.h>
 #endif
+#ifdef TARGET_VITA
+#include "vita_shared.h"
+#include "vita_banner.h"
+#include "vita_texpack.h"
+#endif
 
 #define G_CC_TITLE PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, PRIMITIVE, 0, TEXEL0, 0
 #define G_CC_TM 0, 0, 0, PRIMITIVE, 0, 0, 0, TEXEL0
@@ -332,7 +337,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   u16 on_btn = gamePT->pads[PAD0].on.button;
   s8 stick_y = gamePT->pads[PAD0].now.stick_y;
 
-  /* No blinking — full opacity for menu */
+  // no blinking in menu
   actor->press_start_opacity = 255.0f;
 
   if (play->fb_fade_type == FADE_TYPE_SELECT_END) {
@@ -340,16 +345,15 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     return;
   }
 
-  /* Debounce */
+  // debounce
   if (actor->pc_cursor_cooldown > 0) {
     actor->pc_cursor_cooldown--;
   }
 
   if (actor->pc_options_open) {
     s8 stick_x = gamePT->pads[PAD0].now.stick_x;
-    int changed = 0;
 
-    /* START to save, apply, and close */
+    // START to save and close
     if (on_btn & BUTTON_START) {
       pc_settings_save();
       pc_settings_apply();
@@ -358,7 +362,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       return;
     }
 
-    /* B to discard and close */
+    // B to discard and close
     if (on_btn & BUTTON_B) {
       pc_settings_load();
       actor->pc_options_open = 0;
@@ -366,16 +370,96 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       return;
     }
 
-    /* Up/down navigation within options (5 items: 0=res, 1=fs, 2=vsync, 3=msaa, 4=textures) */
+#ifdef TARGET_VITA
+    // Vita options: Resolution, Aspect, [Banner if 4:3], MSAA, Tex Pack
+    {
+      int has_banner = g_pc_settings.aspect_mode;
+      int banner_idx = 2;
+      int msaa_idx = has_banner ? 3 : 2;
+      int texpack_idx = msaa_idx + 1;
+      int fsave_idx = texpack_idx + 1;
+      int max_sel = fsave_idx;
+      if (actor->pc_options_sel > max_sel) actor->pc_options_sel = max_sel;
+
+      if (actor->pc_cursor_cooldown == 0) {
+        if (stick_y > 30 || (on_btn & BUTTON_DUP)) {
+          if (actor->pc_options_sel > 0) { actor->pc_options_sel--; actor->pc_cursor_cooldown = 8; }
+        } else if (stick_y < -30 || (on_btn & BUTTON_DDOWN)) {
+          if (actor->pc_options_sel < max_sel) { actor->pc_options_sel++; actor->pc_cursor_cooldown = 8; }
+        }
+
+        int do_right = (stick_x > 30 || (on_btn & BUTTON_DRIGHT));
+        int do_left  = !do_right && (stick_x < -30 || (on_btn & BUTTON_DLEFT));
+
+        if (do_right || do_left) {
+          actor->pc_cursor_cooldown = 8;
+          int s = actor->pc_options_sel;
+
+          if (s == 0) { // Resolution
+            if (do_right) {
+              if (g_pc_settings.render_scale == 50) g_pc_settings.render_scale = 75;
+              else if (g_pc_settings.render_scale == 75) g_pc_settings.render_scale = 100;
+            } else {
+              if (g_pc_settings.render_scale == 100) g_pc_settings.render_scale = 75;
+              else if (g_pc_settings.render_scale == 75) g_pc_settings.render_scale = 50;
+            }
+          } else if (s == 1) { // Aspect
+            g_pc_settings.aspect_mode = !g_pc_settings.aspect_mode;
+            if (g_pc_settings.aspect_mode) banner_scan_folder();
+          } else if (has_banner && s == banner_idx) { // Banner
+            if (g_banner_count) {
+              int cur = banner_find_index(g_pc_settings.banner_name);
+              if (do_right) {
+                if (cur + 1 >= g_banner_count) g_pc_settings.banner_name[0] = '\0';
+                else strcpy(g_pc_settings.banner_name, g_banner_list[cur + 1].name);
+              } else {
+                if (cur <= 0) {
+                  if (cur == 0) g_pc_settings.banner_name[0] = '\0';
+                  else strcpy(g_pc_settings.banner_name, g_banner_list[g_banner_count - 1].name);
+                } else {
+                  strcpy(g_pc_settings.banner_name, g_banner_list[cur - 1].name);
+                }
+              }
+            }
+          } else if (s == msaa_idx) { // MSAA
+            if (do_right) {
+              if (g_pc_settings.msaa == 0) g_pc_settings.msaa = 2;
+              else if (g_pc_settings.msaa == 2) g_pc_settings.msaa = 4;
+            } else {
+              if (g_pc_settings.msaa == 4) g_pc_settings.msaa = 2;
+              else if (g_pc_settings.msaa == 2) g_pc_settings.msaa = 0;
+            }
+          } else if (s == texpack_idx) { // Texture Pack
+            if (g_texpack_count > 0) {
+              int cur = texpack_find_index(g_pc_settings.texture_pack);
+              if (do_right) {
+                if (cur + 1 >= g_texpack_count) g_pc_settings.texture_pack[0] = '\0';
+                else strcpy(g_pc_settings.texture_pack, g_texpack_list[cur + 1].name);
+              } else {
+                if (cur <= 0) {
+                  if (cur == 0) g_pc_settings.texture_pack[0] = '\0';
+                  else strcpy(g_pc_settings.texture_pack, g_texpack_list[g_texpack_count - 1].name);
+                } else {
+                  strcpy(g_pc_settings.texture_pack, g_texpack_list[cur - 1].name);
+                }
+              }
+            }
+          } else if (s == fsave_idx) { // Force Save
+            g_pc_settings.force_save = !g_pc_settings.force_save;
+          }
+        }
+      }
+    }
+#else
+    // PC options: 0=res, 1=fs, 2=vsync, 3=msaa, 4=textures
     if (actor->pc_cursor_cooldown == 0) {
+      int changed = 0;
       if (stick_y > 30 || (on_btn & BUTTON_DUP)) {
         if (actor->pc_options_sel > 0) { actor->pc_options_sel--; actor->pc_cursor_cooldown = 8; }
       } else if (stick_y < -30 || (on_btn & BUTTON_DDOWN)) {
         if (actor->pc_options_sel < 4) { actor->pc_options_sel++; actor->pc_cursor_cooldown = 8; }
       }
 
-      /* Left/right to change values */
-      /* Resolution presets — custom .ini values snap to nearest on left/right */
       {
         static const int res_w[] = { 640, 960, 1280, 1600, 1920, 2560, 3840 };
         static const int res_h[] = { 480, 720,  720,  900, 1080, 1440, 2160 };
@@ -384,7 +468,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       if (stick_x > 30 || (on_btn & BUTTON_DRIGHT)) {
         changed = 1; actor->pc_cursor_cooldown = 8;
         switch (actor->pc_options_sel) {
-          case 0: { /* Resolution — cycle up */
+          case 0: {
             int i;
             for (i = 0; i < RES_COUNT - 1; i++) {
               if (g_pc_settings.window_width <= res_w[i]) break;
@@ -395,18 +479,18 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
           } break;
           case 1: g_pc_settings.fullscreen = (g_pc_settings.fullscreen + 1) % 3; break;
           case 2: g_pc_settings.vsync = !g_pc_settings.vsync; break;
-          case 3: { /* MSAA cycle up: 0→2→4→8 */
+          case 3:
             if (g_pc_settings.msaa == 0) g_pc_settings.msaa = 2;
             else if (g_pc_settings.msaa < 8) g_pc_settings.msaa *= 2;
-          } break;
-          case 4: { /* Textures cycle up: 0→1→2 */
+            break;
+          case 4:
             if (g_pc_settings.preload_textures < 2) g_pc_settings.preload_textures++;
-          } break;
+            break;
         }
       } else if (stick_x < -30 || (on_btn & BUTTON_DLEFT)) {
         changed = 1; actor->pc_cursor_cooldown = 8;
         switch (actor->pc_options_sel) {
-          case 0: { /* Resolution — cycle down */
+          case 0: {
             int i;
             for (i = RES_COUNT - 1; i > 0; i--) {
               if (g_pc_settings.window_width >= res_w[i]) break;
@@ -417,22 +501,23 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
           } break;
           case 1: g_pc_settings.fullscreen = (g_pc_settings.fullscreen + 2) % 3; break;
           case 2: g_pc_settings.vsync = !g_pc_settings.vsync; break;
-          case 3: { /* MSAA cycle down: 8→4→2→0 */
+          case 3:
             if (g_pc_settings.msaa > 2) g_pc_settings.msaa /= 2;
             else g_pc_settings.msaa = 0;
-          } break;
-          case 4: { /* Textures cycle down: 2→1→0 */
+            break;
+          case 4:
             if (g_pc_settings.preload_textures > 0) g_pc_settings.preload_textures--;
-          } break;
+            break;
         }
       }
-      } /* end resolution presets block */
+      }
+      (void)changed;
     }
-    (void)changed;
+#endif
     return;
   }
 
-  /* Main menu navigation */
+  // main menu navigation
   if (actor->pc_cursor_cooldown == 0) {
     if (stick_y > 30 || (on_btn & BUTTON_DUP)) {
       if (actor->pc_menu_sel > 0) {
@@ -447,19 +532,23 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     }
   }
 
-  /* Select */
+  // select
   if (on_btn & (BUTTON_A | BUTTON_START)) {
     if (actor->pc_menu_sel == 0) {
-      /* Start Game */
+      // start game
       if (mLd_CheckStartFlag() == TRUE &&
           aAL_wipe_end_check(game) == TRUE &&
           mTD_tdemo_button_ok_check()) {
         aAL_setupAction(actor, game, aAL_ACTION_FADE_OUT_START);
       }
     } else {
-      /* Options */
+      // options
       actor->pc_options_open = 1;
       actor->pc_cursor_cooldown = 10;
+#ifdef TARGET_VITA
+      banner_scan_folder();
+      texpack_scan_folder();
+#endif
     }
   }
 }
@@ -819,10 +908,10 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   f32 y = 68.0f;
   f32 line_h = 16.0f;
 
-  /* Semi-transparent background behind options panel */
+  // semi-transparent background behind options panel
   {
     Gfx* gfx;
-    int x0 = 45, y0_bg = 58, x1 = 295, y1_bg = 196;
+    int x0 = 45, y0_bg = 58, x1 = 295, y1_bg = 228;
     OPEN_DISP(graph);
     gfx = NOW_FONT_DISP;
     gDPPipeSync(gfx++);
@@ -845,7 +934,7 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   int item = 0;
   static u8 str_arrow[] = { '>' };
 
-  /* Title */
+  // title
   {
     static u8 str_title[] = { '-', ' ', 'O', 'p', 't', 'i', 'o', 'n', 's', ' ', '-' };
     f32 tw = (f32)mFont_GetStringWidth(str_title, sizeof(str_title), TRUE);
@@ -855,101 +944,156 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   }
   y += line_h * 1.2f;
 
-  /* Resolution */
-  len = sprintf(buf, "< %dx%d >", g_pc_settings.window_width, g_pc_settings.window_height);
-  {
-    static u8 lbl[] = { 'R', 'e', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n' };
-    mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
-      sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-      sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  }
-  mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
-    sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-    sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y, 255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  item++; y += line_h;
+// draw a label + value row with selection highlight
+#define DRAW_OPT_ROW(lbl_arr, val_x) do { \
+    int bright = (sel == item) ? 255 : 180; \
+    int alpha  = (sel == item) ? 255 : 160; \
+    mFont_SetLineStrings(game, lbl_arr, sizeof(lbl_arr), x, y, \
+      bright, bright, bright, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT); \
+    mFont_SetLineStrings(game, (u8*)buf, len, val_x, y, \
+      bright, bright, bright, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT); \
+    if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y, \
+      255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT); \
+    item++; y += line_h; \
+  } while(0)
 
-  /* Fullscreen */
+#ifdef TARGET_VITA
+  {
+
+    // Resolution
+    {
+      const char* rs = g_pc_settings.render_scale == 100 ? "< 960x544 >" :
+                       g_pc_settings.render_scale == 75  ? "< 720x408 >" : "< 480x272 >";
+      len = sprintf(buf, "%s", rs);
+    }
+    { static u8 lbl[] = { 'R', 'e', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+    // Aspect Ratio
+    len = sprintf(buf, "< %s >", g_pc_settings.aspect_mode ? "Original 4:3" : "Widescreen");
+    { static u8 lbl[] = { 'A', 's', 'p', 'e', 'c', 't' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+    // Banner (only in 4:3 mode)
+    if (g_pc_settings.aspect_mode) {
+      if (!g_pc_settings.banner_name[0] || g_banner_count == 0) {
+        len = sprintf(buf, "< None >");
+      } else {
+        // strip .png extension for display
+        char display[32];
+        strncpy(display, g_pc_settings.banner_name, sizeof(display) - 1);
+        display[sizeof(display) - 1] = '\0';
+        int dlen = (int)strlen(display);
+        if (dlen > 4 && (strcmp(display + dlen - 4, ".png") == 0 || strcmp(display + dlen - 4, ".PNG") == 0))
+          display[dlen - 4] = '\0';
+        len = sprintf(buf, "< %s >", display);
+      }
+
+      // red text for invalid banners
+      int bidx = banner_find_index(g_pc_settings.banner_name);
+      int is_invalid = (bidx >= 0 && !g_banner_list[bidx].valid);
+
+      {
+        static u8 lbl[] = { 'B', 'a', 'n', 'n', 'e', 'r' };
+        int bright = (sel == item) ? 255 : 180;
+        int alpha  = (sel == item) ? 255 : 160;
+        int r = is_invalid ? 255 : bright;
+        int g_c = is_invalid ? 80 : bright;
+        int b = is_invalid ? 80 : bright;
+        mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
+          r, g_c, b, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
+          r, g_c, b, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y,
+          255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        item++; y += line_h;
+      }
+    }
+
+    // MSAA
+    if (g_pc_settings.msaa > 0)
+      len = sprintf(buf, "< %dx >", g_pc_settings.msaa);
+    else
+      len = sprintf(buf, "< Off >");
+    { static u8 lbl[] = { 'M', 'S', 'A', 'A' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+    // Texture Pack
+    if (!g_pc_settings.texture_pack[0] || g_texpack_count == 0) {
+      len = sprintf(buf, "< None >");
+    } else {
+      len = sprintf(buf, "< %s >", g_pc_settings.texture_pack);
+    }
+    { static u8 lbl[] = { 'T', 'e', 'x', ' ', 'P', 'a', 'c', 'k' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+    // Force Save
+    len = sprintf(buf, "< %s >", g_pc_settings.force_save ? "On" : "Off");
+    { static u8 lbl[] = { 'F', 'o', 'r', 'c', 'e', ' ', 'S', 'a', 'v', 'e' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+    y += line_h * 0.5f;
+
+    // hints
+    {
+      static u8 str_save[] = { 'S', 'T', 'A', 'R', 'T', ':', ' ', 'S', 'a', 'v', 'e' };
+      static u8 str_back[] = { 'B', ':', ' ', 'B', 'a', 'c', 'k' };
+      mFont_SetLineStrings(game, str_save, sizeof(str_save), x, y, 255, 255, 255, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      mFont_SetLineStrings(game, str_back, sizeof(str_back), 190.0f, y, 255, 255, 255, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+    }
+    y += line_h;
+    {
+      static u8 str_restart[] = { '*', ' ', 'R', 'e', 's', 't', 'a', 'r', 't', ' ', 't', 'o', ' ', 'a', 'p', 'p', 'l', 'y' };
+      mFont_SetLineStrings(game, str_restart, sizeof(str_restart), x, y, 255, 200, 100, 140, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+    }
+  }
+
+#else // PC
+  // Resolution
+  len = sprintf(buf, "< %dx%d >", g_pc_settings.window_width, g_pc_settings.window_height);
+  { static u8 lbl[] = { 'R', 'e', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+  // Fullscreen
   {
     const char* fs = g_pc_settings.fullscreen == 0 ? "< Windowed >" :
                      g_pc_settings.fullscreen == 1 ? "< Fullscreen >" : "< Borderless >";
     len = sprintf(buf, "%s", fs);
   }
-  {
-    static u8 lbl[] = { 'D', 'i', 's', 'p', 'l', 'a', 'y' };
-    mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
-      sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-      sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  }
-  mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
-    sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-    sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y, 255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  item++; y += line_h;
+  { static u8 lbl[] = { 'D', 'i', 's', 'p', 'l', 'a', 'y' }; DRAW_OPT_ROW(lbl, 180.0f); }
 
-  /* VSync */
+  // VSync
   len = sprintf(buf, "< %s >", g_pc_settings.vsync ? "On" : "Off");
-  {
-    static u8 lbl[] = { 'V', 'S', 'y', 'n', 'c' };
-    mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
-      sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-      sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  }
-  mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
-    sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-    sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y, 255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  item++; y += line_h;
+  { static u8 lbl[] = { 'V', 'S', 'y', 'n', 'c' }; DRAW_OPT_ROW(lbl, 180.0f); }
 
-  /* MSAA */
+  // MSAA
   if (g_pc_settings.msaa > 0)
     len = sprintf(buf, "< %dx >", g_pc_settings.msaa);
   else
     len = sprintf(buf, "< Off >");
-  {
-    static u8 lbl[] = { 'M', 'S', 'A', 'A' };
-    mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
-      sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-      sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  }
-  mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
-    sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-    sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y, 255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  item++; y += line_h;
+  { static u8 lbl[] = { 'M', 'S', 'A', 'A' }; DRAW_OPT_ROW(lbl, 180.0f); }
 
-  /* Textures */
+  // Textures
   {
     const char* tp = g_pc_settings.preload_textures == 0 ? "< On Demand >" :
                      g_pc_settings.preload_textures == 1 ? "< Preload >" : "< Preload&Cache >";
     len = sprintf(buf, "%s", tp);
   }
-  {
-    static u8 lbl[] = { 'T', 'e', 'x', 't', 'u', 'r', 'e', 's' };
-    mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
-      sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-      sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  }
-  mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
-    sel == item ? 255 : 180, sel == item ? 255 : 180, sel == item ? 255 : 180,
-    sel == item ? 255 : 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 12.0f, y, 255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-  y += line_h * 1.5f;
+  { static u8 lbl[] = { 'T', 'e', 'x', 't', 'u', 'r', 'e', 's' }; DRAW_OPT_ROW(lbl, 180.0f); }
 
-  /* Hints */
+  y += line_h * 0.5f;
+
+  // hints
   {
     static u8 str_save[] = { 'S', 'T', 'A', 'R', 'T', ':', ' ', 'S', 'a', 'v', 'e' };
     static u8 str_back[] = { 'B', ':', ' ', 'B', 'a', 'c', 'k' };
     mFont_SetLineStrings(game, str_save, sizeof(str_save), x, y, 255, 255, 255, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
     mFont_SetLineStrings(game, str_back, sizeof(str_back), 190.0f, y, 255, 255, 255, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
   }
+#endif
+
+#undef DRAW_OPT_ROW
 }
 
 static void aAL_pc_menu_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   GRAPH* graph = game->graph;
   int td = actor->titledemo_no;
 
-  /* Reset modelview to identity — title_draw leaves it transformed */
+  // reset modelview to identity (title_draw leaves it transformed)
   {
     Gfx* gfx;
     OPEN_DISP(graph);
@@ -978,7 +1122,7 @@ static void aAL_pc_menu_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   f32 y1 = 153.0f;
   int sel = actor->pc_menu_sel;
 
-  /* "Start Game" */
+  // "Start Game"
   mFont_SetLineStrings(game, str_start, sizeof(str_start), start_x, y0,
     sel == 0 ? sel_r[td] : dim_r[td],
     sel == 0 ? sel_g[td] : dim_g[td],
@@ -986,7 +1130,7 @@ static void aAL_pc_menu_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     sel == 0 ? 255 : 160,
     FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
 
-  /* "Options" */
+  // "Options"
   mFont_SetLineStrings(game, str_options, sizeof(str_options), opt_x, y1,
     sel == 1 ? sel_r[td] : dim_r[td],
     sel == 1 ? sel_g[td] : dim_g[td],
@@ -994,7 +1138,7 @@ static void aAL_pc_menu_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     sel == 1 ? 255 : 160,
     FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
 
-  /* Cursor ">" */
+  // cursor
   {
     f32 arrow_x = (sel == 0 ? start_x : opt_x) - 14.0f;
     f32 arrow_y = sel == 0 ? y0 : y1;
@@ -1003,7 +1147,7 @@ static void aAL_pc_menu_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
   }
 
-  /* Options sub-menu overlay */
+  // options sub-menu overlay
   if (actor->pc_options_open) {
     aAL_pc_options_draw(actor, game);
   }

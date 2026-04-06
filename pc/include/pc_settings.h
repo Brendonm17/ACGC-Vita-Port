@@ -29,6 +29,9 @@ typedef struct {
 
     // Vita texture pack
     char texture_pack[32]; // VTC filename (without .vtc) in texture_packs/, empty = none
+
+    // Vita gameplay
+    int force_save;       // 0=off, 1=auto-save on suspend resume and quit
 #endif
 } PCSettings;
 

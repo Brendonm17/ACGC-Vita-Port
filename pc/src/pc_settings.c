@@ -21,6 +21,7 @@ PCSettings g_pc_settings = {
     .banner_name   = "",
     .multithread   = 1,
     .texture_pack  = "",
+    .force_save    = 0,
 #endif
 };
 
@@ -57,7 +58,11 @@ static const char* DEFAULT_SETTINGS =
     "\n"
     "# texture_pack: name of .vtc file in ux0:data/AnimalCrossing/texture_packs/ (without .vtc)\n"
     "# Leave empty for no texture pack. Can also be set in-game Options menu.\n"
-    "texture_pack = \n";
+    "texture_pack = \n"
+    "\n"
+    "[Gameplay]\n"
+    "# force_save: 0 = off, 1 = auto-save on suspend resume and quit\n"
+    "force_save = 0\n";
 #else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
@@ -139,6 +144,8 @@ static void apply_setting(const char* key, const char* value) {
     } else if (strcmp(key, "texture_pack") == 0) {
         strncpy(g_pc_settings.texture_pack, value, sizeof(g_pc_settings.texture_pack) - 1);
         g_pc_settings.texture_pack[sizeof(g_pc_settings.texture_pack) - 1] = '\0';
+    } else if (strcmp(key, "force_save") == 0) {
+        g_pc_settings.force_save = (val != 0) ? 1 : 0;
     }
 #endif
 }
@@ -173,7 +180,10 @@ void pc_settings_save(void) {
     fprintf(f, "multithread = %d\n\n", g_pc_settings.multithread);
     fprintf(f, "[Textures]\n");
     fprintf(f, "# texture_pack: name of .vtc file in texture_packs/ (without .vtc), empty = none\n");
-    fprintf(f, "texture_pack = %s\n", g_pc_settings.texture_pack);
+    fprintf(f, "texture_pack = %s\n\n", g_pc_settings.texture_pack);
+    fprintf(f, "[Gameplay]\n");
+    fprintf(f, "# force_save: 0 = off, 1 = auto-save on suspend resume and quit\n");
+    fprintf(f, "force_save = %d\n", g_pc_settings.force_save);
 #else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");

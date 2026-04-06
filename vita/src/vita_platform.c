@@ -8,6 +8,7 @@
 #include "vita_gx_cmdbuf.h"
 
 #include <psp2/power.h>
+#include <psp2/appmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/cpu.h>
@@ -347,11 +348,33 @@ void pc_platform_swap_buffers(void) {
     vita_timing.swap_us = sceKernelGetProcessTimeLow() - t0;
 }
 
+static void vita_force_save(void) {
+    extern int pc_save_loaded;
+    if (pc_save_loaded) {
+        extern int mCD_SaveHome_bg(int, int*);
+        mCD_SaveHome_bg(0, NULL);
+    }
+}
+
 int pc_platform_poll_events(void) {
+    // check for resume from suspend
+    if (g_pc_settings.force_save) {
+        SceAppMgrSystemEvent sys_event;
+        while (sceAppMgrReceiveSystemEvent(&sys_event) >= 0) {
+            if (sys_event.systemEvent == SCE_APPMGR_SYSTEMEVENT_ON_RESUME) {
+                vita_force_save();
+                sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
+            }
+        }
+    }
+
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
             case SDL_QUIT:
+                if (g_pc_settings.force_save) {
+                    vita_force_save();
+                }
                 g_pc_running = 0;
                 return 0;
         }
