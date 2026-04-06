@@ -86,7 +86,7 @@ Place PNG files in `ux0:data/AnimalCrossing/banners/`. Set `banner=filename` (wi
 ## HD Texture Packs
 
 Supports Dolphin HD texture packs converted to VTC format for hardware DXT decompression.
-Currently very experimental, texture packs have issues with alpha textures and slight bounds issues.
+Currently experimental.
 
 ### Building a pack
 
@@ -98,9 +98,9 @@ Currently very experimental, texture packs have issues with alpha textures and s
 3. Copy `.vtc` to `ux0:data/AnimalCrossing/texture_packs/`
 4. Set `texture_pack=vita_texcache` in settings.ini
 
-The converter re-encodes to DXT1/DXT5. Square power-of-two textures get PVRTC for extra compression.
+The converter re-encodes to DXT1 (opaque) or DXT5 (alpha) for hardware decompression on the Vita GPU.
 
-Requires Python packages: `texture2ddecoder`, `etcpak`. Optional: PVRTexTool CLI for PVRTC (`PVRTEXTOOL_CLI` env var).
+Requires Python packages: `texture2ddecoder`, `etcpak`.
 
 ## Shaders
 

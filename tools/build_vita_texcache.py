@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Build vita_texcache.vtc for PS Vita from a Dolphin-compatible HD texture pack.
 
-Decodes all DDS files (BC7/BC3/BC1/RGBA) -> RGBA -> PVRTC or DXT -> VTC cache.
-Square power-of-2 textures use PVRTC 4bpp (native PowerVR, fastest upload).
-Non-square/non-POT textures fall back to DXT1/DXT5.
+Decodes all DDS files (BC7/BC3/BC1/RGBA) -> RGBA -> DXT1/DXT5 -> VTC cache.
+Opaque textures use DXT1 (4 bpp), alpha textures use DXT5 (8 bpp).
 
 Usage:
     python build_vita_texcache.py <texture_pack_dir> [output_file]
@@ -17,7 +16,6 @@ import sys
 import glob
 import zipfile
 import time
-import subprocess
 
 try:
     import texture2ddecoder
@@ -32,17 +30,7 @@ except ImportError:
 VTC_MAGIC    = 0x56544331  # "VTC1"
 VTC_VERSION  = 2
 FMT_DXT1     = 1
-FMT_PVRTC4   = 4   # PVRTC V1 4bpp (native PowerVR, square POT)
 FMT_DXT5     = 5
-FMT_PVRTCII  = 6   # PVRTCII V2 4bpp (native PowerVR, non-square POT)
-
-# --- Tool paths ---
-PVRTC_ENCODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pvrtc_encode")
-if sys.platform == "win32":
-    PVRTC_ENCODE += ".exe"
-
-PVRTEXTOOL_CLI = os.environ.get("PVRTEXTOOL_CLI",
-    r"C:\Program Files\Imgtec\PowerVR_Tools\PVRTexTool\CLI\Windows_x86_64\PVRTexToolCLI.exe")
 
 # --- Cache key (must match loaded_cache_key in pc_texture_pack.c) ---
 def loaded_cache_key(data_hash, tlut_hash, fmt, w, h):
@@ -156,10 +144,6 @@ def has_meaningful_alpha(rgba_bytes):
             return True
     return False
 
-# --- Power-of-2 check ---
-def is_pot(n):
-    return n >= 8 and (n & (n - 1)) == 0
-
 # --- DXT encoding ---
 def encode_dxt(rgba_bytes, w, h, use_dxt5):
     """Encode RGBA to DXT1 or DXT5 using etcpak. Returns (dxt_bytes, format_id)."""
@@ -189,133 +173,6 @@ def encode_dxt(rgba_bytes, w, h, use_dxt5):
     else:
         return (etcpak.compress_to_dxt1(rgba_bytes, w, h), FMT_DXT1)
 
-# --- PVR file header parsing ---
-PVR_HEADER_SIZE = 52  # PVR v3 header
-
-def parse_pvr_data(pvr_bytes, expected_w=0, expected_h=0):
-    """Extract raw compressed data from a PVR v3 file.
-    If expected_w/h are given, reject if PVRTexTool resized the texture."""
-    if len(pvr_bytes) < PVR_HEADER_SIZE:
-        return None
-    # PVR v3 header: version(4) flags(4) pixfmt(8) colourspace(4) chantype(4)
-    #                height(4) width(4) depth(4) numsurfaces(4) numfaces(4)
-    #                mipcount(4) metasize(4)
-    version = struct.unpack_from('<I', pvr_bytes, 0)[0]
-    if version != 0x03525650:  # "PVR\x03"
-        return None
-    if expected_w and expected_h:
-        out_h = struct.unpack_from('<I', pvr_bytes, 24)[0]
-        out_w = struct.unpack_from('<I', pvr_bytes, 28)[0]
-        if out_w != expected_w or out_h != expected_h:
-            print(f"  WARNING: PVRTexTool resized {expected_w}x{expected_h} -> {out_w}x{out_h}, falling back to DXT")
-            return None
-    meta_size = struct.unpack_from('<I', pvr_bytes, 48)[0]
-    data_offset = PVR_HEADER_SIZE + meta_size
-    return pvr_bytes[data_offset:]
-
-# --- PVRTC encoding via PVRTexTool CLI ---
-def encode_pvrtc_pvrtextool(rgba_bytes, w, h, is_square):
-    """Encode RGBA to PVRTC via PVRTexToolCLI. Returns (data, fmt_id) or None."""
-    import tempfile
-    # Write raw RGBA as a temporary TGA file (simplest uncompressed format)
-    # Actually, write as raw RGBA and use PVRTexTool's raw input
-    # Simpler: write a temporary PNG, let PVRTexTool read it
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.pvr', delete=False) as tmp_in:
-            tmp_in_path = tmp_in.name
-            # Write PVR v3 header with RGBA8 format
-            # pixfmt for r8g8b8a8 = bytes [8,8,8,8,r,g,b,a] = specific encoding
-            # Easier: write raw RGBA file and tell PVRTexTool the format
-            # Actually simplest: create a raw file and use specific flags
-            pass
-
-        with tempfile.NamedTemporaryFile(suffix='.pvr', delete=False) as tmp_out:
-            tmp_out_path = tmp_out.name
-
-        # Write a minimal PVR v3 file with RGBA8 uncompressed data
-        with open(tmp_in_path, 'wb') as f:
-            # PVR v3 header
-            f.write(struct.pack('<I', 0x03525650))   # version
-            f.write(struct.pack('<I', 0))              # flags
-            f.write(struct.pack('<Q', 0x0808080861626772))  # pixfmt: r8g8b8a8
-            f.write(struct.pack('<I', 0))              # colourspace (lRGB)
-            f.write(struct.pack('<I', 0))              # channel type (UBN)
-            f.write(struct.pack('<I', h))              # height
-            f.write(struct.pack('<I', w))              # width
-            f.write(struct.pack('<I', 1))              # depth
-            f.write(struct.pack('<I', 1))              # num surfaces
-            f.write(struct.pack('<I', 1))              # num faces
-            f.write(struct.pack('<I', 1))              # mip count
-            f.write(struct.pack('<I', 0))              # meta size
-            f.write(rgba_bytes)                        # pixel data
-
-        # Choose format based on square vs non-square
-        if is_square:
-            pvr_fmt = "PVRTCI_4BPP_RGBA"
-            fmt_id = FMT_PVRTC4
-        else:
-            pvr_fmt = "PVRTCII_4BPP"
-            fmt_id = FMT_PVRTCII
-
-        result = subprocess.run(
-            [PVRTEXTOOL_CLI, "-i", tmp_in_path, "-f", pvr_fmt, "-o", tmp_out_path, "-shh", "-q", "pvrtcfast"],
-            capture_output=True, timeout=30)
-
-        if result.returncode != 0:
-            return None
-
-        with open(tmp_out_path, 'rb') as f:
-            pvr_data = f.read()
-
-        compressed = parse_pvr_data(pvr_data, w, h)
-        if compressed is None:
-            return None
-
-        return (compressed, fmt_id)
-    except Exception:
-        return None
-    finally:
-        try: os.unlink(tmp_in_path)
-        except: pass
-        try: os.unlink(tmp_out_path)
-        except: pass
-
-# --- PVRTC encoding via built-in encoder (square POT only, fallback) ---
-def encode_pvrtc_builtin(rgba_bytes, w, h):
-    """Encode RGBA to PVRTC V1 4bpp via built-in tool. Returns (data, FMT_PVRTC4) or None."""
-    result = subprocess.run(
-        [PVRTC_ENCODE, str(w), str(h)],
-        input=rgba_bytes, capture_output=True)
-    if result.returncode != 0:
-        return None
-    expected_size = w * h // 2
-    if len(result.stdout) != expected_size:
-        return None
-    return (result.stdout, FMT_PVRTC4)
-
-# --- Texture encoder (chooses PVRTC or DXT) ---
-def encode_texture(rgba_bytes, w, h, use_alpha, pvrtextool_available, pvrtc_builtin_available):
-    """Encode texture to best available format.
-    POT textures -> PVRTC (native PowerVR, via PVRTexTool or built-in).
-    Non-POT -> DXT1/DXT5 fallback."""
-    if is_pot(w) and is_pot(h):
-        is_square = (w == h)
-
-        # Try PVRTexTool first (handles both square and non-square)
-        if pvrtextool_available:
-            result = encode_pvrtc_pvrtextool(rgba_bytes, w, h, is_square)
-            if result:
-                return result
-
-        # Fallback: built-in encoder (square only)
-        if is_square and pvrtc_builtin_available:
-            result = encode_pvrtc_builtin(rgba_bytes, w, h)
-            if result:
-                return result
-
-    # DXT fallback for non-POT or encoder failures
-    return encode_dxt(rgba_bytes, w, h, use_alpha)
-
 # --- Main ---
 def main():
     if len(sys.argv) < 2:
@@ -327,20 +184,6 @@ def main():
 
     if not os.path.isdir(pack_dir):
         print(f"ERROR: {pack_dir} is not a directory"); sys.exit(1)
-
-    # Check for PVRTC encoders
-    pvrtextool_available = os.path.isfile(PVRTEXTOOL_CLI)
-    pvrtc_builtin_available = os.path.isfile(PVRTC_ENCODE)
-
-    if pvrtextool_available:
-        print(f"PVRTexTool CLI found: {PVRTEXTOOL_CLI}")
-        print("  All POT textures will use native PVRTC (V1 square, V2 non-square)")
-    elif pvrtc_builtin_available:
-        print(f"Built-in PVRTC encoder found: {PVRTC_ENCODE}")
-        print("  Only square POT textures will use PVRTC. Install PVRTexTool for full coverage.")
-    else:
-        print("WARNING: No PVRTC encoder found. All textures will use DXT.")
-        print(f"  Install PVRTexTool or build: gcc -O2 -o pvrtc_encode pvrtc_encode.c")
 
     # Collect DDS files
     print(f"Scanning {pack_dir}...")
@@ -372,7 +215,7 @@ def main():
     t_start = time.time()
 
     entries = []  # (cache_key, compressed_bytes, hd_w, hd_h, fmt_id)
-    pvrtc_count = pvrtcii_count = dxt1_count = dxt5_count = failed = 0
+    dxt1_count = dxt5_count = failed = 0
     total_compressed_size = 0
 
     for i, (parsed, read_func) in enumerate(dds_files):
@@ -389,11 +232,9 @@ def main():
 
         hd_w, hd_h, rgba = result
         use_alpha = has_meaningful_alpha(rgba)
-        comp_data, fmt_id = encode_texture(rgba, hd_w, hd_h, use_alpha, pvrtextool_available, pvrtc_builtin_available)
+        comp_data, fmt_id = encode_dxt(rgba, hd_w, hd_h, use_alpha)
 
-        if fmt_id == FMT_PVRTC4: pvrtc_count += 1
-        elif fmt_id == FMT_PVRTCII: pvrtcii_count += 1
-        elif fmt_id == FMT_DXT1: dxt1_count += 1
+        if fmt_id == FMT_DXT1: dxt1_count += 1
         else: dxt5_count += 1
         total_compressed_size += len(comp_data)
 
@@ -402,7 +243,7 @@ def main():
         if (i + 1) % 500 == 0 or i == total - 1:
             elapsed = time.time() - t_start
             pct = (i + 1) * 100 // total
-            print(f"  {i+1}/{total} ({pct}%) — PVRTCv1:{pvrtc_count} PVRTCv2:{pvrtcii_count} DXT1:{dxt1_count} DXT5:{dxt5_count} failed:{failed} — {elapsed:.1f}s")
+            print(f"  {i+1}/{total} ({pct}%) — DXT1:{dxt1_count} DXT5:{dxt5_count} failed:{failed} — {elapsed:.1f}s")
 
     # Sort by cache_key for binary search on Vita
     entries.sort(key=lambda e: e[0])
@@ -451,8 +292,7 @@ def main():
     elapsed = time.time() - t_start
     file_size = os.path.getsize(output_file)
     print(f"\nDone in {elapsed:.1f}s!")
-    pvrtc_total = pvrtc_count + pvrtcii_count
-    print(f"  Textures: {count} (PVRTC:{pvrtc_total} [V1:{pvrtc_count} V2:{pvrtcii_count}] DXT1:{dxt1_count} DXT5:{dxt5_count}, {failed} failed)")
+    print(f"  Textures: {count} (DXT1:{dxt1_count} DXT5:{dxt5_count}, {failed} failed)")
     print(f"  File size: {file_size / (1024*1024):.1f} MB")
     print(f"  Index: {count * 24 / 1024:.0f} KB")
     print(f"  Compressed data: {total_compressed_size / (1024*1024):.1f} MB")

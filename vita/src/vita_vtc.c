@@ -16,9 +16,7 @@
 // Resolved VTC path from settings (built once at init, shared by both file handles)
 static char g_vtc_path[128] = "";
 #define VTC_FMT_DXT1    1
-#define VTC_FMT_PVRTC4  4   // PVRTC V1 4bpp, native PowerVR, square POT
 #define VTC_FMT_DXT5    5
-#define VTC_FMT_PVRTCII 6   // PVRTCII V2 4bpp, native PowerVR, non-square POT
 
 #ifndef GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
 #define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT  0x83F1
@@ -26,21 +24,13 @@ static char g_vtc_path[128] = "";
 #ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT  0x83F3
 #endif
-#ifndef GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG
-#define GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG  0x8C02
-#endif
-#ifndef GL_COMPRESSED_RGBA_PVRTC_4BPPV2_IMG
-#define GL_COMPRESSED_RGBA_PVRTC_4BPPV2_IMG  0x9138
-#endif
 
 // Map VTC format byte to GL compressed format enum
 static GLenum vtc_fmt_to_gl(unsigned char fmt) {
     switch (fmt) {
-        case VTC_FMT_DXT1:    return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
-        case VTC_FMT_DXT5:    return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
-        case VTC_FMT_PVRTC4:  return GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG;
-        case VTC_FMT_PVRTCII: return GL_COMPRESSED_RGBA_PVRTC_4BPPV2_IMG;
-        default:              return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        case VTC_FMT_DXT1: return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+        case VTC_FMT_DXT5: return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        default:           return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
     }
 }
 
@@ -251,13 +241,12 @@ static unsigned long long vtc_cache_key(unsigned long long data_hash, unsigned l
 
 // Estimate vRAM for a compressed texture
 int vtc_estimate_vram(int w, int h, int fmt) {
-    // DXT5 = 8bpp, DXT1/PVRTC4/PVRTCII = 4bpp
+    // DXT5 = 8bpp, DXT1 = 4bpp
     if (fmt == VTC_FMT_DXT5) {
         int blocks_x = (w + 3) / 4;
         int blocks_y = (h + 3) / 4;
         return blocks_x * blocks_y * 16;
     }
-    // PVRTC4 and DXT1 are both 4bpp
     int blocks_x = (w + 3) / 4;
     int blocks_y = (h + 3) / 4;
     return blocks_x * blocks_y * 8;

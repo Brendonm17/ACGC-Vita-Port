@@ -124,11 +124,8 @@ void vita_init(void) {
         if (mk_ret4 < 0 && mk_ret4 != VITA_EEXIST)
             printf("[VITA] WARNING: banners dir failed: 0x%08X\n", mk_ret4);
     }
-    {
-        int mk_ret5 = sceIoMkdir("ux0:data/AnimalCrossing/texture_pack", 0777);
-        if (mk_ret5 < 0 && mk_ret5 != VITA_EEXIST)
-            printf("[VITA] WARNING: texture_pack dir failed: 0x%08X\n", mk_ret5);
-    }
+    // clean up old texture_pack dir (renamed to texture_packs)
+    sceIoRmdir("ux0:data/AnimalCrossing/texture_pack");
     {
         int mk_ret6 = sceIoMkdir("ux0:data/AnimalCrossing/texture_packs", 0777);
         if (mk_ret6 < 0 && mk_ret6 != VITA_EEXIST)
