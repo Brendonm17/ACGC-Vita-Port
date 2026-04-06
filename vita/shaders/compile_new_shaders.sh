@@ -75,6 +75,13 @@ compile_lfa cfg36_f.cg cfg36 "CFG36: (KONST*TEX)*RAS island ocean (2-stage)"
 compile_lfa cfg37_f.cg cfg37 "CFG37: TEX*RAS + TEXA alpha (island terrain, 1-stage)"
 compile_lfa cfg38_f.cg cfg38 "CFG38: TEX*(1+RAS)+RAS*KONST color + TEXA*A1 alpha (island, 2-stage)"
 compile_lfa cfg39_f.cg cfg39 "CFG39: lerp(C2,C1,TEX) + TEXA*APREV alpha chain (island, 2-stage)"
+compile_lfa cfg40_f.cg cfg40 "CFG40: tex*ras*C1 color + register alpha D"
+compile_lfa cfg41_f.cg cfg41 "CFG41: RASC color passthrough + register alpha D"
+compile_lfa cfg42_f.cg cfg42 "CFG42: tex*ras color + reg*TEXA + reg*KONST alpha"
+compile_lfa cfg43_f.cg cfg43 "CFG43: tex*ras+C2 color + reg*TEXA + reg*KONST alpha"
+compile_lfa cfg44_f.cg cfg44 "CFG44: C2 color + RASA*TEXA accumulated alpha (2-stage)"
+compile_lfa cfg45_f.cg cfg45 "CFG45: 1-stage god ray: reg*tex color + reg*TEXA alpha"
+compile_lfa cfg46_f.cg cfg46 "CFG46: 2-stage god ray: reg*tex+reg*reg color + TEXA chain alpha"
 
 # Composite shader for depth-aware water FBO compositing (single variant each)
 echo "Compiling composite_v.gxp"

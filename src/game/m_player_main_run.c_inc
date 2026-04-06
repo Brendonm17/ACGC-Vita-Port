@@ -98,7 +98,6 @@ static void Player_actor_request_proc_index_fromRun_common(ACTOR* actor, GAME* g
         Player_actor_request_main_walk_all(game, NULL, -5.0f, 0, mPlayer_REQUEST_PRIORITY_1);
     }
 
-    // dasshu/dush = "dash" lmao
     if (speed >= 4.875f && Player_actor_CheckController_forDush()) {
         Player_actor_request_main_dash_all(game, -5.0f, 0, mPlayer_REQUEST_PRIORITY_1);
     }

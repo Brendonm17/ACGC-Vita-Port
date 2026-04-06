@@ -12,11 +12,18 @@
 // #include "va_args.h"
 #include "jsyswrap.h"
 #include "dolphin/PPCArch.h"
+#ifdef TARGET_VITA
+#include "vita_shared.h"
+#endif
 
 #ifdef TARGET_PC
 #include "pc_platform.h"
 
 static jmp_buf pc_dl_crash_jmpbuf;
+
+// Forward declarations - defined in pc_gx*.c (C linkage)
+extern "C" void pc_gx_texture_cache_invalidate(void);
+extern "C" void pc_gx_abort_batch(void);
 #endif
 
 // this pragma may be unnecessary
@@ -459,6 +466,13 @@ static void texture_cache_list_clear() {
 
 extern void emu64_refresh() {
     texture_cache_list_clear();
+#ifdef TARGET_PC
+    // Flush the GL texture cache: when the N64 texture mapping is cleared,
+    // old GL textures become orphaned in VRAM (unreferenced but never freed).
+    // Without this, repeated scene transitions exhaust the 32MB VRAM pool
+    // causing a GPU hang on Vita (~65 seconds after first transition).
+    pc_gx_texture_cache_invalidate();
+#endif
 }
 
 static u16 cvtN64ToDol(int n64_fmt, int n64_bpp) {
@@ -625,6 +639,7 @@ static void emu64_init2(GXRenderModeObj* render_mode) {
 
 void emu64::emu64_init() {
     bzero(this, sizeof(emu64));
+    this->cached_vtx_desc_key = -1;
     GXSetCurrentGXThread();
     emu64_init2(&GXNtsc480IntDf);
     GXSetAlphaUpdate(GX_FALSE);
@@ -1992,6 +2007,7 @@ void emu64::combine() {
             GXSetTevAlphaIn(GX_TEVSTAGE1, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
             GXSetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_KONST);
         }
+
     }
 }
 
@@ -2078,7 +2094,7 @@ void emu64::setup_texture_tile(int tile) {
             twd0 = width;
             orig_addr = tmem_addr;
             tht0 = height;
-            
+
             if (settile->ct) {
                 u32 tlen = this->settilesize_dolphin_cmds[tile].tlen + 1;
                 if (tht0 > tlen) {
@@ -2088,6 +2104,11 @@ void emu64::setup_texture_tile(int tile) {
 
             if (tht0 > sizet) {
                 tht0 = sizet;
+            }
+
+            // clamp width by masks only for mirrored textures (mirror boundary)
+            if (settile->ms != 0 && twd0 > sizes) {
+                twd0 = sizes;
             }
 
             if (tmem_addr == this->texture_info[tile].img_addr) {
@@ -2101,8 +2122,14 @@ void emu64::setup_texture_tile(int tile) {
                     return;
                 }
             }
-            
-            converted_addr = this->texconv_block_new(tmem_addr, width, tht0, settile->fmt, settile->siz, loadblock->th > 0 ? 0 : settile->line);
+
+            // mask-clamped: use texconv_tile_new to preserve source stride
+            if (twd0 < width) {
+                converted_addr = this->texconv_tile_new(tmem_addr, width, settile->fmt, settile->siz,
+                    0, 0, twd0 - 1, tht0 - 1, loadblock->th > 0 ? 0 : settile->line);
+            } else {
+                converted_addr = this->texconv_block_new(tmem_addr, width, tht0, settile->fmt, settile->siz, loadblock->th > 0 ? 0 : settile->line);
+            }
         }
         else {
             unsigned int w0;
@@ -2283,6 +2310,10 @@ void emu64::setup_texture_tile(int tile) {
 }
 
 void emu64::blend_mode() {
+#ifdef TARGET_VITA
+    // export ZMODE bits to distinguish water from shadows (same blend state)
+    vita_current_zmode = this->othermode_low & ZMODE_DEC;
+#endif
     if ((this->othermode_low & ZMODE_DEC) == ZMODE_DEC &&
         (this->geometry_mode & G_DECAL_ALL) == (G_DECAL_GEQUAL | G_DECAL_SPECIAL)) {
         GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_NOOP);
@@ -2682,6 +2713,12 @@ void emu64::texture_matrix() {
 }
 
 void emu64::set_position(unsigned int vtx) {
+#ifdef TARGET_PC
+    // Bounds check: vertex indices from display list commands should always be
+    // within [0, VTX_COUNT). If not, the display list data is corrupt -- skip
+    // this vertex rather than corrupting memory via out-of-bounds access.
+    if (vtx >= VTX_COUNT) return;
+#endif
     Vertex* emu_vtx = &this->vertices[vtx];
 
     if (this->using_nonshared_mtx && (emu_vtx->flag & MTX_NONSHARED) == MTX_SHARED) {
@@ -2877,22 +2914,31 @@ void emu64::setup_1tri_2tri_1quad(unsigned int vtx_idx) {
     }
 #endif
 
-    GXClearVtxDesc();
-    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
-    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_CLR_RGBA, GX_F32, 0);
-    if ((this->geometry_mode & G_LIGHTING) != 0) {
-        GXSetVtxDesc(GX_VA_NRM, GX_DIRECT);
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_NRM, GX_CLR_RGB, GX_F32, 0);
-        GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-    } else {
-        GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-    }
-
-    if (this->texture_gfx.on != G_OFF) {
-        GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_CLR_RGBA, GX_RGBA4, 0);
+    // Cache vertex descriptor setup -- skip if geometry_mode and texture state
+    // haven't changed since last call. Saves ~6 GX calls per triangle.
+    {
+        int has_lighting = (this->geometry_mode & G_LIGHTING) != 0;
+        int has_texture = (this->texture_gfx.on != G_OFF);
+        int vtx_desc_key = (has_lighting << 1) | has_texture;
+        if (vtx_desc_key != this->cached_vtx_desc_key) {
+            this->cached_vtx_desc_key = vtx_desc_key;
+            GXClearVtxDesc();
+            GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+            GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_CLR_RGBA, GX_F32, 0);
+            if (has_lighting) {
+                GXSetVtxDesc(GX_VA_NRM, GX_DIRECT);
+                GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_NRM, GX_CLR_RGB, GX_F32, 0);
+                GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+                GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+            } else {
+                GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+                GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+            }
+            if (has_texture) {
+                GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+                GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_CLR_RGBA, GX_RGBA4, 0);
+            }
+        }
     }
 
     EMU64_TIMED_SEGMENT_END(setup_time);
@@ -3152,6 +3198,16 @@ void emu64::draw_rectangle(Gtexrect2* texrect) {
 }
 
 void emu64::dirty_check(int tile, int n_tiles, int do_texture_matrix) {
+#ifdef TARGET_VITA
+    // Fast early-out: skip all dirty flag checks when no flags are set.
+    // dirty_flags is bool[32] -- check as 8 u32 words for any non-zero byte.
+    // After the first triangle in a batch, all flags are typically cleared.
+    if (aflags[AFLAGS_SET_DIRTY_FLAGS] == DIRTY_SET_NONE) {
+        const u32* dw = (const u32*)this->dirty_flags;
+        if ((dw[0] | dw[1] | dw[2] | dw[3] | dw[4] | dw[5] | dw[6] | dw[7]) == 0)
+            return;
+    }
+#endif
     if (aflags[AFLAGS_SET_DIRTY_FLAGS] != DIRTY_SET_NONE) {
         if ((int)aflags[AFLAGS_SET_DIRTY_FLAGS] == DIRTY_SET_ALL) {
             // memset(this->dirty_flags, TRUE, NUM_DIRTY_FLAGS);
@@ -4640,6 +4696,14 @@ void emu64::dl_G_VTX() {
             EMU64_TIMED_SEGMENT_END(spvertex_time);
             return;
         }
+        // Bounds check: prevent write past vertices[VTX_COUNT]
+        if (v0 >= VTX_COUNT) {
+            EMU64_TIMED_SEGMENT_END(spvertex_time);
+            return;
+        }
+        if (v0 + n > VTX_COUNT) {
+            n = VTX_COUNT - v0;
+        }
 #endif
 #ifdef PC_GX_VERBOSE
         {
@@ -5196,6 +5260,12 @@ void emu64::dl_G_CULLDL() {
 
     EMU64_WARNF("gsSPCullDisplayList(%d, %d),", vstart, vend);
 
+#ifdef TARGET_PC
+    // Bounds check: prevent access past vertices[VTX_COUNT]
+    if (vstart >= VTX_COUNT) return;
+    if (vend >= VTX_COUNT) vend = VTX_COUNT - 1;
+#endif
+
     EMU64_LOG("vn mask   x     y    z  \n");
     mask = G_CULL_Z_GREATERTHAN | G_CULL_Z_LESSTHAN | G_CULL_Y_GREATERTHAN | G_CULL_Y_LESSTHAN | G_CULL_X_GREATERTHAN |
            G_CULL_X_LESSTHAN; /* 0x3F00 */
@@ -5376,6 +5446,9 @@ void emu64::dl_G_POPMTX() {
 #endif
 
     this->mtx_stack_size -= n;
+#ifdef TARGET_PC
+    if (this->mtx_stack_size < 0) this->mtx_stack_size = 0;
+#endif
     this->dirty_flags[EMU64_DIRTY_FLAG_POSITION_MTX] = true;
 }
 
@@ -5448,6 +5521,7 @@ void emu64::dl_G_MOVEWORD() {
             EMU64_WARNF("gsSPSegmentA(%d, 0x%08x),", segment, moveword->data);
 #ifdef TARGET_PC
             /* On PC, store address directly (no GC physical address mapping) */
+            if (segment >= EMU64_NUM_SEGMENTS) break;
             this->segments[segment] = moveword->data;
 #else
             this->segments[segment] = (0x80000000 + (moveword->data & 0x0FFFFFFF));
@@ -5692,6 +5766,12 @@ void emu64::dl_G_SPECIAL_1() {
     }
 }
 
+void emu64::dl_G_QUEUE_HINT() {
+#ifdef TARGET_VITA
+    pc_gx_current_queue = this->gfx.words.w0 & 0xFF;
+#endif
+}
+
 bool emu64::displayWarning = false;
 u8 FrameCansel = false;
 
@@ -5699,7 +5779,7 @@ static dl_func dl_func_tbl[NUM_COMMANDS] = {
     &emu64::dl_G_SETTEXEDGEALPHA,
     &emu64::dl_G_SETCOMBINE_NOTEV,
     &emu64::dl_G_SETCOMBINE_TEV,
-    &emu64::dl_G_NOOP,
+    &emu64::dl_G_QUEUE_HINT,
     &emu64::dl_G_SETTILE_DOLPHIN,
     &emu64::dl_G_NOOP,
     &emu64::dl_G_NOOP,
@@ -5780,6 +5860,11 @@ u32 emu64::emu64_taskstart_r(Gfx* dl_p) {
     if (pc_dl_recovery_point) {
         pc_emu64_frame_crashes++;
         pc_dl_recovery_point = 0;
+        // Discard any partial GL batch -- the crash may have interrupted
+        // a GXBegin/vertex/GXEnd sequence, leaving VitaGL with inconsistent
+        // internal state (partial VBO, bound shader, pending draw). Without
+        // this reset, accumulated inconsistency corrupts VitaGL's buffers.
+        pc_gx_abort_batch();
         /* Re-arm the crash protection for the next iteration */
         pc_crash_set_jmpbuf(&pc_dl_crash_jmpbuf);
         /* Pop DL stack to return to parent display list instead of terminating */
@@ -5800,10 +5885,22 @@ u32 emu64::emu64_taskstart_r(Gfx* dl_p) {
 #endif
 
     while (!this->end_dl && !FrameCansel) {
-        this->cmds_processed++;
-        EMU64_INFOF("%08x:", this->gfx_p);
         this->gfx = *this->gfx_p;
         this->gfx_cmd = this->gfx.dma.cmd;
+
+#ifdef TARGET_VITA
+        // skip debug overhead on vita
+        u8 cmd_index = this->gfx_cmd - G_FIRST_CMD;
+        if (cmd_index < NUM_COMMANDS && dl_func_tbl[cmd_index] != nullptr) {
+            (this->*dl_func_tbl[cmd_index])();
+        } else {
+            break;
+        }
+        this->gfx_p++;
+#else
+        this->cmds_processed++;
+        EMU64_INFOF("%08x:", this->gfx_p);
+
         this->dl_history[this->dl_history_start++] = this->gfx_p;
         if (this->dl_history_start >= DL_HISTORY_COUNT) {
             this->dl_history_start = 0;
@@ -5870,6 +5967,7 @@ u32 emu64::emu64_taskstart_r(Gfx* dl_p) {
 
         EMU64_INFO("\n");
         this->gfx_p++;
+#endif // TARGET_VITA
     }
 
 #ifdef TARGET_PC
@@ -6056,3 +6154,90 @@ extern int emu64_get_aflags(int idx) {
 
     return 0;
 }
+
+#ifdef TARGET_VITA
+// sub-dl vertex cache
+
+void emu64::dl_cache_init(void) {
+    memset(dl_cache, 0, sizeof(dl_cache));
+    dl_cache_vpool_used = 0;
+    dl_cache_recording = -1;
+    dl_cache_hits = 0;
+    dl_cache_misses = 0;
+    dl_cache_culled = 0;
+}
+
+u32 emu64::dl_cache_hash(const void* dl_ptr, const GC_Mtx* mtx) {
+    u32 h = 0x811c9dc5;
+    const u8* p = (const u8*)dl_ptr;
+    for (int i = 0; i < 128; i++) { h ^= p[i]; h *= 0x01000193; }
+    const u8* m = (const u8*)mtx;
+    for (int i = 0; i < 48; i++) { h ^= m[i]; h *= 0x01000193; }
+    return h;
+}
+
+int emu64::dl_cache_find(u32 addr, u32 hash) {
+    u32 slot = addr & (DL_CACHE_SIZE - 1);
+    for (int i = 0; i < 4; i++) {
+        int idx = (slot + i) & (DL_CACHE_SIZE - 1);
+        if (dl_cache[idx].valid && dl_cache[idx].dl_addr == addr &&
+            dl_cache[idx].content_hash == hash)
+            return idx;
+    }
+    return -1;
+}
+
+int emu64::dl_cache_alloc(u32 addr, u32 hash) {
+    u32 slot = addr & (DL_CACHE_SIZE - 1);
+    for (int i = 0; i < 4; i++) {
+        int idx = (slot + i) & (DL_CACHE_SIZE - 1);
+        if (!dl_cache[idx].valid) {
+            dl_cache[idx].dl_addr = addr;
+            dl_cache[idx].content_hash = hash;
+            return idx;
+        }
+    }
+    int idx = slot & (DL_CACHE_SIZE - 1);
+    dl_cache[idx].valid = 0;
+    dl_cache[idx].dl_addr = addr;
+    dl_cache[idx].content_hash = hash;
+    return idx;
+}
+
+bool emu64::dl_cache_frustum_test(const DLCacheEntry* e) {
+    const f32* mn = e->aabb_min;
+    const f32* mx = e->aabb_max;
+    Mtx44* proj = &this->projection_mtx;
+    f32 corners[8][3] = {
+        {mn[0],mn[1],mn[2]}, {mx[0],mn[1],mn[2]},
+        {mn[0],mx[1],mn[2]}, {mx[0],mx[1],mn[2]},
+        {mn[0],mn[1],mx[2]}, {mx[0],mn[1],mx[2]},
+        {mn[0],mx[1],mx[2]}, {mx[0],mx[1],mx[2]}
+    };
+#ifdef PC_ENHANCEMENTS
+    // widescreen: extend X clip planes to match wider frustum
+    f32 cull_x = (f32)g_pc_window_w / (f32)g_pc_window_h
+               / ((f32)PC_GC_WIDTH / (f32)PC_GC_HEIGHT);
+    if (cull_x < 1.0f) cull_x = 1.0f;
+#else
+    f32 cull_x = 1.0f;
+#endif
+    int all_out[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    for (int c = 0; c < 8; c++) {
+        f32 x=corners[c][0], y=corners[c][1], z=corners[c][2];
+        f32 cx=(*proj)[0][0]*x+(*proj)[0][1]*y+(*proj)[0][2]*z+(*proj)[0][3];
+        f32 cy=(*proj)[1][0]*x+(*proj)[1][1]*y+(*proj)[1][2]*z+(*proj)[1][3];
+        f32 cz=(*proj)[2][0]*x+(*proj)[2][1]*y+(*proj)[2][2]*z+(*proj)[2][3];
+        f32 cw=(*proj)[3][0]*x+(*proj)[3][1]*y+(*proj)[3][2]*z+(*proj)[3][3];
+        f32 cw_x = cw * cull_x;
+        int b = 1<<c;
+        if (cx>=-cw_x) all_out[0]&=~b;
+        if (cx<= cw_x) all_out[1]&=~b;
+        if (cy>=-cw) all_out[2]&=~b;
+        if (cy<= cw) all_out[3]&=~b;
+        if (cz>=-cw) all_out[4]&=~b;
+        if (cz<= cw) all_out[5]&=~b;
+    }
+    return (all_out[0]|all_out[1]|all_out[2]|all_out[3]|all_out[4]|all_out[5]) != 0;
+}
+#endif // TARGET_VITA

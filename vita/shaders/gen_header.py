@@ -782,6 +782,30 @@ with open(OUT_FILE, "w") as f:
         f.write("};\n\n")
     f.write(f"#define VITA_HAS_CFG39 {1 if cfg39_exists else 0}\n\n")
 
+    # Specialized CFG40-44 fragment variants (uber shader elimination batch)
+    for cfgn, desc in [(40, "tex*ras*C1 + register alpha"),
+                       (41, "RASC passthrough + register alpha"),
+                       (42, "tex*ras + reg*TEXA + reg*KONST alpha"),
+                       (43, "tex*ras+C2 + reg*TEXA + reg*KONST alpha"),
+                       (44, "C2 color + RASA*TEXA accumulated alpha"),
+                       (45, "1-stage god ray: reg*tex color + reg*TEXA alpha"),
+                       (46, "2-stage god ray: reg*tex+reg*reg color + TEXA chain alpha")]:
+        cfg_exists = os.path.exists(os.path.join(SHADER_DIR, f"cfg{cfgn}_v0.gxp"))
+        if cfg_exists:
+            for i in range(8):
+                f.write(f"/* CFG{cfgn} fragment variant {i}: {lfa_names[i]} */\n")
+                p = os.path.join(SHADER_DIR, f"cfg{cfgn}_v{i}.gxp")
+                emit_array(f, f"gxp_cfg{cfgn}_v{i}", p)
+                total += os.path.getsize(p)
+            f.write(f"static const unsigned char* gxp_cfg{cfgn}_variants[8] = {{\n")
+            for i in range(8):
+                f.write(f"    gxp_cfg{cfgn}_v{i},\n")
+            f.write(f"}};\nstatic const unsigned int gxp_cfg{cfgn}_variant_sizes[8] = {{\n")
+            for i in range(8):
+                f.write(f"    gxp_cfg{cfgn}_v{i}_size,\n")
+            f.write("};\n\n")
+        f.write(f"#define VITA_HAS_CFG{cfgn} {1 if cfg_exists else 0}\n\n")
+
     # Composite shader for depth-aware water FBO compositing
     comp_v_exists = os.path.exists(os.path.join(SHADER_DIR, "composite_v.gxp"))
     comp_f_exists = os.path.exists(os.path.join(SHADER_DIR, "composite_f.gxp"))

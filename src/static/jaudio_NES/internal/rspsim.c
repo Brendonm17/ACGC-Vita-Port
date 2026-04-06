@@ -212,11 +212,12 @@ extern s32 RspStart(u32* pTaskCmds, s32 allTasks) {
                 break;
             }
 
-            case A_CMD_CLEARBUFF: // A_CLEARBUFF
+            case A_CMD_CLEARBUFF: { // A_CLEARBUFF
                 u16 addr = cmdHi & 0xFFFF;
                 u16 size = cmdLo & 0xFFFF;
                 Jac_bzero(&DMEM[addr], size);
                 break;
+            }
 
             case A_CMD_RESAMPLE: { // A_RESAMPLE
                 s16 spC[8];
@@ -714,8 +715,7 @@ static void Jac_Resample16(
     // Initialize the index for our circular history buffer.
     circular_buf_idx = 4;
     while (output_sample_count-- > 0) {
-        // --- Polyphase FIR Filter Calculation ---
-        // Use the top bits of the fractional position to look up coefficients from the filter table.
+        // polyphase FIR filter
         s16* filter_table = RES_FILTER[current_pos_fract >> 10];
 
         // LEFT CHANNEL: Apply 4-tap FIR filter (multiply-accumulate)
@@ -736,8 +736,7 @@ static void Jac_Resample16(
             filter_table[0] * history_buffer[circular_buf_idx + 4];
         interpolated_sample_R >>= 15;
 
-        // --- Clamping and Output ---
-        // Clamp the Left sample to the valid 16-bit range [-32768, 32767].
+        // clamp to s16
         if (interpolated_sample_L > 0x7fff) interpolated_sample_L = 0x7fff;
         if (interpolated_sample_L < -0x8000) interpolated_sample_L = -0x8000;
 
@@ -752,9 +751,7 @@ static void Jac_Resample16(
         // Advance the fractional position and the output pointer.
         current_pos_fract += step_increment;
 
-        // --- History Buffer Management ---
-        // If the integer part of our position has advanced, we need to pull new samples
-        // from the input buffers into our circular history buffer.
+        // advance history buffer
         while (current_pos_fract >= 0x10000) {
             s16 read;
             
@@ -784,8 +781,7 @@ static void Jac_Resample16(
     // Save the final fractional position for the next call.
     *position_p = (u16)current_pos_fract;
 
-    // Re-arrange the history buffer so the last 4 samples are at the beginning,
-    // ready for the next call to the function. This preserves the state.
+    // rotate history for next call
     {
         s16* src_ptr;
         s16* dest_ptr;

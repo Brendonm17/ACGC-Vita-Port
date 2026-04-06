@@ -1016,8 +1016,13 @@ void Museum_Fish_Actor_draw(ACTOR* actorx, GAME* game) {
 
 BOOL mfish_cull_check(GAME* game, xyz_t* worldPos, f32 x, f32 y, f32 _y) {
     xyz_t screenPos;
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+    f32 ws_margin = 60.0f;
+#else
+    f32 ws_margin = 0.0f;
+#endif
     Game_play_Projection_Trans((GAME_PLAY*)game, worldPos, &screenPos);
-    if ((-x < screenPos.x) && (screenPos.x < x + 320) && (-y < screenPos.y) && (screenPos.y < _y + 240)) {
+    if ((-(x + ws_margin) < screenPos.x) && (screenPos.x < x + 320 + ws_margin) && (-y < screenPos.y) && (screenPos.y < _y + 240)) {
         return TRUE;
     }
     return FALSE;

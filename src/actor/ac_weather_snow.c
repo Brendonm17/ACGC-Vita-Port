@@ -48,7 +48,11 @@ static void aWeatherSnow_make(ACTOR* actor, GAME* game) {
     if (aWeatherSnow_DecideMakeSnowCount(actor, game) != 0) {
         base.y = -0.5f + (RANDOM_F(-2.0f));
         if (count != -1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            x = -133.0f + (RANDOM_F(266.0f));
+#else
             x = -100.0f + (RANDOM_F(200.0f));
+#endif
             z = -200.0f + (RANDOM_F(380.0f));
 
             mod_pos = pos;
@@ -68,7 +72,7 @@ static void aWeatherSnow_make(ACTOR* actor, GAME* game) {
     }
 }
 
-static void aWeatherSnow_ct(aWeather_Priv*, GAME*) {
+static void aWeatherSnow_ct(aWeather_Priv* _p16, GAME* _p15) {
 }
 
 static int aWeatherSnow_CheckSnowBorder(aWeather_Priv* priv, GAME_PLAY* play) {
@@ -79,12 +83,21 @@ static int aWeatherSnow_CheckSnowBorder(aWeather_Priv* priv, GAME_PLAY* play) {
         wtemp = weather->pos.x;
         ptemp = priv->pos.x;
 
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+        if (ptemp < (-133.0f + wtemp)) {
+            ret |= 2;
+        }
+        if (ptemp > (133.0f + wtemp)) {
+            ret |= 8;
+        }
+#else
         if (ptemp < (-100.0f + wtemp)) {
             ret |= 2;
         }
         if (ptemp > (100.0f + wtemp)) {
             ret |= 8;
         }
+#endif
         wtemp = weather->pos.z;
         ptemp = priv->pos.z;
 
@@ -105,10 +118,18 @@ static void aWeatherSnow_CheckSnowScroll(aWeather_Priv* priv, GAME_PLAY* play) {
 
     if (border != 0) {
         if ((border >> 1) & 1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            priv->pos.x += 266.0f;
+#else
             priv->pos.x += 200.0f;
+#endif
         }
         if ((border >> 3) & 1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            priv->pos.x -= 266.0f;
+#else
             priv->pos.x -= 200.0f;
+#endif
         }
         if ((border >> 2) & 1) {
             priv->pos.z -= 380.0f;
@@ -180,8 +201,15 @@ void aWeatherSnow_draw(aWeather_Priv* priv, GAME* game) {
 
     Game_play_Projection_Trans(play, &pos, &screen_pos);
 
+    {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+    // 16:9 extends ~53 units beyond 4:3 bounds on each side in 320-wide screen space
+    if ((-60.0f <= screen_pos.x) && (screen_pos.x < SCREEN_WIDTH_F + 60.0f) && (0.0f <= screen_pos.y) &&
+        (screen_pos.y < SCREEN_HEIGHT_F)) {
+#else
     if ((0.0f <= screen_pos.x) && (screen_pos.x < SCREEN_WIDTH_F) && (0.0f <= screen_pos.y) &&
         (screen_pos.y < SCREEN_HEIGHT_F)) {
+#endif
 
         work = GRAPH_ALLOC_TYPE(game->graph, Mtx, 1);
 
@@ -209,5 +237,6 @@ void aWeatherSnow_draw(aWeather_Priv* priv, GAME* game) {
         gSPDisplayList(NEXT_POLY_XLU_DISP, ef_yuki01_00_model);
 
         CLOSE_DISP(game->graph);
+    }
     }
 }

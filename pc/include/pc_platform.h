@@ -165,7 +165,6 @@ void pc_audio_mq_init(void);
 void pc_audio_mq_shutdown(void);
 
 #ifdef TARGET_VITA
-// --- Vita-specific ---
 void vita_init(void);
 #endif
 

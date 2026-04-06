@@ -64,7 +64,11 @@ static void aWeatherRain_make(ACTOR* actor, GAME* game) {
 
         priv_num = Common_Get(clip.weather_clip)->get_priv_num(&weather->actor_class);
         if (priv_num != -1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            x = -173.0f + (RANDOM_F(346.0f));
+#else
             x = -130.0f + (RANDOM_F(260.0f));
+#endif
             z = -200.0f + (RANDOM_F(360.0f));
 
             pos_mod = pos;
@@ -93,7 +97,7 @@ static void aWeatherRain_make(ACTOR* actor, GAME* game) {
     }
 }
 
-static void aWeatherRain_ct(aWeather_Priv*, GAME*) {
+static void aWeatherRain_ct(aWeather_Priv* _p13, GAME* _p12) {
 }
 
 static void aWeatherRain_MoveRain(aWeather_Priv* priv) {

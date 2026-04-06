@@ -115,7 +115,11 @@ static void aFSN_moving(ACTOR* actorx, GAME* game) {
 
   Game_play_Projection_Trans(play, &actorx->world.position, &screen_pos);
 
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+  if (-100.0f > screen_pos.x || screen_pos.x > 420.0f || -40.0f > screen_pos.y || screen_pos.y > 280.0f) {
+#else
   if (-40.0f > screen_pos.x || screen_pos.x > 360.0f || -40.0f > screen_pos.y || screen_pos.y > 280.0f) {
+#endif
     return;
   }
 

@@ -44,6 +44,7 @@ add_compile_definitions(
     HAVE_GLSL
     SKIP_ERROR_CAPTURE
     NO_TEX_COMBINER
+    VITA_PERF_LOG
 )
 
 add_compile_options(-fno-strict-aliasing -fwrapv -w)

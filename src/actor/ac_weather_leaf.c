@@ -54,7 +54,11 @@ static void aWeatherLeaf_make(ACTOR* actor, GAME* game) {
     if (aWeatherLeaf_DecideMakeLeafCount(actor, game) != 0) {
         base.y = -0.8f + (RANDOM_F(-0.0999999642372f));
         if (count != -1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            x = -133.0f + (RANDOM_F(266.0f));
+#else
             x = -100.0f + (RANDOM_F(200.0f));
+#endif
             z = -200.0f + (RANDOM_F(380.0f));
 
             mod_pos = pos;
@@ -74,7 +78,7 @@ static void aWeatherLeaf_make(ACTOR* actor, GAME* game) {
     }
 }
 
-static void aWeatherLeaf_ct(aWeather_Priv* priv, GAME*) {
+static void aWeatherLeaf_ct(aWeather_Priv* priv, GAME* _p11) {
     priv->work[0] = RANDOM_F(3.0f);
     priv->work[1] = RANDOM_F(65535.0f);
     priv->work[2] = RANDOM_F(65535.0f);
@@ -90,12 +94,21 @@ static int aWeatherLeaf_CheckLeafBorder(aWeather_Priv* priv) {
         pos = weather->pos;
         leafTemp = priv->pos.x;
 
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+        if (leafTemp < (-133.0f + pos.x)) {
+            ret |= 2;
+        }
+        if (leafTemp > (133.0f + pos.x)) {
+            ret |= 8;
+        }
+#else
         if (leafTemp < (-100.0f + pos.x)) {
             ret |= 2;
         }
         if (leafTemp > (100.0f + pos.x)) {
             ret |= 8;
         }
+#endif
         leafTemp = priv->pos.z;
 
         if (leafTemp > (180.0f + pos.z)) {
@@ -114,10 +127,18 @@ static void aWeatherLeaf_CheckLeafScroll(aWeather_Priv* priv) {
 
     if (border != 0) {
         if ((border >> 1) & 1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            priv->pos.x += 266.0f;
+#else
             priv->pos.x += 200.0f;
+#endif
         }
         if ((border >> 3) & 1) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+            priv->pos.x -= 266.0f;
+#else
             priv->pos.x -= 200.0f;
+#endif
         }
         if ((border >> 2) & 1) {
             priv->pos.z -= 380.0f;
@@ -186,8 +207,14 @@ void aWeatherLeaf_draw(aWeather_Priv* priv, GAME* game) {
     pos.y = priv->pos.y;
     Game_play_Projection_Trans(play, &pos, &screen_pos);
 
+    {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+    if ((-60.0f <= screen_pos.x) && (screen_pos.x < SCREEN_WIDTH_F + 60.0f) && (screen_pos.y >= 0.0f) &&
+        (screen_pos.y < SCREEN_HEIGHT_F)) {
+#else
     if ((screen_pos.x >= 0.0f) && (screen_pos.x < SCREEN_WIDTH_F) && (screen_pos.y >= 0.0f) &&
         (screen_pos.y < SCREEN_HEIGHT_F)) {
+#endif
 
         work = GRAPH_ALLOC_TYPE(game->graph, Mtx, 1);
 
@@ -201,5 +228,6 @@ void aWeatherLeaf_draw(aWeather_Priv* priv, GAME* game) {
         gSPDisplayList(NEXT_POLY_XLU_DISP, ef_otiba_model_tbl[priv->work[0]]);
 
         CLOSE_DISP(game->graph);
+    }
     }
 }

@@ -799,10 +799,7 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
         }
     }
 
-    // 3. Prefetch not ready. Return 0 (use GC texture this frame).
-    // Worker thread will read DXT data next idle window via prefetch.
-    // When tex_cache evicts the GC entry and the game re-requests it,
-    // lookup_by_key will find the HD version in loaded_cache instantly.
+    // prefetch not ready, use GC texture this frame
     return 0;
 }
 

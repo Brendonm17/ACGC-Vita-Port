@@ -1,0 +1,79 @@
+// cfg46_f.cg
+// 2-stage god ray: register(grayscale)*tex + register*register color, TEXA chain alpha
+// S0 c(15,8,7,15) a(7,4,1,7) — A2*TEXC color, A0*TEXA alpha
+// S1 c(15,4,5,0) a(7,0,4,7) — CPREV + A1*C1 color, TEXA*APREV alpha
+// uses 2 textures: S0=tex0, S1=tex1 (for TEXA in S1 alpha)
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+    uniform half u_tev1_tc_src,
+
+    // S0: C slot = A2 register (grayscale, broadcast to rgb)
+    uniform half3 u_tev0_cc,
+    // S0 alpha: aval.z = A0 register value
+    uniform half4 u_tev0_aval,
+    // S1: B slot = C1 register color, C slot = A1 register (grayscale)
+    uniform half3 u_tev1_cb,
+    uniform half3 u_tev1_cc,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    // S0 texture
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    // S1 texture
+    float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
+    half4 tex1 = (half4)tex2D(u_texture1, tc1);
+
+    // S0: color = A2(grayscale) * TEXC, alpha = A0 * TEXA
+    half3 prev_c = u_tev0_cc * tex0.rgb;
+    half prev_a = u_tev0_aval.z * tex0.a;
+
+    // S1: color = CPREV + A1(grayscale) * C1(color), alpha = TEXA(tex1) * APREV
+    prev_c = saturate(prev_c + u_tev1_cc * u_tev1_cb);
+    prev_a = tex1.a * prev_a;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

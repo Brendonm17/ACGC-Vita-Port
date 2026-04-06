@@ -129,7 +129,7 @@ static GLuint link_program(GLuint vert, GLuint frag) {
     return prog;
 }
 
-// Vita: pre-compiled shader variants (L/F/A/TEV2 permutations)
+// pre-compiled shader variants (L/F/A/TEV2 permutations)
 
 #ifdef TARGET_VITA
 
@@ -149,7 +149,7 @@ GLuint vita_get_simple_shader(void) { return vita_simple[0]; }
 
 // specialized shaders for top TEV configs
 #define VITA_SPEC_COUNT 8  // L/F/A = 3 bits = 8 variants each
-#define VITA_CFG_COUNT  40
+#define VITA_CFG_COUNT  47
 
 typedef struct {
     const char* name;
@@ -268,6 +268,27 @@ typedef struct {
 #ifndef VITA_HAS_CFG39
 #define VITA_HAS_CFG39 0
 #endif
+#ifndef VITA_HAS_CFG40
+#define VITA_HAS_CFG40 0
+#endif
+#ifndef VITA_HAS_CFG41
+#define VITA_HAS_CFG41 0
+#endif
+#ifndef VITA_HAS_CFG42
+#define VITA_HAS_CFG42 0
+#endif
+#ifndef VITA_HAS_CFG43
+#define VITA_HAS_CFG43 0
+#endif
+#ifndef VITA_HAS_CFG44
+#define VITA_HAS_CFG44 0
+#endif
+#ifndef VITA_HAS_CFG45
+#define VITA_HAS_CFG45 0
+#endif
+#ifndef VITA_HAS_CFG46
+#define VITA_HAS_CFG46 0
+#endif
 
 // dummy data for unavailable configs
 static const unsigned char* vita_gxp_dummy_variants[8] = {0};
@@ -309,6 +330,34 @@ static const unsigned int vita_gxp_dummy_sizes[8] = {0};
 #if !VITA_HAS_CFG35
 #define gxp_cfg35_variants vita_gxp_dummy_variants
 #define gxp_cfg35_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG40
+#define gxp_cfg40_variants vita_gxp_dummy_variants
+#define gxp_cfg40_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG41
+#define gxp_cfg41_variants vita_gxp_dummy_variants
+#define gxp_cfg41_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG42
+#define gxp_cfg42_variants vita_gxp_dummy_variants
+#define gxp_cfg42_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG43
+#define gxp_cfg43_variants vita_gxp_dummy_variants
+#define gxp_cfg43_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG44
+#define gxp_cfg44_variants vita_gxp_dummy_variants
+#define gxp_cfg44_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG45
+#define gxp_cfg45_variants vita_gxp_dummy_variants
+#define gxp_cfg45_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG46
+#define gxp_cfg46_variants vita_gxp_dummy_variants
+#define gxp_cfg46_variant_sizes vita_gxp_dummy_sizes
 #endif
 
 #define CFG_ENTRY(n, avail) { "CFG" #n, {0}, \
@@ -356,6 +405,13 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
     CFG_ENTRY(37, VITA_HAS_CFG37),
     CFG_ENTRY(38, VITA_HAS_CFG38),
     CFG_ENTRY(39, VITA_HAS_CFG39),
+    CFG_ENTRY(40, VITA_HAS_CFG40),
+    CFG_ENTRY(41, VITA_HAS_CFG41),
+    CFG_ENTRY(42, VITA_HAS_CFG42),
+    CFG_ENTRY(43, VITA_HAS_CFG43),
+    CFG_ENTRY(44, VITA_HAS_CFG44),
+    CFG_ENTRY(45, VITA_HAS_CFG45),
+    CFG_ENTRY(46, VITA_HAS_CFG46),
 };
 
 // map old vita_cfgN[] names to table entries
@@ -398,6 +454,13 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg37 vita_cfgs[36].programs
 #define vita_cfg38 vita_cfgs[37].programs
 #define vita_cfg39 vita_cfgs[38].programs
+#define vita_cfg40 vita_cfgs[39].programs
+#define vita_cfg41 vita_cfgs[40].programs
+#define vita_cfg42 vita_cfgs[41].programs
+#define vita_cfg43 vita_cfgs[42].programs
+#define vita_cfg44 vita_cfgs[43].programs
+#define vita_cfg45 vita_cfgs[44].programs
+#define vita_cfg46 vita_cfgs[45].programs
 
 // load pre-compiled GXP binary (4-byte header + GXP data)
 static GLuint vita_load_gxp(GLenum type, const unsigned char* gxp, unsigned int gxp_size) {
@@ -794,6 +857,7 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
             PCGXTevStage* s1 = &state->tev_stages[1];
 
             // CFG0 (77%): tex*ras*reg1, alpha=tex.a
+            // S1 must be b=4(C1),c=0(CPREV) — shader reads u_tev1_cb for C1
             if (s0->color_a==15 && s0->color_b==8 && s0->color_c==10 && s0->color_d==15 &&
                 s0->alpha_a==7  && s0->alpha_b==7 && s0->alpha_c==7  && s0->alpha_d==4 &&
                 s1->color_a==15 && s1->color_b==4 && s1->color_c==0  && s1->color_d==15 &&
@@ -801,6 +865,69 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
                 vita_cfg0[fa]) {
                 vita_tev_specialized_draws++;
                 return vita_cfg0[fa];
+            }
+
+            // CFG40: tex*ras*C1 color, register alpha (like CFG0 but alpha=register D)
+            // S1 must be b=4(C1),c=0(CPREV) — shader reads u_tev1_cb for C1
+            if (s0->color_a==15 && s0->color_b==8 && s0->color_c==10 && s0->color_d==15 &&
+                s0->alpha_a==7  && s0->alpha_b==7 && s0->alpha_c==7  &&
+                (s0->alpha_d >= 1 && s0->alpha_d <= 3) &&
+                s1->color_a==15 && s1->color_b==4 && s1->color_c==0  && s1->color_d==15 &&
+                s1->alpha_a==7  && s1->alpha_b==7 && s1->alpha_c==7  && s1->alpha_d==0 &&
+                vita_cfg40[fa] && !VITA_CFG_DISABLED(40)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg40[fa];
+            }
+
+            // CFG42: tex*ras color, alpha = reg*TEXA + reg*KONST (2-stage)
+            if (s0->color_a==15 && s0->color_b==8 && s0->color_c==10 && s0->color_d==15 &&
+                s0->alpha_a==7  && s0->alpha_b==4 && s0->alpha_d==7 &&
+                (s0->alpha_c >= 1 && s0->alpha_c <= 3) &&
+                s1->color_a==15 && s1->color_b==15 && s1->color_c==15 && s1->color_d==0 &&
+                s1->alpha_b==6  && s1->alpha_d==0 &&
+                (s1->alpha_c >= 1 && s1->alpha_c <= 3) &&
+                s1->alpha_a==7  &&
+                vita_cfg42[fa] && !VITA_CFG_DISABLED(42)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg42[fa];
+            }
+
+            // CFG43: tex*ras + C2 color, alpha = reg*TEXA + reg*KONST (2-stage)
+            if (s0->color_a==15 && s0->color_b==8 && s0->color_c==10 && s0->color_d==15 &&
+                s0->alpha_a==7  && s0->alpha_b==4 && s0->alpha_d==7 &&
+                (s0->alpha_c >= 1 && s0->alpha_c <= 3) &&
+                s1->color_a==15 && s1->color_b==12 && s1->color_c==6 && s1->color_d==0 &&
+                s1->alpha_b==6  && s1->alpha_d==0 &&
+                (s1->alpha_c >= 1 && s1->alpha_c <= 3) &&
+                s1->alpha_a==7  &&
+                vita_cfg43[fa] && !VITA_CFG_DISABLED(43)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg43[fa];
+            }
+
+            // CFG46: 2-stage god ray: reg*tex + reg*reg color, TEXA chain alpha
+            // S0 c(15,8,reg,15) a(7,4,reg,7) S1 c(15,reg,reg,0) a(7,0,4,7)
+            if (s0->color_a==15 && s0->color_b==8 && s0->color_d==15 &&
+                (s0->color_c >= 2 && s0->color_c <= 7) &&
+                s0->alpha_a==7  && s0->alpha_b==4 && s0->alpha_d==7 &&
+                (s0->alpha_c >= 1 && s0->alpha_c <= 3) &&
+                s1->color_a==15 && s1->color_d==0 &&
+                (s1->color_b >= 2 && s1->color_b <= 7) &&
+                (s1->color_c >= 2 && s1->color_c <= 7) &&
+                s1->alpha_a==7  && s1->alpha_b==0 && s1->alpha_c==4 && s1->alpha_d==7 &&
+                vita_cfg46[fa] && !VITA_CFG_DISABLED(46)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg46[fa];
+            }
+
+            // CFG44: C2 color + RASA*TEXA accumulated alpha (2-stage)
+            if (s0->color_a==15 && s0->color_b==15 && s0->color_c==15 && s0->color_d==6 &&
+                s0->alpha_a==7  && s0->alpha_b==4  && s0->alpha_c==5  && s0->alpha_d==7 &&
+                s1->color_a==15 && s1->color_b==15 && s1->color_c==15 && s1->color_d==0 &&
+                s1->alpha_a==7  && s1->alpha_b==4  && s1->alpha_c==5  && s1->alpha_d==0 &&
+                vita_cfg44[fa] && !VITA_CFG_DISABLED(44)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg44[fa];
             }
 
             // CFG22: tex*register color + TEXA alpha (no RASC)
@@ -999,6 +1126,26 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
             }
         }
         else if (state->num_tev_stages <= 1) {
+            // CFG45: register*tex color + register*TEXA alpha (1-stage god ray)
+            // S0 c(15,8,reg,15) a(7,4,reg,7) — register modulates tex color and TEXA
+            if (s0->color_a==15 && s0->color_b==8 && s0->color_d==15 &&
+                (s0->color_c >= 2 && s0->color_c <= 7) &&
+                s0->alpha_a==7  && s0->alpha_b==4 && s0->alpha_d==7 &&
+                (s0->alpha_c >= 1 && s0->alpha_c <= 3) &&
+                vita_cfg45[fa] && !VITA_CFG_DISABLED(45)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg45[fa];
+            }
+
+            // CFG41: RASC color passthrough + register alpha D (1-stage)
+            if (s0->color_a==15 && s0->color_b==15 && s0->color_c==15 && s0->color_d==10 &&
+                s0->alpha_a==7  && s0->alpha_b==7  && s0->alpha_c==7  &&
+                (s0->alpha_d >= 1 && s0->alpha_d <= 3) &&
+                vita_cfg41[fa] && !VITA_CFG_DISABLED(41)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg41[fa];
+            }
+
             // CFG11: tex*ras color, tex.a*A1 alpha
             if (s0->color_a==15 && s0->color_b==8  && s0->color_c==10 && s0->color_d==15 &&
                 s0->alpha_a==7  && s0->alpha_b==4  && s0->alpha_c==2  && s0->alpha_d==7 &&

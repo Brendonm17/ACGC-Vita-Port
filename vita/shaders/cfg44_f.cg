@@ -1,0 +1,93 @@
+// cfg44_f.cg
+// C2 color + RASA*TEXA accumulated alpha (2-stage)
+// S0 c(15,15,15,6) a(7,4,5,7) S1 c(15,15,15,0) a(7,4,5,0)
+// uses RASA (per-pixel vertex alpha) like cfg26
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+    uniform half u_tev1_tc_src,
+
+    // S0 color_d=6 (C2 register)
+    uniform half3 u_tev0_cd,
+
+    uniform half u_num_chans,
+    uniform half4 u_mat_color,
+    uniform half u_chan_mat_src,
+    uniform half u_alpha_mat_src,
+
+#ifdef LIGHTING
+    uniform half4 u_amb_color,
+    uniform half u_chan_amb_src,
+    uniform half u_alpha_lighting_enabled,
+    uniform half3 u_light_pos[8],
+    uniform half4 u_light_color[8],
+#endif
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    // rasterizer for RASA
+    half matA = lerp(u_mat_color.a, v_color.a, step(0.5h, u_alpha_mat_src));
+#ifdef LIGHTING
+    half3 n = (half3)normalize(v_normal);
+    half3 ambC_h = lerp(u_amb_color.rgb, v_color.rgb, step(0.5h, u_chan_amb_src));
+    half3 matC = lerp(u_mat_color.rgb, v_color.rgb, step(0.5h, u_chan_mat_src));
+    half3 lA = ambC_h;
+    lA += max(dot(n, u_light_pos[0]), 0.0h) * u_light_color[0].rgb;
+    lA += max(dot(n, u_light_pos[1]), 0.0h) * u_light_color[1].rgb;
+    lA += max(dot(n, u_light_pos[2]), 0.0h) * u_light_color[2].rgb;
+    lA += max(dot(n, u_light_pos[3]), 0.0h) * u_light_color[3].rgb;
+    lA += max(dot(n, u_light_pos[4]), 0.0h) * u_light_color[4].rgb;
+    lA += max(dot(n, u_light_pos[5]), 0.0h) * u_light_color[5].rgb;
+    lA += max(dot(n, u_light_pos[6]), 0.0h) * u_light_color[6].rgb;
+    lA += max(dot(n, u_light_pos[7]), 0.0h) * u_light_color[7].rgb;
+    matA = lerp(matA, matA * u_amb_color.a, step(0.5h, u_alpha_lighting_enabled));
+#endif
+
+    half rasa = lerp(1.0h, matA, step(0.5h, u_num_chans));
+
+    // S0 tex sample
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    // S0: color = C2 register passthrough
+    half3 prev_c = u_tev0_cd;
+    // S0: alpha = RASA * TEXA (a(7,4,5,7): B=TEXA, C=RASA, D=0)
+    half prev_a = rasa * tex0.a;
+
+    // S1 tex sample (may be different tc_src)
+    float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc1), step(0.5h, u_use_texture0));
+
+    // S1: color = CPREV passthrough
+    // S1: alpha = APREV + RASA * TEXA (a(7,4,5,0): B=TEXA, C=RASA, D=APREV)
+    prev_a = saturate(prev_a + rasa * tex1.a);
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

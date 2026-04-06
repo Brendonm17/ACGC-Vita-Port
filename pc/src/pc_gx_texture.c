@@ -285,10 +285,7 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
 }
 
 #ifdef TARGET_VITA
-// Deferred texture upload for worker thread.
-// When emu64 runs on the worker thread and encounters a texture cache miss,
-// the GL upload is deferred to the main thread via this queue.
-// Processed in pc_gx_submit_frame() before any draws.
+// deferred texture upload queue for worker thread
 // Current frame shows untextured (tex_id=0); next frame the cache hits.
 #define VITA_TEX_UPLOAD_MAX 128
 typedef struct {

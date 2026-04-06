@@ -119,7 +119,11 @@ static void eSuisou_Awa_dw(eEC_Effect_c* effect, GAME* game) {
     s16 scale_angle = effect->effect_specific[2];
 
     Game_play_Projection_Trans(play, &effect->position, &screen_pos);
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+    if (-60.0f < screen_pos.x && screen_pos.x < SCREEN_WIDTH + 60 && 0.0f < screen_pos.y && screen_pos.y < SCREEN_HEIGHT) {
+#else
     if (0.0f < screen_pos.x && screen_pos.x < SCREEN_WIDTH && 0.0f < screen_pos.y && screen_pos.y < SCREEN_HEIGHT) {
+#endif
         OPEN_DISP(game->graph);
 
         pos = effect->position;
