@@ -57,7 +57,7 @@ static LONG WINAPI pc_veh_handler(PEXCEPTION_POINTERS ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 #else
-/* POSIX equivalent of VEH — longjmp from signal handler (POSIX-defined for program faults) */
+/* POSIX equivalent of VEH -longjmp from signal handler (POSIX-defined for program faults) */
 static void pc_signal_handler(int sig, siginfo_t* info, void* ucontext) {
     (void)ucontext;
     if (pc_active_jmpbuf != NULL) {
@@ -300,7 +300,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    /* Redirect stdout/stderr to NUL unless verbose — unbuffered terminal writes
+    /* Redirect stdout/stderr to NUL unless verbose -unbuffered terminal writes
      * are extremely slow on Windows and tank FPS. */
     if (!g_pc_verbose) {
 #ifdef _WIN32
@@ -315,7 +315,7 @@ int main(int argc, char* argv[]) {
         setvbuf(stderr, NULL, _IONBF, 0);
     }
 
-    /* exe image range for seg2k0 — BSS can overlap N64 segment addresses */
+    /* exe image range for seg2k0 -BSS can overlap N64 segment addresses */
 #ifdef _WIN32
     {
         HMODULE exe = GetModuleHandle(NULL);

@@ -191,7 +191,7 @@ void __OSUnhandledException(u8 type, void* ctx, u32 dsisr, u32 dar) {
 }
 
 /* --- libc64 malloc replacement (PC uses system malloc) --- */
-/* game's own malloc arena — we just wrap system malloc */
+/* game's own malloc arena -we just wrap system malloc */
 
 static int malloc_initialized = 0;
 static void* malloc_arena_base = NULL;

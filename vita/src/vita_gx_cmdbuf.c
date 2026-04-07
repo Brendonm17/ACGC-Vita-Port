@@ -895,6 +895,7 @@ void pc_gx_submit_frame(void) {
                     if (g_gx.current_shader)
                         glUseProgram(g_gx.current_shader);
                     gl_cache_reset();
+                    g_gx.dirty = PC_GX_DIRTY_ALL;
                 }
             }
             rd_efb_next++;

@@ -454,7 +454,7 @@ static void mv_setup_model(GAME_MODEL_VIEWER* mv) {
             if (npc->model_skeleton == NULL) break;
             cKF_SkeletonInfo_R_ct(&mv->skeleton_info, npc->model_skeleton, NULL,
                                   mv->joint_work, mv->joint_target);
-            /* Use player idle animation — same 26-joint structure as NPC skeletons */
+            /* Use player idle animation -same 26-joint structure as NPC skeletons */
             cKF_SkeletonInfo_R_init_standard_repeat_speedsetandmorph(
                 &mv->skeleton_info, &cKF_ba_r_ply_1_wait1, NULL, 1.0f, 0.0f);
             cKF_SkeletonInfo_R_play(&mv->skeleton_info);

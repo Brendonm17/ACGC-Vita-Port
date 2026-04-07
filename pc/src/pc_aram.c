@@ -8,9 +8,11 @@ u32 ARInit(u32* stack_idx_addr, u32 length) {
     (void)stack_idx_addr; (void)length;
     if (!aram_base) {
         aram_base = (u8*)malloc(PC_ARAM_SIZE);
-        if (aram_base) {
-            memset(aram_base, 0, PC_ARAM_SIZE);
+        if (!aram_base) {
+            fprintf(stderr, "[ARAM] Failed to allocate %u bytes for ARAM\n", PC_ARAM_SIZE);
+            exit(1);
         }
+        memset(aram_base, 0, PC_ARAM_SIZE);
         aram_alloc_ptr = 0;
     }
     return 0; /* offset-based, base is always 0 */
@@ -48,7 +50,9 @@ void ARStartDMA(u32 type, u32 mram_addr, u32 aram_addr, u32 length) {
     }
 
     if (length > PC_ARAM_SIZE || aram_addr > PC_ARAM_SIZE - length) {
-        /* OOB read: zero-fill dest so caller doesn't get garbage (cap 1MB) */
+        fprintf(stderr, "[ARAM] OOB DMA: type=%u aram=0x%X len=%u (max=0x%X)\n",
+                type, aram_addr, length, PC_ARAM_SIZE);
+        /* zero-fill dest so caller doesn't get garbage */
         if (type == 1 && mram_addr != 0 && length > 0 && length <= 0x100000) {
             memset((void*)(uintptr_t)mram_addr, 0, length);
         }
@@ -73,7 +77,7 @@ void ARQPostRequest(void* req, u32 owner, u32 type, u32 prio,
     if (type == 0) {
         ARStartDMA(type, source, dest, length); /* source=mram, dest=aram */
     } else {
-        ARStartDMA(type, dest, source, length); /* source=aram, dest=mram — swapped */
+        ARStartDMA(type, dest, source, length); /* source=aram, dest=mram -swapped */
     }
     if (callback) ((void (*)(u32))callback)((u32)(uintptr_t)req);
 }

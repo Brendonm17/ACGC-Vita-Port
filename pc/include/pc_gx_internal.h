@@ -276,6 +276,10 @@ typedef struct {
 
     float clear_color[4];
     float clear_depth;
+    // latched at GXCopyDisp time, used at frame begin
+    float latched_clear_color[4];
+    float latched_clear_depth;
+    int copy_disp_done; // GXCopyDisp called this frame
 
     /* Copy/framebuffer */
     int copy_src[4];       /* left, top, w, h */

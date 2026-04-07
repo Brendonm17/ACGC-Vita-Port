@@ -219,6 +219,7 @@ void pc_gx_init(void) {
     g_gx.blend_dst = GX_BL_ZERO;
     g_gx.clear_color[3] = 0.0f;
     g_gx.clear_depth = 1.0f;
+    g_gx.latched_clear_depth = 1.0f;
 
     for (int i = 0; i < 4; i++)
         g_gx.projection_mtx[i][i] = 1.0f;
@@ -314,6 +315,7 @@ void pc_gx_init(void) {
 
 void pc_gx_begin_frame(void) {
     // deferred tex deletes happen at end of submit_frame, not here
+    g_gx.copy_disp_done = 0;
 
 #ifdef TARGET_VITA
     vita_cmdbuf_begin_frame();
@@ -362,12 +364,12 @@ void pc_gx_begin_frame(void) {
 #endif
     glViewport(0, 0, g_pc_window_w, g_pc_window_h);
 #endif
-    PC_CLEAR_DEPTH(g_gx.clear_depth);
+    PC_CLEAR_DEPTH(g_gx.latched_clear_depth);
 #ifdef TARGET_VITA
     // alpha must be 1.0 on Vita (GXM requirement)
-    glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], 1.0f);
+    glClearColor(g_gx.latched_clear_color[0], g_gx.latched_clear_color[1], g_gx.latched_clear_color[2], 1.0f);
 #else
-    glClearColor(g_gx.clear_color[0], g_gx.clear_color[1], g_gx.clear_color[2], g_gx.clear_color[3]);
+    glClearColor(g_gx.latched_clear_color[0], g_gx.latched_clear_color[1], g_gx.latched_clear_color[2], g_gx.latched_clear_color[3]);
 #endif
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 #ifdef TARGET_VITA
@@ -1925,14 +1927,24 @@ void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
     g_gx.clear_color[2] = clear_clr.b / 255.0f;
     g_gx.clear_color[3] = clear_clr.a / 255.0f;
     g_gx.clear_depth = clear_z / (float)0x00FFFFFF;
+    // post-copy calls are setting up for the next frame
+    if (g_gx.copy_disp_done) {
+        memcpy(g_gx.latched_clear_color, g_gx.clear_color, sizeof(g_gx.latched_clear_color));
+        g_gx.latched_clear_depth = g_gx.clear_depth;
+    }
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
     /* On PC we render to the back buffer directly; swap happens in VIWaitForRetrace.
      * Just flush pending geometry -do NOT swap or clear here. */
     pc_gx_commit_pending_and_flush();
+    if (clear) {
+        // latch clear state so frame_begin uses the color that was active
+        // at copy time, not whatever was set later by UI code
+        memcpy(g_gx.latched_clear_color, g_gx.clear_color, sizeof(g_gx.latched_clear_color));
+        g_gx.latched_clear_depth = g_gx.clear_depth;
+    }
     (void)dest;
-    (void)clear;
 }
 
 void GXSetDispCopyGamma(u32 gamma) { (void)gamma; }
@@ -2003,7 +2015,7 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
             cap->src_top = read_top;
             cap->src_w = read_wd;
             cap->src_h = read_ht;
-            cap->clear_after = clear ? 1 : 0;
+            cap->clear_after = 0; // skip mid-frame clear on vita; next frame init clears anyway
         }
         return;
     }
@@ -2018,12 +2030,7 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
         glActiveTexture(GL_TEXTURE0);
     }
     // skip CPU readback path below
-    if (clear) {
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (g_gx.current_shader)
-            glUseProgram(g_gx.current_shader);
-    }
-    // water FBO already composited above, don't re-bind
+    // skip mid-frame clear on vita; next frame init clears anyway
     return;
 #else
     size_t rgba_size = (size_t)read_wd * (size_t)read_ht * 4;
