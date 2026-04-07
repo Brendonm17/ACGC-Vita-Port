@@ -1307,7 +1307,7 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
         float adj_wd = wd;
 
         // remap sub-viewports to match aspect-corrected content
-        if (g_pc_widescreen_stretch == 2 && g_aspect_active) {
+        if (g_pc_widescreen_stretch == 2 && g_aspect_active && g_pc_settings.aspect_mode == 0) {
             int is_full = (left < 1.0f && top < 1.0f &&
                            wd > (float)(PC_GC_WIDTH - 1) &&
                            ht > (float)(PC_GC_HEIGHT - 1));
@@ -1982,12 +1982,29 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
 
 #ifdef PC_ENHANCEMENTS
     /* Scale readback coordinates from GC coords to window resolution */
-    float sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
-    float sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
-    int read_left = (int)(g_gx.tex_copy_src[0] * sx);
-    int read_top  = (int)(g_gx.tex_copy_src[1] * sy);
-    int read_wd   = (int)(out_wd * sx);
-    int read_ht   = (int)(out_ht * sy);
+    float sx, sy;
+    int read_left, read_top, read_wd, read_ht;
+#ifdef TARGET_VITA
+    // 4:3 mode: capture only the content area, not the pillarbox banners
+    if (g_pc_settings.aspect_mode == 1 && g_aspect_active) {
+        int content_w, bar_w;
+        vita_get_43_layout(&content_w, &bar_w);
+        sx = (float)content_w / (float)PC_GC_WIDTH;
+        sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+        read_left = bar_w + (int)(g_gx.tex_copy_src[0] * sx);
+        read_top  = (int)(g_gx.tex_copy_src[1] * sy);
+        read_wd   = (int)(out_wd * sx);
+        read_ht   = (int)(out_ht * sy);
+    } else
+#endif
+    {
+        sx = (float)g_pc_window_w / (float)PC_GC_WIDTH;
+        sy = (float)g_pc_window_h / (float)PC_GC_HEIGHT;
+        read_left = (int)(g_gx.tex_copy_src[0] * sx);
+        read_top  = (int)(g_gx.tex_copy_src[1] * sy);
+        read_wd   = (int)(out_wd * sx);
+        read_ht   = (int)(out_ht * sy);
+    }
 #else
     int read_left = g_gx.tex_copy_src[0];
     int read_top  = g_gx.tex_copy_src[1];

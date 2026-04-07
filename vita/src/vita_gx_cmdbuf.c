@@ -797,7 +797,7 @@ void pc_gx_submit_frame(void) {
             float sy = (float)target_h / (float)PC_GC_HEIGHT;
             float adj_left = vp_left, adj_wd = vp_wd;
 #ifdef PC_ENHANCEMENTS
-            if (cmd->widescreen_stretch == 2 && g_aspect_active) {
+            if (cmd->widescreen_stretch == 2 && g_aspect_active && g_pc_settings.aspect_mode == 0) {
                 int is_full = (vp_left < 1.0f && vp_top < 1.0f &&
                                vp_wd > (float)(PC_GC_WIDTH - 1) &&
                                vp_ht > (float)(PC_GC_HEIGHT - 1));
