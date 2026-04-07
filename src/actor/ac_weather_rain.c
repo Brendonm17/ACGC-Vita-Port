@@ -65,7 +65,12 @@ static void aWeatherRain_make(ACTOR* actor, GAME* game) {
         priv_num = Common_Get(clip.weather_clip)->get_priv_num(&weather->actor_class);
         if (priv_num != -1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            x = -173.0f + (RANDOM_F(346.0f));
+            {
+                f32 zs = play->camera.focus_distance / 620.0f;
+                if (zs < 1.0f) zs = 1.0f;
+                f32 hw = 173.0f * zs;
+                x = -hw + (RANDOM_F(hw * 2.0f));
+            }
 #else
             x = -130.0f + (RANDOM_F(260.0f));
 #endif

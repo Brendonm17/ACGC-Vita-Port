@@ -55,7 +55,12 @@ static void aWeatherLeaf_make(ACTOR* actor, GAME* game) {
         base.y = -0.8f + (RANDOM_F(-0.0999999642372f));
         if (count != -1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            x = -133.0f + (RANDOM_F(266.0f));
+            {
+                f32 zs = play->camera.focus_distance / 620.0f;
+                if (zs < 1.0f) zs = 1.0f;
+                f32 hw = 133.0f * zs;
+                x = -hw + (RANDOM_F(hw * 2.0f));
+            }
 #else
             x = -100.0f + (RANDOM_F(200.0f));
 #endif
@@ -84,7 +89,7 @@ static void aWeatherLeaf_ct(aWeather_Priv* priv, GAME* _p11) {
     priv->work[2] = RANDOM_F(65535.0f);
 }
 
-static int aWeatherLeaf_CheckLeafBorder(aWeather_Priv* priv) {
+static int aWeatherLeaf_CheckLeafBorder(aWeather_Priv* priv, GAME_PLAY* play) {
     WEATHER_ACTOR* weather = (WEATHER_ACTOR*)Common_Get(clip.weather_clip)->actor;
     int ret = 0;
     f32 leafTemp;
@@ -95,11 +100,16 @@ static int aWeatherLeaf_CheckLeafBorder(aWeather_Priv* priv) {
         leafTemp = priv->pos.x;
 
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-        if (leafTemp < (-133.0f + pos.x)) {
-            ret |= 2;
-        }
-        if (leafTemp > (133.0f + pos.x)) {
-            ret |= 8;
+        {
+            f32 zs = play->camera.focus_distance / 620.0f;
+            if (zs < 1.0f) zs = 1.0f;
+            f32 hw = 133.0f * zs;
+            if (leafTemp < (-hw + pos.x)) {
+                ret |= 2;
+            }
+            if (leafTemp > (hw + pos.x)) {
+                ret |= 8;
+            }
         }
 #else
         if (leafTemp < (-100.0f + pos.x)) {
@@ -122,20 +132,25 @@ static int aWeatherLeaf_CheckLeafBorder(aWeather_Priv* priv) {
     return ret;
 }
 
-static void aWeatherLeaf_CheckLeafScroll(aWeather_Priv* priv) {
-    int border = aWeatherLeaf_CheckLeafBorder(priv);
+static void aWeatherLeaf_CheckLeafScroll(aWeather_Priv* priv, GAME_PLAY* play) {
+    int border = aWeatherLeaf_CheckLeafBorder(priv, play);
 
     if (border != 0) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+        f32 zs = play->camera.focus_distance / 620.0f;
+        if (zs < 1.0f) zs = 1.0f;
+        f32 scroll_w = 266.0f * zs;
+#endif
         if ((border >> 1) & 1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            priv->pos.x += 266.0f;
+            priv->pos.x += scroll_w;
 #else
             priv->pos.x += 200.0f;
 #endif
         }
         if ((border >> 3) & 1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            priv->pos.x -= 266.0f;
+            priv->pos.x -= scroll_w;
 #else
             priv->pos.x -= 200.0f;
 #endif
@@ -176,7 +191,7 @@ static void aWeatherLeaf_move(aWeather_Priv* priv, GAME* game) {
 
     priv->work[3] += priv->work[4];
     aWeatherLeaf_SetWind2Leaf(priv);
-    aWeatherLeaf_CheckLeafScroll(priv);
+    aWeatherLeaf_CheckLeafScroll(priv, play);
     priv->work[1] += 0x8DC;
     priv->work[2] += 0x474;
 }

@@ -49,7 +49,12 @@ static void aWeatherSnow_make(ACTOR* actor, GAME* game) {
         base.y = -0.5f + (RANDOM_F(-2.0f));
         if (count != -1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            x = -133.0f + (RANDOM_F(266.0f));
+            {
+                f32 zs = play->camera.focus_distance / 620.0f;
+                if (zs < 1.0f) zs = 1.0f;
+                f32 hw = 133.0f * zs;
+                x = -hw + (RANDOM_F(hw * 2.0f));
+            }
 #else
             x = -100.0f + (RANDOM_F(200.0f));
 #endif
@@ -84,11 +89,16 @@ static int aWeatherSnow_CheckSnowBorder(aWeather_Priv* priv, GAME_PLAY* play) {
         ptemp = priv->pos.x;
 
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-        if (ptemp < (-133.0f + wtemp)) {
-            ret |= 2;
-        }
-        if (ptemp > (133.0f + wtemp)) {
-            ret |= 8;
+        {
+            f32 zs = play->camera.focus_distance / 620.0f;
+            if (zs < 1.0f) zs = 1.0f;
+            f32 hw = 133.0f * zs;
+            if (ptemp < (-hw + wtemp)) {
+                ret |= 2;
+            }
+            if (ptemp > (hw + wtemp)) {
+                ret |= 8;
+            }
         }
 #else
         if (ptemp < (-100.0f + wtemp)) {
@@ -117,16 +127,21 @@ static void aWeatherSnow_CheckSnowScroll(aWeather_Priv* priv, GAME_PLAY* play) {
     PLAYER_ACTOR* player = get_player_actor_withoutCheck(play);
 
     if (border != 0) {
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+        f32 zs = play->camera.focus_distance / 620.0f;
+        if (zs < 1.0f) zs = 1.0f;
+        f32 scroll_w = 266.0f * zs;
+#endif
         if ((border >> 1) & 1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            priv->pos.x += 266.0f;
+            priv->pos.x += scroll_w;
 #else
             priv->pos.x += 200.0f;
 #endif
         }
         if ((border >> 3) & 1) {
 #if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
-            priv->pos.x -= 266.0f;
+            priv->pos.x -= scroll_w;
 #else
             priv->pos.x -= 200.0f;
 #endif
