@@ -59,6 +59,10 @@ static int Camera2_InDoorCheck() {
 }
 
 static int Camera2_CheckInDoorNearFar(GAME_PLAY* play) {
+#ifdef TARGET_VITA
+    // outdoor near plane must stay at 145-200, not 20
+    if (!Camera2_InDoorCheck()) return FALSE;
+#endif
     if (play->camera.indoor_distance_addition_idx == 0 ||
         (Save_Get(scene_no) == SCENE_BROKER_SHOP && play->camera.now_main_index == CAMERA2_PROCESS_TALK)) {
         return TRUE;
@@ -473,7 +477,11 @@ static void Camera2_Get_GoalDistanceAndDirection(GAME_PLAY* play, f32* dist, s_x
     *dist = distance_array[main_index];
     *dir = direction_array[main_index];
 
+#ifdef TARGET_VITA
+    if (main_index == CAMERA2_PROCESS_NORMAL || main_index == CAMERA2_PROCESS_WADE) {
+#else
     if (main_index == CAMERA2_PROCESS_NORMAL && Camera2_InDoorCheck()) {
+#endif
         if (add_dist_idx < 0 || add_dist_idx >= 3) {
             add_dist_idx = 1;
         }
@@ -1279,7 +1287,11 @@ static void Camera2_main_Normal_SetEndCenterPos_fromPlayer(GAME_PLAY* play, xyz_
 
     Camera2_GetLongBorderScale(play, &scale);
 
+#ifdef TARGET_VITA
+    {
+#else
     if (Camera2_InDoorCheck()) {
+#endif
         int add_dir_idx;
         int add_dist_idx;
 

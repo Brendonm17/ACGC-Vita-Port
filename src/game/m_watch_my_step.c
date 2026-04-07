@@ -293,6 +293,11 @@ static void navigate_camera_ct() {
 static void navigate_camera_move(GAME_PLAY* play) {
     S_navigate.draw_type = 0;
 
+#ifdef TARGET_VITA
+    // hide c-stick tooltip outdoors to avoid overlapping the clock
+    if (mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELDTYPE_FG) return;
+#endif
+
     switch (S_navigate.mode) {
         case 0: {
             if (mPlib_check_able_change_camera_normal_index() != 0 && play->fb_fade_type == FADE_TYPE_NONE) {
