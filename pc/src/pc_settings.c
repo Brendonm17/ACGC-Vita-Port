@@ -22,6 +22,7 @@ PCSettings g_pc_settings = {
     .multithread   = 1,
     .texture_pack  = "",
     .force_save    = 0,
+    .free_cam      = 0,
 #endif
 };
 
@@ -62,7 +63,10 @@ static const char* DEFAULT_SETTINGS =
     "\n"
     "[Gameplay]\n"
     "# force_save: 0 = off, 1 = auto-save on suspend resume and quit\n"
-    "force_save = 0\n";
+    "force_save = 0\n"
+    "\n"
+    "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n"
+    "free_cam = 0\n";
 #else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
@@ -146,6 +150,8 @@ static void apply_setting(const char* key, const char* value) {
         g_pc_settings.texture_pack[sizeof(g_pc_settings.texture_pack) - 1] = '\0';
     } else if (strcmp(key, "force_save") == 0) {
         g_pc_settings.force_save = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "free_cam") == 0) {
+        g_pc_settings.free_cam = (val != 0) ? 1 : 0;
     }
 #endif
 }
@@ -183,7 +189,9 @@ void pc_settings_save(void) {
     fprintf(f, "texture_pack = %s\n\n", g_pc_settings.texture_pack);
     fprintf(f, "[Gameplay]\n");
     fprintf(f, "# force_save: 0 = off, 1 = auto-save on suspend resume and quit\n");
-    fprintf(f, "force_save = %d\n", g_pc_settings.force_save);
+    fprintf(f, "force_save = %d\n\n", g_pc_settings.force_save);
+    fprintf(f, "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n");
+    fprintf(f, "free_cam = %d\n", g_pc_settings.free_cam);
 #else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");

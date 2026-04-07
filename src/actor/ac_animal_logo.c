@@ -378,7 +378,8 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       int msaa_idx = has_banner ? 3 : 2;
       int texpack_idx = msaa_idx + 1;
       int fsave_idx = texpack_idx + 1;
-      int max_sel = fsave_idx;
+      int freecam_idx = fsave_idx + 1;
+      int max_sel = freecam_idx;
       if (actor->pc_options_sel > max_sel) actor->pc_options_sel = max_sel;
 
       if (actor->pc_cursor_cooldown == 0) {
@@ -446,6 +447,8 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
             }
           } else if (s == fsave_idx) { // Force Save
             g_pc_settings.force_save = !g_pc_settings.force_save;
+          } else if (s == freecam_idx) { // Free Cam
+            g_pc_settings.free_cam = !g_pc_settings.free_cam;
           }
         }
       }
@@ -1026,6 +1029,10 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     // Force Save
     len = sprintf(buf, "< %s >", g_pc_settings.force_save ? "On" : "Off");
     { static u8 lbl[] = { 'F', 'o', 'r', 'c', 'e', ' ', 'S', 'a', 'v', 'e' }; DRAW_OPT_ROW(lbl, 180.0f); }
+
+    // Free Cam
+    len = sprintf(buf, "< %s >", g_pc_settings.free_cam ? "On" : "Off");
+    { static u8 lbl[] = { 'F', 'r', 'e', 'e', ' ', 'C', 'a', 'm' }; DRAW_OPT_ROW(lbl, 180.0f); }
 
     y += line_h * 0.5f;
 

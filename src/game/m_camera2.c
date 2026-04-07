@@ -9,6 +9,9 @@
 #include "m_collision_bg.h"
 #include "m_scene_table.h"
 #include "m_common_data.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 #if VERSION >= VER_GAFU01_00
 #define CAMERA2_STAFFROLL_CENTER_X_ROT_STEP_DIVISOR 3333
@@ -1337,6 +1340,9 @@ static void Camera2_main_Normal_SetEndCenterPos_fromPlayer(GAME_PLAY* play, xyz_
         end_center_pos->z = z_midpoint + (z_scale * z_left) * 0.25f;
     }
 
+#ifdef TARGET_VITA
+    if (!g_pc_settings.free_cam) {
+#endif
     if (mFI_GetBlockWidth() < scale * 330.0f || border_x0 < border_x1) {
         end_center_pos->x = (border_x0 + border_x1) * 0.5f;
     } else if (end_center_pos->x > border_x0) {
@@ -1352,6 +1358,9 @@ static void Camera2_main_Normal_SetEndCenterPos_fromPlayer(GAME_PLAY* play, xyz_
     } else if (end_center_pos->z > border_z1) {
         end_center_pos->z = border_z1;
     }
+#ifdef TARGET_VITA
+    }
+#endif
 
     if (Camera2_InDoorCheck()) {
         end_center_pos->y = 73.0f;

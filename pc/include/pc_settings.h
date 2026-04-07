@@ -32,6 +32,7 @@ typedef struct {
 
     // Vita gameplay
     int force_save;       // 0=off, 1=auto-save on suspend resume and quit
+    int free_cam;         // 0=classic acre transitions, 1=seamless movement
 #endif
 } PCSettings;
 

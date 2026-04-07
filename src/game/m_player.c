@@ -27,6 +27,9 @@
 #include "ac_set_ovl_gyoei.h"
 #include "m_vibctl.h"
 #include "m_debug.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 /* Static function declarations, add as needed for intellisense */
 static void Player_actor_Item_Setup_main(ACTOR* actor, int now, int last);

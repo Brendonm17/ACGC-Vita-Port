@@ -2568,6 +2568,9 @@ static void* Player_actor_get_door_label(GAME* game) {
 
 static void Player_actor_BGcheck_common_type1(ACTOR* actorx) {
     mCoBG_BgCheckControll(NULL, actorx, 18.0f, 0.0f, TRUE, FALSE, 1);
+#ifdef TARGET_VITA
+    if (!g_pc_settings.free_cam)
+#endif
     Player_actor_CorrectWadeBlockBorder(actorx);
 }
 
@@ -3657,6 +3660,22 @@ static void Player_actor_Init_ScrollDemo_forWade_snowball(ACTOR* actorx) {
 }
 
 static int Player_actor_Set_ScrollDemo_forWade(ACTOR* actorx, GAME* game, int npc_check_flag) {
+#ifdef TARGET_VITA
+    if (g_pc_settings.free_cam) {
+        // detect acre change and spawn actors for the new acre
+        static int s_last_bx = -1, s_last_bz = -1;
+        int bx, bz;
+        if (mFI_Wpos2BlockNum(&bx, &bz, actorx->world.position)) {
+            if (bx != s_last_bx || bz != s_last_bz) {
+                s_last_bx = bx;
+                s_last_bz = bz;
+                mFI_SetBearActor((GAME_PLAY*)game, actorx->world.position, TRUE);
+                Common_Set(in_initial_block, FALSE);
+            }
+        }
+        return FALSE;
+    }
+#endif
     xyz_t* player_pos_p = &actorx->world.position;
     s16 player_angle_y = actorx->shape_info.rotation.y;
     int dir = Player_actor_CheckAbleMoveWadeBlock(game, player_pos_p, player_angle_y, 0.65f, DEG2SHORT_ANGLE2(40.0f),
@@ -3708,6 +3727,9 @@ static int Player_actor_Set_ScrollDemo_forDemo_geton_boat_wade(ACTOR* actorx, f3
 }
 
 static int Player_actor_Set_ScrollDemo_forWade_snowball(ACTOR* actorx, int request_dir, const xyz_t* snowball_dist) {
+#ifdef TARGET_VITA
+    if (g_pc_settings.free_cam) return FALSE;
+#endif
     PLAYER_ACTOR* player = (PLAYER_ACTOR*)actorx;
 
     if (mPlib_Get_unable_wade() == FALSE) {
