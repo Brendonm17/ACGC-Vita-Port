@@ -1,5 +1,6 @@
 #include "m_view.h"
 
+#include "pc_settings.h"
 #include "main.h"
 #include "m_common_data.h"
 #include "m_field_info.h"

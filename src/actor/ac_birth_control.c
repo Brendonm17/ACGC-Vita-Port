@@ -1,5 +1,6 @@
 #include "ac_birth_control.h"
 
+#include "pc_settings.h"
 #include "m_play.h"
 #include "m_field_info.h"
 #include "m_common_data.h"
@@ -57,6 +58,17 @@ static void aBC_deleteActor_part(GAME_PLAY* play, int part) {
     
     check_bx = actor->block_x;
     check_bz = actor->block_z;
+
+#ifdef TARGET_VITA
+    if (g_pc_settings.free_cam) {
+      int dx = check_bx - now_bx;
+      int dz = check_bz - now_bz;
+      if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+        actor = actor->next_actor;
+        continue;
+      }
+    }
+#endif
 
     /* Delete any actors which aren't in the current block or the last block */
     if (
@@ -287,6 +299,73 @@ static void aBC_set_boat(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
   }
 }
 
+#ifdef TARGET_VITA
+static int aBC_setupOtherActor_block(GAME_PLAY* play, mActor_name_t actor_id, s16 profile,
+    f32 pos_x, f32 pos_z, mActor_name_t clear_item, s8 bx, s8 bz) {
+  xyz_t pos;
+  int res = FALSE;
+  pos.x = pos_x;
+  pos.z = pos_z;
+  pos.y = mCoBG_GetBgY_OnlyCenter_FromWpos2(pos, 0.0f);
+  ACTOR* actor = Actor_info_make_actor(
+    &play->actor_info, (GAME*)play, profile,
+    pos.x, pos.y, pos.z, 0, 0, 0,
+    bx, bz, -1, actor_id, actor_id, -1, -1);
+  if (actor != NULL) {
+    actor->restore_fg = TRUE;
+    mFI_SetFG_common(clear_item, pos, FALSE);
+  } else {
+    res = TRUE;
+  }
+  return res;
+}
+
+static int aBC_block_has_actors(GAME_PLAY* play, s8 bx, s8 bz) {
+  ACTOR* actor = play->actor_info.list[ACTOR_PART_ITEM].actor;
+  while (actor != NULL) {
+    if (actor->block_x == bx && actor->block_z == bz) return TRUE;
+    actor = actor->next_actor;
+  }
+  return FALSE;
+}
+
+static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
+  if (!mFI_BlockCheck(bx, bz)) return;
+  if (aBC_block_has_actors(play, bx, bz)) return;
+
+  int num = mFI_GetBlockNum(bx, bz);
+  mActor_name_t* item_p = g_fdinfo->block_info[num].fg_info.items_p;
+  if (item_p == NULL) return;
+
+  f32 base_x, base_z;
+  mFI_BkNum2WposXZ(&base_x, &base_z, bx, bz);
+
+  int ut_z;
+  int ut_x;
+  for (ut_z = 0; ut_z < UT_Z_NUM; ut_z++) {
+    for (ut_x = 0; ut_x < UT_X_NUM; ut_x++) {
+      mActor_name_t item = *item_p++;
+      switch (ITEM_NAME_GET_TYPE(item)) {
+        case NAME_TYPE_PROPS: {
+          int idx = item - ACTOR_PROP_START;
+          mActor_name_t clear = (item >= SNOWMAN0 && item <= SNOWMAN8) ? EMPTY_NO : RSV_NO;
+          aBC_setupOtherActor_block(play, item, props_profile_table[idx],
+            base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z], clear, bx, bz);
+          break;
+        }
+        case NAME_TYPE_STRUCT:
+          if (Common_Get(clip).structure_clip != NULL) {
+            (*Common_Get(clip).structure_clip->setup_actor_proc)(
+              (GAME*)play, item, -1,
+              base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
+          }
+          break;
+      }
+    }
+  }
+}
+#endif
+
 static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   BIRTH_CONTROL_ACTOR* birth_control = (BIRTH_CONTROL_ACTOR*)actorx;
   GAME_PLAY* play = (GAME_PLAY*)game;
@@ -334,4 +413,19 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   if (mFI_CheckPlayerWade(mFI_WADE_NONE) == TRUE && play->fb_fade_type == FADE_TYPE_NONE) {
     birth_control->move_actor_list_exists_flag = FALSE;
   }
+
+#ifdef TARGET_VITA
+  if (g_pc_settings.free_cam && play->game.pad_initialized == TRUE) {
+    s8 bx = play->block_table.block_x;
+    s8 bz = play->block_table.block_z;
+    aBC_prespawn_block(play, bx - 1, bz);
+    aBC_prespawn_block(play, bx + 1, bz);
+    aBC_prespawn_block(play, bx, bz - 1);
+    aBC_prespawn_block(play, bx, bz + 1);
+    aBC_prespawn_block(play, bx - 1, bz - 1);
+    aBC_prespawn_block(play, bx + 1, bz - 1);
+    aBC_prespawn_block(play, bx - 1, bz + 1);
+    aBC_prespawn_block(play, bx + 1, bz + 1);
+  }
+#endif
 }

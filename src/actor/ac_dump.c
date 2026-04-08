@@ -1,5 +1,6 @@
 #include "ac_dump.h"
 
+#include "pc_settings.h"
 #include "m_name_table.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
@@ -140,6 +141,16 @@ static void aDUM_actor_move(ACTOR* actor, GAME* game) {
 
     if ((mDemo_Check(1, &player->actor_class) == 0) && (mDemo_Check(5, &player->actor_class) == 0) &&
         (mDemo_Check(0x10, &player->actor_class) == 0) && ((dbx != pbx) || (dbz != pbz))) {
+#ifdef TARGET_VITA
+        if (g_pc_settings.free_cam) {
+            int dx = dbx - pbx;
+            int dz = dbz - pbz;
+            if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+                dump->proc(dump, play);
+                return;
+            }
+        }
+#endif
         Actor_delete(actor);
     } else {
         dump->proc(dump, play);

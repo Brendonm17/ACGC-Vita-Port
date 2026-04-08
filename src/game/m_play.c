@@ -1,5 +1,6 @@
 #include "m_play.h"
 
+#include "pc_settings.h"
 #include "m_common_data.h"
 #include "libultra/libultra.h"
 #include "m_fbdemo_wipe1.h"
@@ -628,6 +629,18 @@ static void setupFog(GAME_PLAY* play, GRAPH* graph) {
 }
 
 static void setupViewer(GAME_PLAY* play) {
+#ifdef TARGET_VITA
+    // scale near plane with camera distance when free cam is on outdoors
+    if (g_pc_settings.free_cam && Common_Get(field_type) == mFI_FIELDTYPE2_FG) {
+        f32 dist = play->camera.focus_distance;
+        // default focus ~700-900, near=200. when zoomed in (dist < 500), shrink near plane
+        f32 near = 200.0f;
+        if (dist < 500.0f) {
+            near = 50.0f + (dist / 500.0f) * 150.0f; // 50 at closest, 200 at dist=500
+        }
+        play->view.near = near;
+    }
+#endif
     showView(&play->view, VIEW_UPDATE_ALL);
 }
 

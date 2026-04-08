@@ -1,5 +1,6 @@
 #include "m_actor.h"
 
+#include "pc_settings.h"
 #include "m_play.h"
 #include "m_player_lib.h"
 #include "m_name_table.h"
@@ -275,8 +276,22 @@ extern int Actor_draw_actor_no_culling_check(ACTOR* actor) {
 
 extern int Actor_draw_actor_no_culling_check2(ACTOR* actor, xyz_t* camera_pos, f32 camera_w) {
     int res = FALSE;
+    f32 dist = actor->cull_distance;
+    f32 width = actor->cull_width;
+    f32 radius = actor->cull_radius;
+    f32 height = actor->cull_height;
 
-    if (-actor->cull_radius < camera_pos->z && camera_pos->z < actor->cull_distance + actor->cull_radius) {
+#ifdef TARGET_VITA
+    // free cam sees further than the original acre-locked camera
+    if (g_pc_settings.free_cam) {
+        dist *= 2.0f;
+        width *= 1.5f;
+        radius *= 1.5f;
+        height *= 1.5f;
+    }
+#endif
+
+    if (-radius < camera_pos->z && camera_pos->z < dist + radius) {
         f32 m = camera_w < 1.0f ? 1.0f : 1.0f / camera_w;
 #ifdef PC_ENHANCEMENTS
         /* Widescreen hor+ widens the rendered frustum.  The projection matrix
@@ -288,10 +303,10 @@ extern int Actor_draw_actor_no_culling_check2(ACTOR* actor, xyz_t* camera_pos, f
 #else
         f32 x_edge = 1.0f;
 #endif
-        int width_OK = (m * (fabsf(camera_pos->x) - actor->cull_width)) < x_edge;
+        int width_OK = (m * (fabsf(camera_pos->x) - width)) < x_edge;
 
         if (width_OK &&
-            (m * (camera_pos->y + actor->cull_height)) > -1.0f && (m * (camera_pos->y - actor->cull_radius) < 1.0f)) {
+            (m * (camera_pos->y + height)) > -1.0f && (m * (camera_pos->y - radius) < 1.0f)) {
             res = TRUE;
         }
     }
@@ -314,6 +329,13 @@ static void Actor_delete_check(ACTOR* actor, GAME* game) {
          (ACTOR_STATE_NO_MOVE_WHILE_CULLED | ACTOR_STATE_NO_DRAW_WHILE_CULLED | ACTOR_STATE_NO_CULL)) == 0) {
         if (actor->npc_id != EMPTY_NO) {
             if (actor->block_x >= 0 && actor->block_z >= 0) {
+#ifdef TARGET_VITA
+                if (g_pc_settings.free_cam) {
+                    int dx = actor->block_x - play->block_table.block_x;
+                    int dz = actor->block_z - play->block_table.block_z;
+                    if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) return;
+                }
+#endif
                 if (actor->block_x != play->block_table.block_x || actor->block_z != play->block_table.block_z) {
                     Actor_delete(actor);
                 }
