@@ -23,13 +23,22 @@ const char* vita_get_shader_type_name(int type) {
 
 void vita_log(const char* fmt, ...) {
 #ifdef VITA_PERF_LOG
-    FILE* f = fopen("ux0:data/AnimalCrossing/ac_perf.txt", "a");
-    if (!f) return;
+    // open the log file once and hold it for the session. fopen/fclose
+    // per call triggers eMMC directory metadata sync which drops frames
+    // every time the per-frame perf logger fires; fprintf+fflush is
+    // microseconds. libc closes the FILE* via atexit on shutdown.
+    static FILE* log_f = NULL;
+    static int log_open_failed = 0;
+    if (log_f == NULL) {
+        if (log_open_failed) return;
+        log_f = fopen("ux0:data/AnimalCrossing/ac_perf.txt", "a");
+        if (log_f == NULL) { log_open_failed = 1; return; }
+    }
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
+    vfprintf(log_f, fmt, ap);
     va_end(ap);
-    fclose(f);
+    fflush(log_f);
 #else
     (void)fmt;
 #endif
@@ -462,6 +471,149 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg45 vita_cfgs[44].programs
 #define vita_cfg46 vita_cfgs[45].programs
 
+// hash-based fast lookup for fully-literal TEV configs. replaces the
+// linear if/else cascade for the worker-thread per-draw shader match,
+// which was the dominant per-draw CPU cost. literal-match configs (every
+// condition is ==) are pre-hashed at init; pattern configs (range
+// checks, predicates) stay in the linear fallback.
+typedef struct {
+    u32 key[4];          // [num_stages, stage0_packed, stage1_packed, stage2_packed]
+    GLuint* programs;    // pointer to vita_cfgs[X].programs (8 fa variants)
+    u8 cfg_id;           // for VITA_CFG_DISABLED check, 0xFF means no check
+    u8 is_ocean;         // set vita_tev_is_ocean on hit
+    u8 occupied;
+    u8 pad;
+} TevHashEntry;
+
+#define TEV_LIT_SIZE 128
+#define TEV_LIT_MASK (TEV_LIT_SIZE - 1)
+static TevHashEntry tev_lit_table[TEV_LIT_SIZE];
+static int tev_lit_built = 0;
+
+static inline u32 tev_lit_pack_stage(int ca, int cb, int cc, int cd, int aa, int ab, int ac, int ad) {
+    return ((u32)(ca & 0xF) << 28) | ((u32)(cb & 0xF) << 24) |
+           ((u32)(cc & 0xF) << 20) | ((u32)(cd & 0xF) << 16) |
+           ((u32)(aa & 0xF) << 12) | ((u32)(ab & 0xF) <<  8) |
+           ((u32)(ac & 0xF) <<  4) | ((u32)(ad & 0xF));
+}
+
+static inline u32 tev_lit_hash_key(const u32* k) {
+    u32 h = k[0];
+    h = (h ^ k[1]) * 0x9E3779B1u;
+    h = (h ^ k[2]) * 0x9E3779B1u;
+    h = (h ^ k[3]) * 0x9E3779B1u;
+    h ^= h >> 16;
+    return h & TEV_LIT_MASK;
+}
+
+static void tev_lit_insert(const u32* key, GLuint* programs, u8 cfg_id, u8 is_ocean) {
+    u32 slot = tev_lit_hash_key(key);
+    for (int i = 0; i < TEV_LIT_SIZE; i++) {
+        u32 s = (slot + i) & TEV_LIT_MASK;
+        if (!tev_lit_table[s].occupied) {
+            tev_lit_table[s].key[0] = key[0];
+            tev_lit_table[s].key[1] = key[1];
+            tev_lit_table[s].key[2] = key[2];
+            tev_lit_table[s].key[3] = key[3];
+            tev_lit_table[s].programs = programs;
+            tev_lit_table[s].cfg_id = cfg_id;
+            tev_lit_table[s].is_ocean = is_ocean;
+            tev_lit_table[s].occupied = 1;
+            return;
+        }
+    }
+}
+
+static inline TevHashEntry* tev_lit_lookup(const u32* key) {
+    u32 slot = tev_lit_hash_key(key);
+    // bounded probe count keeps lookups cache-friendly at the current load factor
+    for (int i = 0; i < 16; i++) {
+        u32 s = (slot + i) & TEV_LIT_MASK;
+        TevHashEntry* e = &tev_lit_table[s];
+        if (!e->occupied) return NULL;
+        if (e->key[0] == key[0] && e->key[1] == key[1] &&
+            e->key[2] == key[2] && e->key[3] == key[3]) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+// insert helpers for 1, 2, or 3 stage configs. cfg_id=0xFF means no disabled-bit check.
+#define TEV_INS_2(s0a,s0b,s0c,s0d, s0e,s0f,s0g,s0h, \
+                  s1a,s1b,s1c,s1d, s1e,s1f,s1g,s1h, \
+                  PROGS, ID, OCEAN) \
+    do { u32 _k[4]; \
+         _k[0] = 2; \
+         _k[1] = tev_lit_pack_stage(s0a,s0b,s0c,s0d,s0e,s0f,s0g,s0h); \
+         _k[2] = tev_lit_pack_stage(s1a,s1b,s1c,s1d,s1e,s1f,s1g,s1h); \
+         _k[3] = 0; \
+         tev_lit_insert(_k, (PROGS), (ID), (OCEAN)); \
+    } while(0)
+
+#define TEV_INS_3(s0a,s0b,s0c,s0d, s0e,s0f,s0g,s0h, \
+                  s1a,s1b,s1c,s1d, s1e,s1f,s1g,s1h, \
+                  s2a,s2b,s2c,s2d, s2e,s2f,s2g,s2h, \
+                  PROGS, ID, OCEAN) \
+    do { u32 _k[4]; \
+         _k[0] = 3; \
+         _k[1] = tev_lit_pack_stage(s0a,s0b,s0c,s0d,s0e,s0f,s0g,s0h); \
+         _k[2] = tev_lit_pack_stage(s1a,s1b,s1c,s1d,s1e,s1f,s1g,s1h); \
+         _k[3] = tev_lit_pack_stage(s2a,s2b,s2c,s2d,s2e,s2f,s2g,s2h); \
+         tev_lit_insert(_k, (PROGS), (ID), (OCEAN)); \
+    } while(0)
+
+#define TEV_INS_1(s0a,s0b,s0c,s0d, s0e,s0f,s0g,s0h, PROGS, ID, OCEAN) \
+    do { u32 _k[4]; \
+         _k[0] = 1; \
+         _k[1] = tev_lit_pack_stage(s0a,s0b,s0c,s0d,s0e,s0f,s0g,s0h); \
+         _k[2] = 0; _k[3] = 0; \
+         tev_lit_insert(_k, (PROGS), (ID), (OCEAN)); \
+    } while(0)
+
+static void tev_lit_build(void) {
+    memset(tev_lit_table, 0, sizeof(tev_lit_table));
+
+    // 2-stage literal configs
+    TEV_INS_2(15,8,10,15, 7,7,7,4,    15,4,0,15, 7,7,7,0,  vita_cfg0,  0xFF, 0);
+    TEV_INS_2(15,15,15,6, 7,4,5,7,    15,15,15,0, 7,4,5,0, vita_cfg44, 44,  0);
+    TEV_INS_2(15,15,15,8, 7,7,7,4,    15,4,0,15, 7,7,7,0,  vita_cfg22, 0xFF, 0);
+    TEV_INS_2(15,15,15,8, 7,7,7,7,    15,15,15,0, 7,7,7,4, vita_cfg23, 0xFF, 0);
+    TEV_INS_2(10,8,3,15,  7,4,2,7,    6,4,0,15,  7,7,7,0,  vita_cfg2,  0xFF, 0);
+    TEV_INS_2(6,4,8,15,   7,4,1,2,    15,10,0,8, 7,4,1,0,  vita_cfg10, 0xFF, 0);
+    TEV_INS_2(15,8,10,8,  7,7,7,2,    15,4,10,0, 7,0,4,7,  vita_cfg38, 38,  0);
+    TEV_INS_2(6,4,8,15,   7,4,3,7,    15,15,15,0, 7,0,4,7, vita_cfg39, 39,  0);
+    TEV_INS_2(15,8,10,15, 7,7,7,4,    15,4,0,15, 7,0,1,2,  vita_cfg27, 27,  0);
+    TEV_INS_2(15,15,15,4, 7,7,7,7,    15,15,15,0, 7,7,7,2, vita_cfg34, 34,  0);
+    TEV_INS_2(15,8,10,15, 7,7,7,4,    15,0,4,15, 7,0,2,7,  vita_cfg35, 35,  0);
+    TEV_INS_2(15,10,4,6,  7,7,7,4,    15,8,3,0,  7,0,4,7,  vita_cfg29, 29,  0);
+    TEV_INS_2(8,15,15,4,  7,4,1,7,    15,0,10,8, 7,0,4,7,  vita_cfg30, 30,  0);
+    TEV_INS_2(15,8,3,6,   7,7,7,4,    15,10,4,0, 7,0,4,4,  vita_cfg31, 31,  0);
+    TEV_INS_2(15,8,10,8,  7,7,7,4,    15,10,4,0, 7,0,4,7,  vita_cfg32, 32,  0);
+
+    // 3-stage literal configs
+    TEV_INS_3(15,15,15,8, 7,7,7,4,    15,0,8,0,  7,0,4,7,
+              15,10,4,0, 7,7,7,0,  vita_cfg12, 0xFF, 1);
+    TEV_INS_3(15,15,15,8, 7,7,7,4,    15,0,9,15, 7,0,4,7,
+              15,4,10,0, 7,0,1,2,  vita_cfg13, 0xFF, 1);
+    TEV_INS_3(15,10,4,15, 7,7,7,4,    15,15,15,0, 0,4,1,7,
+              15,15,15,0, 7,0,2,7, vita_cfg24, 24,  0);
+    TEV_INS_3(15,15,15,4, 7,7,7,4,    15,15,15,0, 0,4,1,7,
+              15,15,15,0, 7,0,2,7, vita_cfg28, 28,  0);
+    TEV_INS_3(15,15,15,8, 7,7,7,4,    15,0,9,15, 7,0,4,7,
+              6,4,0,15,  7,0,2,7,  vita_cfg25, 0xFF, 0);
+
+    // 1-stage literal configs
+    TEV_INS_1(15,8,10,15, 7,4,2,7, vita_cfg11, 0xFF, 0);
+    TEV_INS_1(4,8,3,15,   7,7,7,4, vita_cfg33, 33,  0);
+
+    tev_lit_built = 1;
+}
+
+#undef TEV_INS_1
+#undef TEV_INS_2
+#undef TEV_INS_3
+
 // load pre-compiled GXP binary (4-byte header + GXP data)
 static GLuint vita_load_gxp(GLenum type, const unsigned char* gxp, unsigned int gxp_size) {
     unsigned int total = 4 + gxp_size;
@@ -588,6 +740,9 @@ void pc_gx_tev_init(void) {
     vita_log("=== AC Vita TEV Init (build %s %s) ===\n", __DATE__, __TIME__);
 #endif
     vita_log("Shader system: %d/%d programs OK (8 simple + %d specialized + 16 complex)\n", ok, total, spec_count);
+
+    // build literal-config hash table for fast worker-thread shader matching
+    tev_lit_build();
 }
 
 GLuint pc_gx_tev_load_composite_shader(void) {
@@ -849,6 +1004,45 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
     goto use_complex;
 #endif
     if (vita_force_uber) goto use_complex;
+
+    // fast path: literal-config hash lookup. catches the bulk of draws
+    // with a single 16-byte key compare instead of the linear cascade.
+    // misses fall through to the pattern-config cascade below.
+    if (tev_lit_built && vita_tev_ops_trivial(state)) {
+        u32 hkey[4];
+        hkey[0] = (u32)state->num_tev_stages;
+        if (state->num_tev_stages >= 1) {
+            PCGXTevStage* s0 = &state->tev_stages[0];
+            hkey[1] = tev_lit_pack_stage(s0->color_a, s0->color_b, s0->color_c, s0->color_d,
+                                         s0->alpha_a, s0->alpha_b, s0->alpha_c, s0->alpha_d);
+        } else {
+            hkey[1] = 0;
+        }
+        if (state->num_tev_stages >= 2) {
+            PCGXTevStage* s1 = &state->tev_stages[1];
+            hkey[2] = tev_lit_pack_stage(s1->color_a, s1->color_b, s1->color_c, s1->color_d,
+                                         s1->alpha_a, s1->alpha_b, s1->alpha_c, s1->alpha_d);
+        } else {
+            hkey[2] = 0;
+        }
+        if (state->num_tev_stages >= 3) {
+            PCGXTevStage* s2 = &state->tev_stages[2];
+            hkey[3] = tev_lit_pack_stage(s2->color_a, s2->color_b, s2->color_c, s2->color_d,
+                                         s2->alpha_a, s2->alpha_b, s2->alpha_c, s2->alpha_d);
+        } else {
+            hkey[3] = 0;
+        }
+        TevHashEntry* he = tev_lit_lookup(hkey);
+        if (he != NULL && he->programs[fa] != 0) {
+            // honor runtime VITA_CFG_DISABLED toggle
+            if (he->cfg_id == 0xFF || !(vita_cfg_disable & (1ULL << he->cfg_id))) {
+                if (he->is_ocean) vita_tev_is_ocean = 1;
+                vita_tev_specialized_draws++;
+                return he->programs[fa];
+            }
+        }
+    }
+
     // specialized shader matching
     if (vita_tev_ops_trivial(state)) {
         PCGXTevStage* s0 = &state->tev_stages[0];

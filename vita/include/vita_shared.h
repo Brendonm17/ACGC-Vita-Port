@@ -11,13 +11,13 @@
 extern "C" {
 #endif
 
-// frame timing
 typedef struct {
     unsigned int swap_us;
     unsigned int emu64_us;
     unsigned int flush_us;
     unsigned int texload_us;
     unsigned int tevmatch_us;
+    unsigned int submit_us;
 } VitaFrameTiming;
 extern VitaFrameTiming vita_timing;
 

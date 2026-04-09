@@ -69,6 +69,12 @@ typedef struct {
     int map_stage[3];
     int deferred_idx[3];
     u32 wrap_s[3], wrap_t[3];
+    // EFB source pointer for late re-resolve. non-zero when a stage's
+    // texture came from an EFB capture lookup. replay re-runs the
+    // lookup once all earlier captures this frame have been stored,
+    // which closes a race where the worker read a stale s_efb_captures
+    // entry from a previous frame.
+    u32 efb_src_ptr[3];
 } PCGXCmdTextures;
 
 typedef struct {
@@ -156,6 +162,11 @@ void vita_gx_flush_vertices_cmdbuf(int count);
 void vita_normalize_light(int i);
 void vita_set_vertex_attrib_pointers(void);
 void vita_efb_setup_texture(u32 dest_ptr, GLuint tex);
+
+// vertex write target for a new batch. returns a pointer into cmd_verts
+// if the batch fits, otherwise falls back to g_gx.vertex_buffer and the
+// flush overflow check drops the batch.
+PCGXVertex* vita_cmdbuf_begin_vertex_batch(int nverts);
 
 #ifdef __cplusplus
 }

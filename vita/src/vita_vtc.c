@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vitaGL.h>
 
 // VTC file format
 #define VTC_MAGIC   0x56544331  // "VTC1"
@@ -65,6 +66,7 @@ typedef struct {
     int vram_bytes;      // vRAM consumed by this texture
     unsigned int last_used; // frame counter for LRU
     int occupied;
+    int claimed;         // 1 when tex_cache owns this texture, eviction skips
 } VtcLoadedEntry;
 
 static VtcLoadedEntry g_vtc_loaded[VTC_LOADED_CACHE_SIZE];
@@ -150,6 +152,9 @@ typedef struct {
     unsigned char dxt_format;
     volatile int state;
     unsigned int file_offset;
+    // handle from vglPrepareCompressedTexture2D. io thread fills this
+    // so main can commit without a swizzle on the render path.
+    vglPendingTexture* pending;
 } VtcIoSlot;
 
 static VtcIoSlot g_vtc_io_slots[VTC_IO_SLOTS];
@@ -265,34 +270,31 @@ static VtcLoadedEntry* vtc_loaded_find(unsigned long long key) {
     return NULL;
 }
 
-// Evict oldest entry from loaded cache to free vRAM
+// evict the oldest unclaimed entry from loaded cache to free vRAM.
+// claimed entries are owned by tex_cache and must not be deleted out
+// from under it; they stay until tex_cache itself releases them.
 static void vtc_loaded_evict_oldest(void) {
     int oldest_idx = -1;
     unsigned int oldest_frame = 0xFFFFFFFF;
 
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
-        if (g_vtc_loaded[i].occupied && g_vtc_loaded[i].last_used < oldest_frame) {
+        if (g_vtc_loaded[i].occupied && !g_vtc_loaded[i].claimed &&
+            g_vtc_loaded[i].last_used < oldest_frame) {
             oldest_frame = g_vtc_loaded[i].last_used;
             oldest_idx = i;
         }
     }
-    if (oldest_idx < 0) return;
+    if (oldest_idx < 0) return;  // nothing evictable (all claimed)
 
     VtcLoadedEntry* victim = &g_vtc_loaded[oldest_idx];
 
-    pc_gx_texture_invalidate_gl_tex(victim->gl_tex);
-
-    // Defer-delete the GL texture (GPU may still be rendering with it)
     extern void vita_defer_tex_delete(GLuint tex);
     vita_defer_tex_delete(victim->gl_tex);
     g_vtc_vram_used -= victim->vram_bytes;
     g_vtc_evictions++;
 
-    // Clear the slot. We can't just zero it because open-addressing
-    // hash table requires tombstone or rehash. Simple approach: mark as
-    // unoccupied. This may break chains but is safe since lookups always
-    // fall back to VTC file read on miss.
     victim->occupied = 0;
+    victim->claimed = 0;
     victim->gl_tex = 0;
     victim->key = 0;
 }
@@ -300,8 +302,9 @@ static void vtc_loaded_evict_oldest(void) {
 void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vram_bytes) {
     // Enforce vRAM budget. Evict LRU entries until we fit.
     while (g_vtc_vram_used + vram_bytes > VTC_VRAM_BUDGET) {
+        int before = g_vtc_vram_used;
         vtc_loaded_evict_oldest();
-        if (g_vtc_vram_used <= 0) break; // safety: nothing left to evict
+        if (g_vtc_vram_used == before) break; // nothing evictable (all claimed)
     }
 
     unsigned int slot = (unsigned int)(key & VTC_LOADED_CACHE_MASK);
@@ -512,11 +515,27 @@ void vita_vtc_shutdown(void) {
     g_vtc_active = 0;
 }
 
-// Return GL texture from loaded_cache if key exists, 0 otherwise.
+// lookup from loaded cache, returns GL texture and marks the entry claimed.
+// claimed entries are skipped by LRU eviction so tex_cache retains the hd_tex.
 GLuint vita_vtc_loaded_cache_lookup(unsigned long long key) {
     if (!g_vtc_active || key == 0) return 0;
     VtcLoadedEntry* e = vtc_loaded_find(key);
-    return e ? e->gl_tex : 0;
+    if (!e) return 0;
+    e->claimed = 1;
+    return e->gl_tex;
+}
+
+// drop the claimed flag on every loaded entry. called from tex_cache
+// invalidation (scene transitions) after the tex_cache is wiped, since
+// nothing references the HD textures anymore and they all need to be
+// LRU-evictable again. scene B either re-claims them on lookup or they
+// get freed when their vram is needed.
+void vita_vtc_loaded_cache_unclaim_all(void) {
+    if (!g_vtc_active) return;
+    for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
+        if (g_vtc_loaded[i].occupied)
+            g_vtc_loaded[i].claimed = 0;
+    }
 }
 
 // Re-queue a key for prefetch if not already in loaded_cache or an I/O slot.
@@ -751,19 +770,29 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
         if (g_vtc_io_slots[si].key == key && g_vtc_io_slots[si].state == VTC_SLOT_READY) {
             // I/O thread already read this. Zero file I/O on main thread.
             g_vtc_io_preread_hits++;
-            unsigned char* dxt = g_vtc_io_slots[si].buffer;
-            int dxt_size = g_vtc_io_slots[si].dxt_size;
             int hd_w = g_vtc_io_slots[si].hd_w;
             int hd_h = g_vtc_io_slots[si].hd_h;
             unsigned char slot_fmt = g_vtc_io_slots[si].dxt_format;
-            GLenum gl_fmt = vtc_fmt_to_gl(slot_fmt);
 
             GLuint tex;
             glGenTextures(1, &tex);
             glActiveTexture(GL_TEXTURE7);
             glBindTexture(GL_TEXTURE_2D, tex);
-            glCompressedTexImage2D(GL_TEXTURE_2D, 0, gl_fmt, hd_w, hd_h,
-                                   0, dxt_size, dxt);
+
+            // commit the pre-swizzled handle from the io thread if we have
+            // one. this is the hot path, skips the main-thread swizzle.
+            vglPendingTexture* pending = g_vtc_io_slots[si].pending;
+            if (pending) {
+                g_vtc_io_slots[si].pending = NULL;
+                vglCommitPendingTexture(pending);
+            } else {
+                // fallback if prepare couldn't allocate on the io thread
+                unsigned char* dxt = g_vtc_io_slots[si].buffer;
+                int dxt_size = g_vtc_io_slots[si].dxt_size;
+                GLenum gl_fmt = vtc_fmt_to_gl(slot_fmt);
+                glCompressedTexImage2D(GL_TEXTURE_2D, 0, gl_fmt, hd_w, hd_h,
+                                       0, dxt_size, dxt);
+            }
             // Safe defaults. Caller overrides with correct GX values, but
             // prevent GL_REPEAT/GL_NEAREST_MIPMAP_LINEAR if used before that.
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -823,11 +852,17 @@ static int vtc_io_thread_func(SceSize args, void* argp) {
             fseek(g_vtc_file_io, slot->file_offset, SEEK_SET);
             if (fread(buf, 1, slot->dxt_size, g_vtc_file_io) == (size_t)slot->dxt_size) {
                 slot->buffer = buf;
+                // swizzle here so main only has to commit the descriptor.
+                // raw buffer remains the fallback if prepare returns null.
+                GLenum gl_fmt = vtc_fmt_to_gl(slot->dxt_format);
+                slot->pending = vglPrepareCompressedTexture2D(
+                    gl_fmt, slot->hd_w, slot->hd_h, buf, slot->dxt_size);
                 slot->state = VTC_SLOT_READY;
                 g_vtc_io_completed++;
             } else {
                 if (slot->malloc_buf) free(slot->malloc_buf);
                 slot->malloc_buf = NULL;
+                slot->pending = NULL;
                 slot->state = VTC_SLOT_FREE;
             }
             // Don't break. Drain ALL queued slots in one wake cycle.
@@ -845,6 +880,7 @@ void vita_vtc_io_init(void) {
         for (int i = 0; i < VTC_IO_SLOTS; i++) {
             g_vtc_io_slots[i].buffer = &g_vtc_io_pool[i * VTC_IO_BUF_SIZE];
             g_vtc_io_slots[i].malloc_buf = NULL;
+            g_vtc_io_slots[i].pending = NULL;
             g_vtc_io_slots[i].state = VTC_SLOT_FREE;
             g_vtc_io_slots[i].key = 0;
         }
@@ -855,14 +891,18 @@ void vita_vtc_io_init(void) {
 
     // Start low-priority I/O thread for VTC reads.
     // Priority 0xA0 (160) = lower than main (0x40) and worker (0x60).
-    // Runs on any available core, won't preempt rendering.
+    // pinned to core 2 so it never contends with main (core 0) or the
+    // emu64 worker (core 1). prevents prefetch spikes from stalling
+    // the worker and inflating wait_worker_us.
     g_vtc_io_sema = sceKernelCreateSema("vtc_io", 0, 0, 64, NULL);
     if (g_vtc_io_sema >= 0 && g_vtc_file_io) {
         g_vtc_io_shutdown = 0;
         g_vtc_io_thread = sceKernelCreateThread("vtc_io", vtc_io_thread_func,
                                                  0xA0, // low priority
                                                  64 * 1024, // 64KB stack
-                                                 0, 0, NULL);
+                                                 0,
+                                                 SCE_KERNEL_CPU_MASK_USER_0,
+                                                 NULL);
         if (g_vtc_io_thread >= 0) {
             sceKernelStartThread(g_vtc_io_thread, 0, NULL);
         }
@@ -1053,6 +1093,19 @@ int vita_vtc_check_ready(int slot, unsigned char** out_dxt, int* out_size,
     return 1;
 }
 
+// main-thread accessor for the pre-swizzled handle. ownership transfers to
+// the caller, who must commit or free it. returns null on not-ready slots
+// or when prepare failed and the caller should use the raw dxt path.
+vglPendingTexture* vita_vtc_take_ready_pending(int slot, int* out_w, int* out_h) {
+    if (slot < 0 || slot >= VTC_IO_SLOTS) return NULL;
+    if (g_vtc_io_slots[slot].state != VTC_SLOT_READY) return NULL;
+    vglPendingTexture* p = g_vtc_io_slots[slot].pending;
+    g_vtc_io_slots[slot].pending = NULL;
+    if (out_w) *out_w = g_vtc_io_slots[slot].hd_w;
+    if (out_h) *out_h = g_vtc_io_slots[slot].hd_h;
+    return p;
+}
+
 // Get the cache key for a slot
 unsigned long long vita_vtc_get_slot_key(int slot) {
     if (slot < 0 || slot >= VTC_IO_SLOTS) return 0;
@@ -1065,6 +1118,11 @@ void vita_vtc_release_slot(int slot) {
     if (g_vtc_io_slots[slot].malloc_buf) {
         free(g_vtc_io_slots[slot].malloc_buf);
         g_vtc_io_slots[slot].malloc_buf = NULL;
+    }
+    // free any unclaimed pending handle so its gpu memory isn't leaked.
+    if (g_vtc_io_slots[slot].pending) {
+        vglFreePendingTexture(g_vtc_io_slots[slot].pending);
+        g_vtc_io_slots[slot].pending = NULL;
     }
     g_vtc_io_slots[slot].buffer = &g_vtc_io_pool[slot * VTC_IO_BUF_SIZE];
     g_vtc_io_slots[slot].state = VTC_SLOT_FREE;

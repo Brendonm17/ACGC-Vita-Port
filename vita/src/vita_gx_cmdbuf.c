@@ -13,6 +13,74 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+// pre-dedup pass. runs on the worker thread while cmd_queue data is still
+// hot in core 1's cache, clearing PROJ/MODELVIEW/TEXTURES/FOG dirty bits
+// when consecutive draws have byte-identical state. running this on main
+// was much slower due to DRAM bandwidth contention with core 1's writeback
+// still draining, whereas here the data is freshly written and cache-hot.
+void vita_cmdbuf_prededup(void) {
+    int wr = cmd_write;  // worker's current write buffer
+    int count = cmd_queue_count_db[wr];
+    if (count <= 0) return;
+
+    PCGXCmdTextures  last_textures_pm;
+    PCGXCmdFog       last_fog_pm;
+    float            last_proj_mtx_pm[16];
+    float            last_pos_mtx_pm[16];
+    int last_pm_proj_valid = 0;
+    int last_pm_modelview_valid = 0;
+    int last_pm_textures_valid = 0;
+    int last_pm_fog_valid = 0;
+    GLuint last_pm_shader = 0;
+
+    for (int i = 0; i < count; i++) {
+        PCGXDrawCmd* c = &cmd_queue_db[wr][i];
+        if (c->shader == 0) continue;
+
+        if (c->shader_changed || c->shader != last_pm_shader) {
+            last_pm_proj_valid = 0;
+            last_pm_modelview_valid = 0;
+            last_pm_textures_valid = 0;
+            last_pm_fog_valid = 0;
+            last_pm_shader = c->shader;
+        }
+
+        unsigned int orig_dirty = c->dirty;
+        unsigned int new_dirty = orig_dirty;
+
+        if ((orig_dirty & PC_GX_DIRTY_PROJECTION) && last_pm_proj_valid &&
+            __builtin_memcmp(c->transform.projection_mtx_t, last_proj_mtx_pm, 64) == 0)
+            new_dirty &= ~PC_GX_DIRTY_PROJECTION;
+        if ((orig_dirty & PC_GX_DIRTY_MODELVIEW) && last_pm_modelview_valid &&
+            __builtin_memcmp(c->transform.pos_mtx_t, last_pos_mtx_pm, 64) == 0)
+            new_dirty &= ~PC_GX_DIRTY_MODELVIEW;
+        if ((orig_dirty & PC_GX_DIRTY_TEXTURES) && last_pm_textures_valid &&
+            __builtin_memcmp(&c->textures, &last_textures_pm, sizeof(PCGXCmdTextures)) == 0)
+            new_dirty &= ~PC_GX_DIRTY_TEXTURES;
+        if ((orig_dirty & PC_GX_DIRTY_FOG) && last_pm_fog_valid &&
+            __builtin_memcmp(&c->fog, &last_fog_pm, sizeof(PCGXCmdFog)) == 0)
+            new_dirty &= ~PC_GX_DIRTY_FOG;
+        c->dirty = new_dirty;
+
+        if (orig_dirty & PC_GX_DIRTY_PROJECTION) {
+            __builtin_memcpy(last_proj_mtx_pm, c->transform.projection_mtx_t, 64);
+            last_pm_proj_valid = 1;
+        }
+        if (orig_dirty & PC_GX_DIRTY_MODELVIEW) {
+            __builtin_memcpy(last_pos_mtx_pm, c->transform.pos_mtx_t, 64);
+            last_pm_modelview_valid = 1;
+        }
+        if (orig_dirty & PC_GX_DIRTY_TEXTURES) {
+            last_textures_pm = c->textures;
+            last_pm_textures_valid = 1;
+        }
+        if (orig_dirty & PC_GX_DIRTY_FOG) {
+            last_fog_pm = c->fog;
+            last_pm_fog_valid = 1;
+        }
+    }
+}
 #include <dolphin/gx/GXEnum.h>
 
 // GL state cache
@@ -33,6 +101,7 @@ static struct {
     int vp_x, vp_y, vp_w, vp_h;
     float depth_near, depth_far;
     int sc_x, sc_y, sc_w, sc_h;
+    int scissor_test_enabled; // -1 unknown, 0 disabled, 1 enabled
 } gl_cache;
 
 static GLuint gl_cache_bound_tex[8];
@@ -80,6 +149,7 @@ void gl_cache_reset(void) {
     gl_cache.depth_near = -1.0f; gl_cache.depth_far = -1.0f;
     gl_cache.sc_x = -1; gl_cache.sc_y = -1;
     gl_cache.sc_w = -1; gl_cache.sc_h = -1;
+    gl_cache.scissor_test_enabled = -1;
     gl_cache_reset_textures();
 }
 
@@ -156,27 +226,57 @@ int cmd_write = 0;
 PCGXEfbCapture efb_capture_db[2][EFB_CAPTURE_MAX];
 int efb_capture_count_db[2] = {0, 0};
 
+// per-frame index buffer, double-buffered. built on the worker thread
+// inline as each draw flushes, consumed on main during submit_frame as
+// a single glBufferData. moves index assembly off main.
+#define FRAME_IDX_MAX (PC_GX_MAX_VERTS * 3)
+static GLushort* frame_indices_db[2] = {NULL, NULL};
+static int       frame_idx_count_db[2] = {0, 0};
+#define frame_indices      frame_indices_db[cmd_write]
+#define frame_idx_count    frame_idx_count_db[cmd_write]
+
+
+
+
 
 void vita_cmdbuf_init(void) {
     for (int i = 0; i < 2; i++) {
         cmd_queue_db[i] = (PCGXDrawCmd*)malloc(CMD_QUEUE_MAX * sizeof(PCGXDrawCmd));
-        cmd_verts_db[i] = (PCGXVertex*)malloc(PC_GX_MAX_VERTS * sizeof(PCGXVertex));
-        if (!cmd_queue_db[i] || !cmd_verts_db[i]) {
+        // +2048 vertex guard for the direct-write path. GXBegin's nverts hint
+        // isn't always exact, so allow some slop before flush_vertices_cmdbuf
+        // detects the overflow and drops the batch.
+        cmd_verts_db[i] = (PCGXVertex*)malloc((PC_GX_MAX_VERTS + 2048) * sizeof(PCGXVertex));
+        frame_indices_db[i] = (GLushort*)malloc(FRAME_IDX_MAX * sizeof(GLushort));
+        if (!cmd_queue_db[i] || !cmd_verts_db[i] || !frame_indices_db[i]) {
             fprintf(stderr, "[GX] Failed to allocate double-buffer command queue %d\n", i);
             exit(1);
         }
         cmd_queue_count_db[i] = 0;
         cmd_vert_count_db[i] = 0;
         cmd_last_shader_db[i] = 0;
+        frame_idx_count_db[i] = 0;
     }
     cmd_write = 0;
 }
 
 void vita_cmdbuf_shutdown(void) {
     for (int i = 0; i < 2; i++) {
-        free(cmd_queue_db[i]);  cmd_queue_db[i] = NULL;
-        free(cmd_verts_db[i]);  cmd_verts_db[i] = NULL;
+        free(cmd_queue_db[i]);     cmd_queue_db[i] = NULL;
+        free(cmd_verts_db[i]);     cmd_verts_db[i] = NULL;
+        free(frame_indices_db[i]); frame_indices_db[i] = NULL;
     }
+}
+
+// vertex write target for a new batch. in the common case returns a
+// pointer directly into cmd_verts so GXPosition/Normal/Color/TexCoord
+// write straight into the per-frame vertex buffer (no memcpy on flush).
+// overflowing batches get the global scratch buffer instead and will be
+// caught by the flush overflow check and dropped.
+PCGXVertex* vita_cmdbuf_begin_vertex_batch(int nverts) {
+    if (nverts <= 0 || cmd_vert_count + nverts > PC_GX_MAX_VERTS) {
+        return g_gx.vertex_buffer;
+    }
+    return cmd_verts + cmd_vert_count;
 }
 
 void vita_cmdbuf_begin_frame(void) {
@@ -189,6 +289,7 @@ void vita_cmdbuf_begin_frame(void) {
     cmd_vert_count = 0;
     cmd_last_shader = 0;
     efb_capture_count = 0;
+    frame_idx_count = 0;
 }
 
 // Setup EFB capture texture after glCopyTexImage2D
@@ -318,8 +419,11 @@ void pc_gx_submit_frame(void) {
     if (vita_stats.deferred_tex_uploads > 0)
         gl_cache_reset_textures();
 
-    // Late texture re-resolve: deferred uploads just completed
-    {
+    // late texture re-resolve after deferred uploads completed. gated on
+    // pc_gx_deferred_tex_uploads (vita_stats.deferred_tex_uploads is never
+    // set) so stable scenes don't walk cmd x stage pairs for nothing.
+    extern int pc_gx_deferred_tex_uploads;
+    if (pc_gx_deferred_tex_uploads > 0) {
         int rd_tmp = 1 - cmd_write;
         int cnt = cmd_queue_count_db[rd_tmp];
         int rr_patched = 0, rr_failed = 0, rr_noidx = 0;
@@ -361,9 +465,27 @@ void pc_gx_submit_frame(void) {
     int rd_efb_count = efb_capture_count_db[rd];
     int rd_efb_next = 0;
 
-    // frame dump removed
-
+    // empty frame: no draws to replay but still process queued EFB
+    // captures, otherwise pause-menu re-open drops the capture and the
+    // menu renders against a stale framebuffer.
     if (rd_verts == 0 || rd_count == 0) {
+        for (int e = 0; e < rd_efb_count; e++) {
+            PCGXEfbCapture* cap = &efb_capture_db[rd][e];
+            int gl_y = g_pc_window_h - (cap->src_top + cap->src_h);
+            if (gl_y < 0 || cap->src_w <= 0 || cap->src_h <= 0) continue;
+            GLuint efb_tex = pc_gx_efb_capture_get_or_create(cap->dest_ptr);
+            if (efb_tex) {
+                gl_cache_active_texture(GL_TEXTURE7);
+                glBindTexture(GL_TEXTURE_2D, efb_tex);
+                glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                                 cap->src_left, gl_y, cap->src_w, cap->src_h, 0);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                gl_cache_active_texture(GL_TEXTURE0);
+            }
+        }
         cmd_queue_count_db[rd] = 0;
         cmd_vert_count_db[rd] = 0;
         cmd_last_shader_db[rd] = 0;
@@ -372,96 +494,101 @@ void pc_gx_submit_frame(void) {
         return;
     }
 
-    // ONE vertex upload for the entire frame
+    // single vertex upload for the entire frame
     glBufferData(GL_ARRAY_BUFFER, rd_verts * sizeof(PCGXVertex),
                  cmd_verts_db[rd], GL_STREAM_DRAW);
 
     vita_set_vertex_attrib_pointers();
 
-    // Build per-frame index buffer
+    // index buffer is built inline by the worker as it flushes each draw
     {
-        #define FRAME_IDX_MAX (PC_GX_MAX_VERTS * 3)
-        static GLushort frame_indices[FRAME_IDX_MAX];
-        int total_indices = 0;
+        int total_indices = frame_idx_count_db[rd];
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, total_indices * sizeof(GLushort),
+                     frame_indices_db[rd], GL_STREAM_DRAW);
+    }
+
+    // pre-dedup pass. clears PROJ/MODELVIEW/TEXTURES/FOG dirty bits on
+    // consecutive draws with identical state so replay skips the bind
+    // calls. runs on main as a safety net for any draws the worker-side
+    // pre-dedup didn't cover (e.g. captures injected between draws).
+    {
+        PCGXCmdTextures  last_textures_pm;
+        PCGXCmdFog       last_fog_pm;
+        float            last_proj_mtx_pm[16];
+        float            last_pos_mtx_pm[16];
+        int last_pm_proj_valid = 0;
+        int last_pm_modelview_valid = 0;
+        int last_pm_textures_valid = 0;
+        int last_pm_fog_valid = 0;
+        GLuint last_pm_shader = 0;
 
         for (int i = 0; i < rd_count; i++) {
             PCGXDrawCmd* c = &cmd_queue_db[rd][i];
-            int base = c->vert_offset;
-            int n = c->vert_count;
-            c->idx_offset = total_indices;
+            if (c->shader == 0) continue;
 
-            if (c->primitive == GX_QUADS) {
-                int nq = n / 4;
-                for (int q = 0; q < nq && total_indices + 6 <= FRAME_IDX_MAX; q++) {
-                    int v = base + q * 4;
-                    frame_indices[total_indices++] = (GLushort)v;
-                    frame_indices[total_indices++] = (GLushort)(v + 1);
-                    frame_indices[total_indices++] = (GLushort)(v + 2);
-                    frame_indices[total_indices++] = (GLushort)(v + 0);
-                    frame_indices[total_indices++] = (GLushort)(v + 2);
-                    frame_indices[total_indices++] = (GLushort)(v + 3);
-                }
-                c->idx_count = (n / 4) * 6;
-            } else if (c->primitive == GX_TRIANGLESTRIP) {
-                int ntri = n - 2;
-                for (int t = 0; t < ntri && total_indices + 3 <= FRAME_IDX_MAX; t++) {
-                    if (t & 1) {
-                        frame_indices[total_indices++] = (GLushort)(base + t + 1);
-                        frame_indices[total_indices++] = (GLushort)(base + t);
-                        frame_indices[total_indices++] = (GLushort)(base + t + 2);
-                    } else {
-                        frame_indices[total_indices++] = (GLushort)(base + t);
-                        frame_indices[total_indices++] = (GLushort)(base + t + 1);
-                        frame_indices[total_indices++] = (GLushort)(base + t + 2);
-                    }
-                }
-                c->idx_count = ntri * 3;
-            } else if (c->primitive == GX_TRIANGLEFAN) {
-                int ntri = n - 2;
-                for (int t = 0; t < ntri && total_indices + 3 <= FRAME_IDX_MAX; t++) {
-                    frame_indices[total_indices++] = (GLushort)base;
-                    frame_indices[total_indices++] = (GLushort)(base + t + 1);
-                    frame_indices[total_indices++] = (GLushort)(base + t + 2);
-                }
-                c->idx_count = ntri * 3;
-            } else if (c->primitive == GX_LINESTRIP) {
-                int nseg = n - 1;
-                for (int s = 0; s < nseg && total_indices + 2 <= FRAME_IDX_MAX; s++) {
-                    frame_indices[total_indices++] = (GLushort)(base + s);
-                    frame_indices[total_indices++] = (GLushort)(base + s + 1);
-                }
-                c->idx_count = nseg * 2;
-            } else {
-                for (int v = 0; v < n && total_indices < FRAME_IDX_MAX; v++)
-                    frame_indices[total_indices++] = (GLushort)(base + v);
-                c->idx_count = n;
+            if (c->shader_changed || c->shader != last_pm_shader) {
+                last_pm_proj_valid = 0;
+                last_pm_modelview_valid = 0;
+                last_pm_textures_valid = 0;
+                last_pm_fog_valid = 0;
+                last_pm_shader = c->shader;
+            }
+
+            unsigned int orig_dirty = c->dirty;
+            unsigned int new_dirty = orig_dirty;
+
+            if ((orig_dirty & PC_GX_DIRTY_PROJECTION) && last_pm_proj_valid &&
+                __builtin_memcmp(c->transform.projection_mtx_t, last_proj_mtx_pm, 64) == 0)
+                new_dirty &= ~PC_GX_DIRTY_PROJECTION;
+            if ((orig_dirty & PC_GX_DIRTY_MODELVIEW) && last_pm_modelview_valid &&
+                __builtin_memcmp(c->transform.pos_mtx_t, last_pos_mtx_pm, 64) == 0)
+                new_dirty &= ~PC_GX_DIRTY_MODELVIEW;
+            if ((orig_dirty & PC_GX_DIRTY_TEXTURES) && last_pm_textures_valid &&
+                __builtin_memcmp(&c->textures, &last_textures_pm, sizeof(PCGXCmdTextures)) == 0)
+                new_dirty &= ~PC_GX_DIRTY_TEXTURES;
+            if ((orig_dirty & PC_GX_DIRTY_FOG) && last_pm_fog_valid &&
+                __builtin_memcmp(&c->fog, &last_fog_pm, sizeof(PCGXCmdFog)) == 0)
+                new_dirty &= ~PC_GX_DIRTY_FOG;
+            c->dirty = new_dirty;
+
+            if (orig_dirty & PC_GX_DIRTY_PROJECTION) {
+                __builtin_memcpy(last_proj_mtx_pm, c->transform.projection_mtx_t, 64);
+                last_pm_proj_valid = 1;
+            }
+            if (orig_dirty & PC_GX_DIRTY_MODELVIEW) {
+                __builtin_memcpy(last_pos_mtx_pm, c->transform.pos_mtx_t, 64);
+                last_pm_modelview_valid = 1;
+            }
+            if (orig_dirty & PC_GX_DIRTY_TEXTURES) {
+                last_textures_pm = c->textures;
+                last_pm_textures_valid = 1;
+            }
+            if (orig_dirty & PC_GX_DIRTY_FOG) {
+                last_fog_pm = c->fog;
+                last_pm_fog_valid = 1;
             }
         }
-
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, total_indices * sizeof(GLushort),
-                     frame_indices, GL_STREAM_DRAW);
-        #undef FRAME_IDX_MAX
     }
 
-    // Draw call merging
+    // draw merge. combines consecutive draws with matching state.
     {
         int merged = 0;
         for (int i = 0; i < rd_count - 1; i++) {
-            PCGXDrawCmd* cur = &cmd_queue_db[rd][i];
-            if (cur->shader == 0 || cur->idx_count == 0) continue;
-            while (i + 1 < rd_count) {
-                PCGXDrawCmd* nxt = &cmd_queue_db[rd][i + 1];
-                if (nxt->shader == 0) { i++; continue; }
-                if (nxt->shader_changed || nxt->dirty != 0) break;
-                if (nxt->primitive != cur->primitive) break;
-                if (cur->idx_offset + cur->idx_count != nxt->idx_offset) break;
-                cur->idx_count += nxt->idx_count;
-                nxt->shader = 0;
-                nxt->idx_count = 0;
-                merged++;
-                i++;
+            PCGXDrawCmd* c = &cmd_queue_db[rd][i];
+            PCGXDrawCmd* n = &cmd_queue_db[rd][i + 1];
+            if (c->shader == 0 || n->shader == 0) continue;
+            unsigned int nd = n->dirty;
+            if (nd != 0) {
+                if (nd != PC_GX_DIRTY_LIGHTING) continue;
+                if (__builtin_memcmp(&c->lighting, &n->lighting, sizeof(PCGXCmdLighting)) != 0) continue;
             }
+            if (n->shader != c->shader) continue;
+            if (n->primitive != c->primitive) continue;
+            if (n->idx_offset != c->idx_offset + c->idx_count) continue;
+            c->idx_count += n->idx_count;
+            n->shader = 0;
+            merged++;
         }
         vita_stats.merged_draws = rd_count - merged;
     }
@@ -480,9 +607,44 @@ void pc_gx_submit_frame(void) {
     int actual_draws = 0;
     vita_stats.merged_draws = rd_count;
 
+    // per-frame uniform upload dedup. consecutive draws often have
+    // byte-identical TEV/lighting/konst state, and a memcmp is far
+    // cheaper than the ~50-uniform upload block that would otherwise
+    // run. trackers are static so the ~1KB state doesn't live on the
+    // stack. reset on shader switch because uniform locations remap.
+    static PCGXCmdTEV      last_tev;
+    static PCGXCmdLighting last_lighting;
+    static float           last_konst[16];
+    int last_tev_valid      = 0;
+    int last_lighting_valid = 0;
+    int last_konst_valid    = 0;
+
+    // viewport/scissor input cache. skips the per-draw scale/4:3/widescreen
+    // math when the raw inputs match the previous draw. the GL calls are
+    // already cached downstream but the math still runs every draw.
+    float last_vp_input[6] = { -9999, -9999, -9999, -9999, -9999, -9999 };
+    int   last_sc_input[4] = { -9999, -9999, -9999, -9999 };
+    int   last_vp_ws = -1;
+    int   last_vp_input_valid = 0;
+
     for (int i = 0; i < rd_count; i++) {
         PCGXDrawCmd* cmd = &cmd_queue_db[rd][i];
         if (cmd->shader == 0) continue;
+
+        // late EFB texture re-resolve safety net. the worker may have
+        // snapshotted obj_stage=0 or a stale value before the capture
+        // was processed; by this point earlier captures have been
+        // handled so look up by dest_ptr and force DIRTY_TEXTURES.
+        for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+            if (cmd->textures.efb_src_ptr[s] != 0) {
+                GLuint fresh = pc_gx_efb_capture_find(cmd->textures.efb_src_ptr[s]);
+                if (fresh && fresh != cmd->textures.obj_stage[s]) {
+                    cmd->textures.obj_stage[s] = fresh;
+                    cmd->textures.use_stage[s] = 1;
+                    cmd->dirty |= PC_GX_DIRTY_TEXTURES;
+                }
+            }
+        }
 
         // Skip draws with missing textures
         {
@@ -516,6 +678,12 @@ void pc_gx_submit_frame(void) {
             sloc = UL(texture1); if (sloc >= 0) glUniform1i(sloc, 1);
             sloc = UL(texture2); if (sloc >= 0) glUniform1i(sloc, 2);
             gl_cache_reset();
+            // uniform locations remap on shader switch; previous skip-decisions
+            // are no longer valid
+            last_tev_valid = 0;
+            last_lighting_valid = 0;
+            last_konst_valid = 0;
+            last_vp_input_valid = 0;
         }
 
         // Upload dirty uniforms: direct write to VitaGL u->data
@@ -544,35 +712,47 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & PC_GX_DIRTY_TEV_STAGES) {
-                loc = UL(num_tev_stages); if (loc >= 0) UNI1I(cmd->tev.num_stages);
-                for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
-                    PCGXTevStage* ts = &cmd->tev.stages[s];
-                    loc = UL(tev_color_in[s]); if (loc >= 0) UNI4I(ts->color_a, ts->color_b, ts->color_c, ts->color_d);
-                    loc = UL(tev_alpha_in[s]); if (loc >= 0) UNI4I(ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
-                    loc = UL(tev_color_op[s]); if (loc >= 0) UNI1I(ts->color_op);
-                    loc = UL(tev_alpha_op[s]); if (loc >= 0) UNI1I(ts->alpha_op);
-                    loc = UL(tev_bsc[s]);  if (loc >= 0) UNI4I(ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
-                    loc = UL(tev_out[s]);  if (loc >= 0) UNI4I(ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
-                    loc = UL(tev_swap[s]); if (loc >= 0) UNI2I(ts->ras_swap, ts->tex_swap);
-                }
-                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                    loc = UL(tev_tc_src[s]); if (loc >= 0) UNI1I(cmd->tev.tc_src[s]);
-                }
-                for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
-                    loc = UL(tev_ca[s]); if (loc >= 0) DFVN(loc, cmd->tev.ca[s], 12);
-                    loc = UL(tev_cb[s]); if (loc >= 0) DFVN(loc, cmd->tev.cb[s], 12);
-                    loc = UL(tev_cc[s]); if (loc >= 0) DFVN(loc, cmd->tev.cc[s], 12);
-                    loc = UL(tev_cd[s]); if (loc >= 0) DFVN(loc, cmd->tev.cd[s], 12);
-                    loc = UL(tev_aval[s]); if (loc >= 0) DFVN(loc, cmd->tev.aval[s], 16);
-                    loc = UL(tev_csrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.csrc[s], 16);
-                    loc = UL(tev_asrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.asrc[s], 16);
-                    loc = UL(tev_param[s]); if (loc >= 0) DFVN(loc, cmd->tev.param[s], 16);
-                    loc = UL(tev_aparam[s]); if (loc >= 0) DFVN(loc, cmd->tev.aparam[s], 8);
+                int tev_unchanged = last_tev_valid &&
+                    __builtin_memcmp(&cmd->tev, &last_tev, sizeof(PCGXCmdTEV)) == 0;
+                if (!tev_unchanged) {
+                    loc = UL(num_tev_stages); if (loc >= 0) UNI1I(cmd->tev.num_stages);
+                    for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
+                        PCGXTevStage* ts = &cmd->tev.stages[s];
+                        loc = UL(tev_color_in[s]); if (loc >= 0) UNI4I(ts->color_a, ts->color_b, ts->color_c, ts->color_d);
+                        loc = UL(tev_alpha_in[s]); if (loc >= 0) UNI4I(ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
+                        loc = UL(tev_color_op[s]); if (loc >= 0) UNI1I(ts->color_op);
+                        loc = UL(tev_alpha_op[s]); if (loc >= 0) UNI1I(ts->alpha_op);
+                        loc = UL(tev_bsc[s]);  if (loc >= 0) UNI4I(ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
+                        loc = UL(tev_out[s]);  if (loc >= 0) UNI4I(ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
+                        loc = UL(tev_swap[s]); if (loc >= 0) UNI2I(ts->ras_swap, ts->tex_swap);
+                    }
+                    for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                        loc = UL(tev_tc_src[s]); if (loc >= 0) UNI1I(cmd->tev.tc_src[s]);
+                    }
+                    for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
+                        loc = UL(tev_ca[s]); if (loc >= 0) DFVN(loc, cmd->tev.ca[s], 12);
+                        loc = UL(tev_cb[s]); if (loc >= 0) DFVN(loc, cmd->tev.cb[s], 12);
+                        loc = UL(tev_cc[s]); if (loc >= 0) DFVN(loc, cmd->tev.cc[s], 12);
+                        loc = UL(tev_cd[s]); if (loc >= 0) DFVN(loc, cmd->tev.cd[s], 12);
+                        loc = UL(tev_aval[s]); if (loc >= 0) DFVN(loc, cmd->tev.aval[s], 16);
+                        loc = UL(tev_csrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.csrc[s], 16);
+                        loc = UL(tev_asrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.asrc[s], 16);
+                        loc = UL(tev_param[s]); if (loc >= 0) DFVN(loc, cmd->tev.param[s], 16);
+                        loc = UL(tev_aparam[s]); if (loc >= 0) DFVN(loc, cmd->tev.aparam[s], 8);
+                    }
+                    last_tev = cmd->tev;
+                    last_tev_valid = 1;
                 }
             }
 
             if (dirty & PC_GX_DIRTY_KONST) {
-                loc = UL(kcolor); if (loc >= 0) DFVN(loc, cmd->tev.k_colors, 64);
+                int konst_unchanged = last_konst_valid &&
+                    __builtin_memcmp(cmd->tev.k_colors, last_konst, 64) == 0;
+                if (!konst_unchanged) {
+                    loc = UL(kcolor); if (loc >= 0) DFVN(loc, cmd->tev.k_colors, 64);
+                    __builtin_memcpy(last_konst, cmd->tev.k_colors, 64);
+                    last_konst_valid = 1;
+                }
             }
 
             if (dirty & PC_GX_DIRTY_ALPHA_CMP) {
@@ -581,42 +761,48 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & PC_GX_DIRTY_LIGHTING) {
-                loc = UL(lighting_enabled); if (loc >= 0) UNI1I(cmd->lighting.chan_ctrl_enable_0);
-                loc = UL(mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
-                loc = UL(chan_mat_src); if (loc >= 0) UNI1I(cmd->lighting.mat_src_0);
-                loc = UL(num_chans);  if (loc >= 0) UNI1I(cmd->lighting.num_chans);
-                loc = UL(alpha_lighting_enabled); if (loc >= 0) UNI1I(cmd->lighting.chan_ctrl_enable_1);
-                loc = UL(alpha_mat_src); if (loc >= 0) UNI1I(cmd->lighting.mat_src_1);
-                loc = UL(amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
-                loc = UL(chan_amb_src); if (loc >= 0) UNI1I(cmd->lighting.amb_src_0);
-                loc = UL(light_mask); if (loc >= 0) UNI1I(cmd->lighting.light_mask_0);
-                loc = UL(light_pos[0]);   if (loc >= 0) DFVN(loc, &cmd->lighting.light_pos[0][0], 96);
-                loc = UL(light_color[0]); if (loc >= 0) DFVN(loc, &cmd->lighting.light_color[0][0], 128);
-                if (cmd->lighting.vs_lit_enable) {
-                    loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
-                    loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
-                    loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_mat_src; }
-                    loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.amb_src_0; }
-                    loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_alpha_mat_src; }
-                    loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.chan_ctrl_enable_1; }
-                    for (int li = 0; li < 8; li++) {
-                        loc = UL(vs_ldir[li]);
-                        if (loc >= 0) { VU(loc)->data[0] = cmd->lighting.light_pos[li][0]; VU(loc)->data[1] = cmd->lighting.light_pos[li][1]; VU(loc)->data[2] = cmd->lighting.light_pos[li][2]; }
-                        loc = UL(vs_lcol[li]);
-                        if (loc >= 0) DFVN(loc, cmd->lighting.light_color[li], 16);
-                    }
-                } else {
-                    static const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-                    static const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                    loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, white, 16);
-                    loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, white, 16);
-                    loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
-                    loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
-                    loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
-                    loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = 0.0f; }
-                    for (int li = 0; li < 8; li++) {
-                        loc = UL(vs_ldir[li]); if (loc >= 0) { VU(loc)->data[0] = 0; VU(loc)->data[1] = 0; VU(loc)->data[2] = 1; }
-                        loc = UL(vs_lcol[li]); if (loc >= 0) DFVN(loc, zero4, 16);
+                int lighting_unchanged = last_lighting_valid &&
+                    __builtin_memcmp(&cmd->lighting, &last_lighting, sizeof(PCGXCmdLighting)) == 0;
+                if (!lighting_unchanged) {
+                    last_lighting = cmd->lighting;
+                    last_lighting_valid = 1;
+                    loc = UL(lighting_enabled); if (loc >= 0) UNI1I(cmd->lighting.chan_ctrl_enable_0);
+                    loc = UL(mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
+                    loc = UL(chan_mat_src); if (loc >= 0) UNI1I(cmd->lighting.mat_src_0);
+                    loc = UL(num_chans);  if (loc >= 0) UNI1I(cmd->lighting.num_chans);
+                    loc = UL(alpha_lighting_enabled); if (loc >= 0) UNI1I(cmd->lighting.chan_ctrl_enable_1);
+                    loc = UL(alpha_mat_src); if (loc >= 0) UNI1I(cmd->lighting.mat_src_1);
+                    loc = UL(amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
+                    loc = UL(chan_amb_src); if (loc >= 0) UNI1I(cmd->lighting.amb_src_0);
+                    loc = UL(light_mask); if (loc >= 0) UNI1I(cmd->lighting.light_mask_0);
+                    loc = UL(light_pos[0]);   if (loc >= 0) DFVN(loc, &cmd->lighting.light_pos[0][0], 96);
+                    loc = UL(light_color[0]); if (loc >= 0) DFVN(loc, &cmd->lighting.light_color[0][0], 128);
+                    if (cmd->lighting.vs_lit_enable) {
+                        loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
+                        loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
+                        loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_mat_src; }
+                        loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.amb_src_0; }
+                        loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_alpha_mat_src; }
+                        loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.chan_ctrl_enable_1; }
+                        for (int li = 0; li < 8; li++) {
+                            loc = UL(vs_ldir[li]);
+                            if (loc >= 0) { VU(loc)->data[0] = cmd->lighting.light_pos[li][0]; VU(loc)->data[1] = cmd->lighting.light_pos[li][1]; VU(loc)->data[2] = cmd->lighting.light_pos[li][2]; }
+                            loc = UL(vs_lcol[li]);
+                            if (loc >= 0) DFVN(loc, cmd->lighting.light_color[li], 16);
+                        }
+                    } else {
+                        static const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                        static const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, white, 16);
+                        loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, white, 16);
+                        loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
+                        loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
+                        loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
+                        loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = 0.0f; }
+                        for (int li = 0; li < 8; li++) {
+                            loc = UL(vs_ldir[li]); if (loc >= 0) { VU(loc)->data[0] = 0; VU(loc)->data[1] = 0; VU(loc)->data[2] = 1; }
+                            loc = UL(vs_lcol[li]); if (loc >= 0) DFVN(loc, zero4, 16);
+                        }
                     }
                 }
             }
@@ -633,27 +819,25 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES)) {
-                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                    if (cmd->textures.use_stage[s])
-                        gl_cache_bind_texture(GL_TEXTURE0 + s, cmd->textures.obj_stage[s]);
-                }
-                // Per-draw wrap: same GL texture may need different wrap modes
-                // for different draws. Only call glTexParameteri when wrap differs
-                // from what's currently set on the bound texture for this unit.
-                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                    if (cmd->textures.use_stage[s] && cmd->textures.wrap_s[s] != 0xFF) {
-                        if (gl_cache_wrap_s[s] != cmd->textures.wrap_s[s] ||
-                            gl_cache_wrap_t[s] != cmd->textures.wrap_t[s]) {
-                            gl_cache_active_texture(GL_TEXTURE0 + s);
-                            GLenum ws = (cmd->textures.wrap_s[s] == 2) ? GL_MIRRORED_REPEAT :
-                                        (cmd->textures.wrap_s[s] == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
-                            GLenum wt = (cmd->textures.wrap_t[s] == 2) ? GL_MIRRORED_REPEAT :
-                                        (cmd->textures.wrap_t[s] == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
-                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
-                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
-                            gl_cache_wrap_s[s] = cmd->textures.wrap_s[s];
-                            gl_cache_wrap_t[s] = cmd->textures.wrap_t[s];
-                        }
+                // unified bind + wrap loop. walks only the stages the
+                // cmd actually uses (num_stages is usually 1 or 2).
+                int ns = cmd->tev.num_stages;
+                if (ns > PC_GX_MAX_TEV_STAGES) ns = PC_GX_MAX_TEV_STAGES;
+                for (int s = 0; s < ns; s++) {
+                    if (!cmd->textures.use_stage[s]) continue;
+                    gl_cache_bind_texture(GL_TEXTURE0 + s, cmd->textures.obj_stage[s]);
+                    if (cmd->textures.wrap_s[s] != 0xFF &&
+                        (gl_cache_wrap_s[s] != cmd->textures.wrap_s[s] ||
+                         gl_cache_wrap_t[s] != cmd->textures.wrap_t[s])) {
+                        gl_cache_active_texture(GL_TEXTURE0 + s);
+                        GLenum ws = (cmd->textures.wrap_s[s] == 2) ? GL_MIRRORED_REPEAT :
+                                    (cmd->textures.wrap_s[s] == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                        GLenum wt = (cmd->textures.wrap_t[s] == 2) ? GL_MIRRORED_REPEAT :
+                                    (cmd->textures.wrap_t[s] == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
+                        gl_cache_wrap_s[s] = cmd->textures.wrap_s[s];
+                        gl_cache_wrap_t[s] = cmd->textures.wrap_t[s];
                     }
                 }
                 loc = UL(use_texture0); if (loc >= 0) UNI1I(cmd->textures.use_stage[0]);
@@ -781,8 +965,20 @@ void pc_gx_submit_frame(void) {
             }
         }
 
-        // Viewport & Scissor from snapshot (cached)
-        {
+        // viewport and scissor from snapshot. short-circuit the float math
+        // when the raw inputs match the previous draw; viewport rarely
+        // changes mid-frame. the inner gl_cache check is still the final
+        // line of defense after a gl_cache_reset or shader switch.
+        if (last_vp_input_valid &&
+            __builtin_memcmp(cmd->viewport, last_vp_input, 24) == 0 &&
+            __builtin_memcmp(cmd->scissor, last_sc_input, 16) == 0 &&
+            cmd->widescreen_stretch == last_vp_ws) {
+            // ensure scissor test is on and skip the rest
+            if (gl_cache.scissor_test_enabled != 1) {
+                glEnable(GL_SCISSOR_TEST);
+                gl_cache.scissor_test_enabled = 1;
+            }
+        } else {
             float vp_left = cmd->viewport[0];
             float vp_top  = cmd->viewport[1];
             float vp_wd   = cmd->viewport[2];
@@ -840,13 +1036,21 @@ void pc_gx_submit_frame(void) {
             int sc_gl_h = sc_ht;
             int sc_gl_y = PC_GC_HEIGHT - sc_top - sc_ht;
 #endif
+            if (gl_cache.scissor_test_enabled != 1) {
+                glEnable(GL_SCISSOR_TEST);
+                gl_cache.scissor_test_enabled = 1;
+            }
             if (gl_cache.sc_x != sc_gl_x || gl_cache.sc_y != sc_gl_y ||
                 gl_cache.sc_w != sc_gl_w || gl_cache.sc_h != sc_gl_h) {
-                glEnable(GL_SCISSOR_TEST);
                 glScissor(sc_gl_x, sc_gl_y, sc_gl_w, sc_gl_h);
                 gl_cache.sc_x = sc_gl_x; gl_cache.sc_y = sc_gl_y;
                 gl_cache.sc_w = sc_gl_w; gl_cache.sc_h = sc_gl_h;
             }
+
+            __builtin_memcpy(last_vp_input, cmd->viewport, 24);
+            __builtin_memcpy(last_sc_input, cmd->scissor, 16);
+            last_vp_ws = cmd->widescreen_stretch;
+            last_vp_input_valid = 1;
         }
 
 
@@ -875,20 +1079,29 @@ void pc_gx_submit_frame(void) {
             gl_cache.blend_eq = GL_FUNC_ADD;
         }
 
-        // EFB captures
+        // EFB captures queued to fire after this draw. the capture uses
+        // a persistent GL texture per dest_ptr so repeated captures to
+        // the same dest reuse the same GL id. previously snapshotted
+        // obj_stages stay valid because glCopyTexImage2D overwrites the
+        // texture content in place. pause menus that skip GXCopyTex for
+        // several frames preserve the last capture automatically.
         while (rd_efb_next < rd_efb_count &&
                efb_capture_db[rd][rd_efb_next].after_draw_idx <= i) {
             PCGXEfbCapture* cap = &efb_capture_db[rd][rd_efb_next];
             int gl_y = g_pc_window_h - (cap->src_top + cap->src_h);
             if (gl_y >= 0 && cap->src_w > 0 && cap->src_h > 0) {
-                GLuint efb_tex;
-                glGenTextures(1, &efb_tex);
-                gl_cache_active_texture(GL_TEXTURE7);
-                glBindTexture(GL_TEXTURE_2D, efb_tex);
-                glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                                 cap->src_left, gl_y, cap->src_w, cap->src_h, 0);
-                vita_efb_setup_texture(cap->dest_ptr, efb_tex);
-                gl_cache_active_texture(GL_TEXTURE0);
+                GLuint efb_tex = pc_gx_efb_capture_get_or_create(cap->dest_ptr);
+                if (efb_tex) {
+                    gl_cache_active_texture(GL_TEXTURE7);
+                    glBindTexture(GL_TEXTURE_2D, efb_tex);
+                    glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                                     cap->src_left, gl_y, cap->src_w, cap->src_h, 0);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    gl_cache_active_texture(GL_TEXTURE0);
+                }
 
                 if (cap->clear_after) {
                     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -896,6 +1109,7 @@ void pc_gx_submit_frame(void) {
                         glUseProgram(g_gx.current_shader);
                     gl_cache_reset();
                     g_gx.dirty = PC_GX_DIRTY_ALL;
+                    last_vp_input_valid = 0;
                 }
             }
             rd_efb_next++;
@@ -908,6 +1122,30 @@ void pc_gx_submit_frame(void) {
     #undef UNI1I
     #undef UL
 
+    // flush any EFB captures that didn't fire inside the draw loop. this
+    // catches the rare menu-transition case where a capture's
+    // after_draw_idx overshoots rd_count due to worker/main cmd accounting
+    // drift; without this fallthrough the game would sample a stale EFB.
+    while (rd_efb_next < rd_efb_count) {
+        PCGXEfbCapture* cap = &efb_capture_db[rd][rd_efb_next];
+        int gl_y = g_pc_window_h - (cap->src_top + cap->src_h);
+        if (gl_y >= 0 && cap->src_w > 0 && cap->src_h > 0) {
+            GLuint efb_tex = pc_gx_efb_capture_get_or_create(cap->dest_ptr);
+            if (efb_tex) {
+                gl_cache_active_texture(GL_TEXTURE7);
+                glBindTexture(GL_TEXTURE_2D, efb_tex);
+                glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                                 cap->src_left, gl_y, cap->src_w, cap->src_h, 0);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                gl_cache_active_texture(GL_TEXTURE0);
+            }
+        }
+        rd_efb_next++;
+    }
+
     vita_stats.merged_draws = actual_draws;
 
     cmd_queue_count_db[rd] = 0;
@@ -915,8 +1153,12 @@ void pc_gx_submit_frame(void) {
     cmd_last_shader_db[rd] = 0;
     efb_capture_count_db[rd] = 0;
 
-    // Draw pillarbox banners after all game draws (before swap)
+    // draw pillarbox banners after all game draws, before swap
     banner_draw_bars();
+    // banner_draw_bars disables scissor + blend without notifying gl_cache;
+    // invalidate so the next frame's first draw correctly re-enables.
+    gl_cache.scissor_test_enabled = -1;
+    gl_cache.blend = -1;
 
     pc_gx_texture_flush_deferred_deletes();
 }
@@ -970,7 +1212,13 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         return;
     }
 
-    memcpy(cmd_verts + cmd_vert_count, g_gx.vertex_buffer, count * sizeof(PCGXVertex));
+    // vertices for this batch were written directly into cmd_verts via
+    // g_gx.vertex_write_ptr (set in vita_cmdbuf_begin_vertex_batch).
+    // no memcpy needed in the common case. overflowing batches landed
+    // in the scratch vertex_buffer and need to be copied in if they fit.
+    if (g_gx.vertex_write_ptr == &g_gx.vertex_buffer[0]) {
+        memcpy(cmd_verts + cmd_vert_count, g_gx.vertex_buffer, count * sizeof(PCGXVertex));
+    }
 
     PCGXDrawCmd* cmd = &cmd_queue[cmd_queue_count];
     cmd->vert_offset = cmd_vert_count;
@@ -978,10 +1226,129 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     cmd->primitive = g_gx.current_primitive;
     cmd->shader = shader;
     cmd->shader_changed = shader_changed;
+    cmd->dirty = dirty;
     cmd->textures.deferred_idx[0] = -1;
     cmd->textures.deferred_idx[1] = -1;
     cmd->textures.deferred_idx[2] = -1;
-    cmd->dirty = dirty;
+    // efb_src_ptr must be cleared every flush. if a prior frame set it
+    // on this cmd slot and the current cmd doesn't touch textures, the
+    // stale dest_ptr would trigger a wrong late-resolve at replay.
+    cmd->textures.efb_src_ptr[0] = 0;
+    cmd->textures.efb_src_ptr[1] = 0;
+    cmd->textures.efb_src_ptr[2] = 0;
+
+    // build per-draw indices inline on the worker so submit_frame only
+    // needs a single glBufferData call and no per-draw index assembly.
+    {
+        int base = cmd_vert_count;
+        int n = count;
+        int total = frame_idx_count;
+        GLushort* out_base = frame_indices + total;
+        int emitted = 0;
+        switch (g_gx.current_primitive) {
+            case GX_QUADS: {
+                int nq = n / 4;
+                int need = nq * 6;
+                if (total + need > FRAME_IDX_MAX) {
+                    nq = (FRAME_IDX_MAX - total) / 6;
+                    need = nq * 6;
+                    if (nq < 0) nq = 0;
+                }
+                GLushort* out = out_base;
+                for (int q = 0; q < nq; q++) {
+                    int v = base + q * 4;
+                    out[0] = (GLushort)v;
+                    out[1] = (GLushort)(v + 1);
+                    out[2] = (GLushort)(v + 2);
+                    out[3] = (GLushort)v;
+                    out[4] = (GLushort)(v + 2);
+                    out[5] = (GLushort)(v + 3);
+                    out += 6;
+                }
+                emitted = need;
+                break;
+            }
+            case GX_TRIANGLESTRIP: {
+                int ntri = n - 2;
+                if (ntri < 0) ntri = 0;
+                int need = ntri * 3;
+                if (total + need > FRAME_IDX_MAX) {
+                    ntri = (FRAME_IDX_MAX - total) / 3;
+                    need = ntri * 3;
+                    if (ntri < 0) ntri = 0;
+                }
+                GLushort* out = out_base;
+                for (int t = 0; t < ntri; t++) {
+                    if (t & 1) {
+                        out[0] = (GLushort)(base + t + 1);
+                        out[1] = (GLushort)(base + t);
+                        out[2] = (GLushort)(base + t + 2);
+                    } else {
+                        out[0] = (GLushort)(base + t);
+                        out[1] = (GLushort)(base + t + 1);
+                        out[2] = (GLushort)(base + t + 2);
+                    }
+                    out += 3;
+                }
+                emitted = need;
+                break;
+            }
+            case GX_TRIANGLEFAN: {
+                int ntri = n - 2;
+                if (ntri < 0) ntri = 0;
+                int need = ntri * 3;
+                if (total + need > FRAME_IDX_MAX) {
+                    ntri = (FRAME_IDX_MAX - total) / 3;
+                    need = ntri * 3;
+                    if (ntri < 0) ntri = 0;
+                }
+                GLushort* out = out_base;
+                GLushort base16 = (GLushort)base;
+                for (int t = 0; t < ntri; t++) {
+                    out[0] = base16;
+                    out[1] = (GLushort)(base + t + 1);
+                    out[2] = (GLushort)(base + t + 2);
+                    out += 3;
+                }
+                emitted = need;
+                break;
+            }
+            case GX_LINESTRIP: {
+                int nseg = n - 1;
+                if (nseg < 0) nseg = 0;
+                int need = nseg * 2;
+                if (total + need > FRAME_IDX_MAX) {
+                    nseg = (FRAME_IDX_MAX - total) / 2;
+                    need = nseg * 2;
+                    if (nseg < 0) nseg = 0;
+                }
+                GLushort* out = out_base;
+                for (int s = 0; s < nseg; s++) {
+                    out[0] = (GLushort)(base + s);
+                    out[1] = (GLushort)(base + s + 1);
+                    out += 2;
+                }
+                emitted = need;
+                break;
+            }
+            default: {
+                int nn = n;
+                if (total + nn > FRAME_IDX_MAX) {
+                    nn = FRAME_IDX_MAX - total;
+                    if (nn < 0) nn = 0;
+                }
+                GLushort* out = out_base;
+                for (int v = 0; v < nn; v++) {
+                    out[v] = (GLushort)(base + v);
+                }
+                emitted = nn;
+                break;
+            }
+        }
+        cmd->idx_offset = total;
+        cmd->idx_count = emitted;
+        frame_idx_count = total + emitted;
+    }
 
     if (dirty & PC_GX_DIRTY_PROJECTION)
         memcpy(cmd->transform.projection_mtx_t, g_gx.projection_mtx_t, 16 * sizeof(float));
@@ -997,62 +1364,92 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
 
     if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_COLORS)) {
         cmd->tev.num_stages = g_gx.num_tev_stages;
-        for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++)
-            cmd->tev.stages[s] = g_gx.tev_stages[s];
+        memcpy(cmd->tev.stages, g_gx.tev_stages,
+               PC_GX_MAX_TEV_STAGES * sizeof(PCGXTevStage));
 
         if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS)) {
-            for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < g_gx.num_tev_stages; s++) {
-                PCGXTevStage* ts = &g_gx.tev_stages[s];
-                vita_resolve_cc(ts->color_a, ts, g_gx.tev_resolved_ca[s]);
-                vita_resolve_cc(ts->color_b, ts, g_gx.tev_resolved_cb[s]);
-                vita_resolve_cc(ts->color_c, ts, g_gx.tev_resolved_cc[s]);
-                vita_resolve_cc(ts->color_d, ts, g_gx.tev_resolved_cd[s]);
-                g_gx.tev_resolved_aval[s][0] = vita_resolve_ca(ts->alpha_a, ts);
-                g_gx.tev_resolved_aval[s][1] = vita_resolve_ca(ts->alpha_b, ts);
-                g_gx.tev_resolved_aval[s][2] = vita_resolve_ca(ts->alpha_c, ts);
-                g_gx.tev_resolved_aval[s][3] = vita_resolve_ca(ts->alpha_d, ts);
-                g_gx.tev_resolved_csrc[s][0] = vita_color_src(ts->color_a, s);
-                g_gx.tev_resolved_csrc[s][1] = vita_color_src(ts->color_b, s);
-                g_gx.tev_resolved_csrc[s][2] = vita_color_src(ts->color_c, s);
-                g_gx.tev_resolved_csrc[s][3] = vita_color_src(ts->color_d, s);
-                g_gx.tev_resolved_asrc[s][0] = vita_alpha_src(ts->alpha_a, s);
-                g_gx.tev_resolved_asrc[s][1] = vita_alpha_src(ts->alpha_b, s);
-                g_gx.tev_resolved_asrc[s][2] = vita_alpha_src(ts->alpha_c, s);
-                g_gx.tev_resolved_asrc[s][3] = vita_alpha_src(ts->alpha_d, s);
-                {
-                    static const float bias_lut[]  = {0.0f, 0.5f, -0.5f};
-                    static const float scale_lut[] = {1.0f, 2.0f, 4.0f, 0.5f};
-                    g_gx.tev_resolved_param[s][0] = bias_lut[ts->color_bias < 3 ? ts->color_bias : 0];
-                    g_gx.tev_resolved_param[s][1] = bias_lut[ts->alpha_bias < 3 ? ts->alpha_bias : 0];
-                    g_gx.tev_resolved_param[s][2] = scale_lut[ts->color_scale < 4 ? ts->color_scale : 0];
-                    g_gx.tev_resolved_param[s][3] = ts->color_op ? -1.0f : 1.0f;
-                    g_gx.tev_resolved_aparam[s][0] = scale_lut[ts->alpha_scale < 4 ? ts->alpha_scale : 0];
-                    g_gx.tev_resolved_aparam[s][1] = ts->alpha_op ? -1.0f : 1.0f;
+            // skip the resolve loop when TEV state matches the previous
+            // draw. consecutive draws share TEV state often, and the
+            // resolve itself is dozens of small function calls per draw.
+            // g_gx.tev_resolved_* persists across calls so the prior
+            // result is still present and can be reused on a cache hit.
+            static PCGXTevStage last_resolved_stages[PC_GX_MAX_TEV_STAGES];
+            static float last_resolved_colors[4][4];
+            static int last_resolved_num = -1;
+            static int last_resolved_valid = 0;
+
+            int n = g_gx.num_tev_stages;
+            if (n > PC_GX_MAX_TEV_STAGES) n = PC_GX_MAX_TEV_STAGES;
+
+            int matches = last_resolved_valid &&
+                n == last_resolved_num &&
+                (n == 0 ||
+                 __builtin_memcmp(g_gx.tev_stages, last_resolved_stages,
+                                  n * sizeof(PCGXTevStage)) == 0) &&
+                __builtin_memcmp(g_gx.tev_colors, last_resolved_colors,
+                                 sizeof(g_gx.tev_colors)) == 0;
+
+            if (!matches) {
+                for (int s = 0; s < n; s++) {
+                    PCGXTevStage* ts = &g_gx.tev_stages[s];
+                    vita_resolve_cc(ts->color_a, ts, g_gx.tev_resolved_ca[s]);
+                    vita_resolve_cc(ts->color_b, ts, g_gx.tev_resolved_cb[s]);
+                    vita_resolve_cc(ts->color_c, ts, g_gx.tev_resolved_cc[s]);
+                    vita_resolve_cc(ts->color_d, ts, g_gx.tev_resolved_cd[s]);
+                    g_gx.tev_resolved_aval[s][0] = vita_resolve_ca(ts->alpha_a, ts);
+                    g_gx.tev_resolved_aval[s][1] = vita_resolve_ca(ts->alpha_b, ts);
+                    g_gx.tev_resolved_aval[s][2] = vita_resolve_ca(ts->alpha_c, ts);
+                    g_gx.tev_resolved_aval[s][3] = vita_resolve_ca(ts->alpha_d, ts);
+                    g_gx.tev_resolved_csrc[s][0] = vita_color_src(ts->color_a, s);
+                    g_gx.tev_resolved_csrc[s][1] = vita_color_src(ts->color_b, s);
+                    g_gx.tev_resolved_csrc[s][2] = vita_color_src(ts->color_c, s);
+                    g_gx.tev_resolved_csrc[s][3] = vita_color_src(ts->color_d, s);
+                    g_gx.tev_resolved_asrc[s][0] = vita_alpha_src(ts->alpha_a, s);
+                    g_gx.tev_resolved_asrc[s][1] = vita_alpha_src(ts->alpha_b, s);
+                    g_gx.tev_resolved_asrc[s][2] = vita_alpha_src(ts->alpha_c, s);
+                    g_gx.tev_resolved_asrc[s][3] = vita_alpha_src(ts->alpha_d, s);
+                    {
+                        static const float bias_lut[]  = {0.0f, 0.5f, -0.5f};
+                        static const float scale_lut[] = {1.0f, 2.0f, 4.0f, 0.5f};
+                        g_gx.tev_resolved_param[s][0] = bias_lut[ts->color_bias < 3 ? ts->color_bias : 0];
+                        g_gx.tev_resolved_param[s][1] = bias_lut[ts->alpha_bias < 3 ? ts->alpha_bias : 0];
+                        g_gx.tev_resolved_param[s][2] = scale_lut[ts->color_scale < 4 ? ts->color_scale : 0];
+                        g_gx.tev_resolved_param[s][3] = ts->color_op ? -1.0f : 1.0f;
+                        g_gx.tev_resolved_aparam[s][0] = scale_lut[ts->alpha_scale < 4 ? ts->alpha_scale : 0];
+                        g_gx.tev_resolved_aparam[s][1] = ts->alpha_op ? -1.0f : 1.0f;
+                    }
                 }
-            }
-            for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                int tc_src = 0;
-                if (s < g_gx.num_tev_stages) {
-                    int tc = g_gx.tev_stages[s].tex_coord;
-                    tc_src = (tc >= 0 && tc < 8) ? tc : s;
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                    int tc_src = 0;
+                    if (s < g_gx.num_tev_stages) {
+                        int tc = g_gx.tev_stages[s].tex_coord;
+                        tc_src = (tc >= 0 && tc < 8) ? tc : s;
+                    }
+                    g_gx.tev_resolved_tc_src[s] = tc_src;
                 }
-                g_gx.tev_resolved_tc_src[s] = tc_src;
+                g_gx.tev_resolve_valid = 1;
+
+                // update cache for next draw
+                last_resolved_num = n;
+                if (n > 0) {
+                    __builtin_memcpy(last_resolved_stages, g_gx.tev_stages,
+                                     n * sizeof(PCGXTevStage));
+                }
+                __builtin_memcpy(last_resolved_colors, g_gx.tev_colors,
+                                 sizeof(g_gx.tev_colors));
+                last_resolved_valid = 1;
             }
-            g_gx.tev_resolve_valid = 1;
         }
 
         if (g_gx.tev_resolve_valid) {
-            for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < g_gx.num_tev_stages; s++) {
-                memcpy(cmd->tev.ca[s], g_gx.tev_resolved_ca[s], 12);
-                memcpy(cmd->tev.cb[s], g_gx.tev_resolved_cb[s], 12);
-                memcpy(cmd->tev.cc[s], g_gx.tev_resolved_cc[s], 12);
-                memcpy(cmd->tev.cd[s], g_gx.tev_resolved_cd[s], 12);
-                memcpy(cmd->tev.aval[s], g_gx.tev_resolved_aval[s], 16);
-                memcpy(cmd->tev.csrc[s], g_gx.tev_resolved_csrc[s], 16);
-                memcpy(cmd->tev.asrc[s], g_gx.tev_resolved_asrc[s], 16);
-                memcpy(cmd->tev.param[s], g_gx.tev_resolved_param[s], 16);
-                memcpy(cmd->tev.aparam[s], g_gx.tev_resolved_aparam[s], 8);
-            }
+            // one memcpy for all 9 TEV resolved arrays. PCGXCmdTEV and
+            // PCGXState lay ca..aparam out contiguously in the same order,
+            // so this is byte-identical to the per-stage loop but with
+            // far less call overhead. replay only reads up to
+            // cmd->tev.num_stages so any stale data beyond that is fine.
+            // size: ca(36)+cb(36)+cc(36)+cd(36)+aval(48)+csrc(48)+asrc(48)
+            //     + param(48)+aparam(24) = 360 bytes.
+            memcpy(&cmd->tev.ca[0][0], &g_gx.tev_resolved_ca[0][0], 360);
             for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
                 cmd->tev.tc_src[s] = g_gx.tev_resolved_tc_src[s];
             }
@@ -1145,6 +1542,7 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
             cmd->textures.deferred_idx[s] = -1;
             cmd->textures.wrap_s[s] = 0xFF; // unset
             cmd->textures.wrap_t[s] = 0xFF;
+            cmd->textures.efb_src_ptr[s] = 0;
             if (s < g_gx.num_tev_stages) {
                 int tex_map = g_gx.tev_stages[s].tex_map;
                 if (tex_map >= 0 && tex_map < 8) {
@@ -1154,6 +1552,7 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
                         cmd->textures.deferred_idx[s] = g_gx.gl_tex_deferred[tex_map];
                     cmd->textures.wrap_s[s] = g_gx.tex_obj_wrap_s[tex_map];
                     cmd->textures.wrap_t[s] = g_gx.tex_obj_wrap_t[tex_map];
+                    cmd->textures.efb_src_ptr[s] = g_gx.efb_src_ptr[tex_map];
                 }
             }
             if (vita_debug_notex) cmd->textures.obj_stage[s] = 0;
@@ -1166,9 +1565,11 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
             cmd->textures.deferred_idx[0] = cmd->textures.deferred_idx[1];
             cmd->textures.wrap_s[0] = cmd->textures.wrap_s[1];
             cmd->textures.wrap_t[0] = cmd->textures.wrap_t[1];
+            cmd->textures.efb_src_ptr[0] = cmd->textures.efb_src_ptr[1];
             cmd->textures.obj_stage[1] = 0;
             cmd->textures.use_stage[1] = 0;
             cmd->textures.deferred_idx[1] = -1;
+            cmd->textures.efb_src_ptr[1] = 0;
         }
     }
 

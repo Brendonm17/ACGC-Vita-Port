@@ -10,6 +10,9 @@
  */
 #include "pc_platform.h"
 #include "jaudio_NES/audiothread.h"
+#ifdef TARGET_VITA
+#include <psp2/kernel/threadmgr.h>
+#endif
 
 #define PC_AUDIO_SAMPLE_RATE 32000
 
@@ -41,7 +44,11 @@ static int pc_audio_producer_func(void* data) {
         if (fill < AUDIO_PRODUCE_THRESHOLD) {
             pc_audio_process_frame();
         } else {
-            SDL_Delay(1);
+            // sleep one game frame instead of spinning. the ring buffer
+            // holds 512 ms of audio with a 70 ms refill threshold, so the
+            // extra latency stays well above threshold and scheduling
+            // overhead on core 2 drops from ~1000 wakeups/sec to ~62.
+            SDL_Delay(16);
         }
     }
     return 0;
@@ -57,6 +64,11 @@ void pc_audio_start_producer_thread(void) {
     audio_producer_thread = SDL_CreateThread(pc_audio_producer_func, "AudioProducer", NULL);
     if (audio_producer_thread) {
         printf("[AUDIO] Producer thread started\n");
+#ifdef TARGET_VITA
+        // pin to core 2 so audio doesn't compete with main (core 0) or the emu64 worker (core 1).
+        SceUID tid = (SceUID)SDL_GetThreadID(audio_producer_thread);
+        sceKernelChangeThreadCpuAffinityMask(tid, SCE_KERNEL_CPU_MASK_USER_2);
+#endif
     } else {
         fprintf(stderr, "[AUDIO] Failed to create producer thread: %s\n", SDL_GetError());
 #ifdef TARGET_VITA

@@ -165,7 +165,6 @@ static int emu64_worker_func(SceSize args, void* argp) {
             emu64_taskstart(dl);
             vita_timing.emu64_us = sceKernelGetProcessTimeLow() - t0;
             vita_on_worker_thread = 0;
-            // copy worker-thread texture load timing into frame timing struct
             {
                 extern unsigned int vita_texload_us;
                 vita_timing.texload_us = vita_texload_us;
@@ -174,15 +173,9 @@ static int emu64_worker_func(SceSize args, void* argp) {
         }
 
         sceKernelSignalSema(emu64_work_done_sema, 1);
-
-        // pre-read VTC textures during idle time
-        {
-            extern void vita_vtc_prefetch(void);
-            unsigned int _pf_t0 = sceKernelGetProcessTimeLow();
-            vita_vtc_prefetch();
-            extern unsigned int vita_vtc_prefetch_us;
-            vita_vtc_prefetch_us += sceKernelGetProcessTimeLow() - _pf_t0;
-        }
+        // prefetch runs on main thread after wait_worker returns. running
+        // it here caused the worker to miss wake ups when main signaled
+        // the next frame mid prefetch
     }
 
     return 0;
@@ -264,6 +257,11 @@ void vita_emu64_worker_shutdown(void) {
 
 void vita_emu64_wait_done(void) {
     if (emu64_worker_tid < 0) return;
+    // spin briefly on PollSema before blocking. eliminates kernel
+    // scheduler wake latency when worker has already signaled
+    for (int i = 0; i < 2000; i++) {
+        if (sceKernelPollSema(emu64_work_done_sema, 1) == 0) return;
+    }
     sceKernelWaitSema(emu64_work_done_sema, 1, NULL);
 }
 
@@ -279,6 +277,55 @@ int vita_emu64_worker_active(void) {
 
 static void vita_atexit_cleanup(void) {
     vita_emu64_worker_shutdown();
+}
+
+// scan process thread UIDs and pin SDL/VitaGL/system threads that
+// would otherwise drift across cores. idempotent, called multiple times
+// to catch late created threads (SDL audio device, etc).
+//
+// final layout:
+//   core 0: main, SDL audio callback (SDLAudioP1)
+//   core 1: emu64 worker, SceGxmDisplayQueue, SDLTimer, SceCommonDialogWorker
+//   core 2: AudioProducer, vtc_io, VitaGL Garbage Collector
+void vita_pin_hidden_threads(void) {
+    SceKernelThreadInfo info;
+    int misses_in_row = 0;
+    for (SceUID uid = 0x40010001; uid < 0x40020000 && misses_in_row < 500; uid++) {
+        if (sceKernelGetThreadmgrUIDClass(uid) != SCE_KERNEL_TMID_Thread) {
+            misses_in_row++;
+            continue;
+        }
+        info.size = sizeof(info);
+        if (sceKernelGetThreadInfo(uid, &info) != 0) {
+            misses_in_row++;
+            continue;
+        }
+        misses_in_row = 0;
+
+        // skip threads pinned at creation time
+        if (strcmp(info.name, "emu64_worker") == 0 ||
+            strcmp(info.name, "vtc_io") == 0 ||
+            strcmp(info.name, "AudioProducer") == 0 ||
+            strcmp(info.name, "TexPackLoader") == 0 ||
+            strcmp(info.name, "ACGC00001") == 0) continue;
+
+        int target = 0;
+        if (strcmp(info.name, "SceGxmDisplayQueue") == 0 ||
+            strcmp(info.name, "SDLTimer") == 0 ||
+            strcmp(info.name, "SceCommonDialogWorker") == 0) {
+            target = SCE_KERNEL_CPU_MASK_USER_1;
+        } else if (strcmp(info.name, "SDLAudioP1") == 0 ||
+                   strcmp(info.name, "SDLAudioC1") == 0) {
+            target = SCE_KERNEL_CPU_MASK_USER_0;
+        } else if (strcmp(info.name, "Garbage Collector") == 0) {
+            // GC does heavy periodic cleanup, would preempt worker on core 1
+            target = SCE_KERNEL_CPU_MASK_USER_2;
+        }
+
+        if (target && info.currentCpuAffinityMask != (SceUInt32)target) {
+            sceKernelChangeThreadCpuAffinityMask(uid, target);
+        }
+    }
 }
 
 void pc_platform_init(void) {
@@ -320,6 +367,15 @@ void pc_platform_init(void) {
     pc_gx_init();
     vita_emu64_worker_init();
     atexit(vita_atexit_cleanup);
+
+    vita_pin_hidden_threads();
+
+    // pin main to core 0. rerun scan for late created threads happens
+    // from VIWaitForRetrace at frames 5, 30, 120.
+    {
+        SceUID main_tid = sceKernelGetThreadId();
+        sceKernelChangeThreadCpuAffinityMask(main_tid, SCE_KERNEL_CPU_MASK_USER_0);
+    }
 }
 
 extern void PADCleanup(void);

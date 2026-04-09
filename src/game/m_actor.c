@@ -282,12 +282,12 @@ extern int Actor_draw_actor_no_culling_check2(ACTOR* actor, xyz_t* camera_pos, f
     f32 height = actor->cull_height;
 
 #ifdef TARGET_VITA
-    // free cam sees further than the original acre-locked camera
+    // free cam sees slightly further than normal; pre-spawning covers the rest
     if (g_pc_settings.free_cam) {
-        dist *= 2.0f;
-        width *= 1.5f;
-        radius *= 1.5f;
-        height *= 1.5f;
+        dist *= 1.3f;
+        width *= 1.2f;
+        radius *= 1.2f;
+        height *= 1.2f;
     }
 #endif
 
@@ -492,6 +492,22 @@ extern void Actor_info_call_actor(GAME_PLAY* play, Actor_info* actor_info) {
                     }
                 } else {
                     play->game.doing_point_specific = 160;
+#ifdef TARGET_VITA
+                    // skip expensive per-frame cache updates for distant idle actors
+                    // these calcs feed mv_proc which doesn't run for culled non-NPC actors anyway
+                    if (actor->block_x >= 0 &&
+                        !(actor->state_bitfield & (ACTOR_STATE_NO_MOVE_WHILE_CULLED | ACTOR_STATE_NO_CULL)) &&
+                        actor->part != ACTOR_PART_NPC) {
+                        int dx = actor->block_x - play->block_table.block_x;
+                        int dz = actor->block_z - play->block_table.block_z;
+                        if (dx < -1 || dx > 1 || dz < -1 || dz > 1) {
+                            CollisionCheck_Status_Clear(&actor->status_data);
+                            next = actor->next_actor;
+                            actor = next;
+                            continue;
+                        }
+                    }
+#endif
                     xyz_t_move(&actor->last_world_position, &actor->world.position);
                     actor->player_distance_xz =
                         search_position_distanceXZ(&actor->world.position, &player_actor->actor_class.world.position);

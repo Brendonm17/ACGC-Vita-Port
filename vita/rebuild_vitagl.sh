@@ -1,30 +1,42 @@
 #!/bin/bash
-# Rebuild vitaGL with GLSL support + performance speedhacks + vglMul fix
-# Based on Barony vita port script with additional speedhacks for AC
+# Rebuild vitaGL with GLSL support + speedhacks + vglMul fix
+# Pulls from the AC Vita port's fork of vitaGL which adds
+# vglPrepareCompressedTexture2D / vglCommitPendingTexture for off-thread
+# block-compressed texture uploads. Needed for smooth HD texture pack loads.
 
 set -e
 export VITASDK=/usr/local/vitasdk
 export PATH="$VITASDK/bin:$PATH"
 
-VITAGL_DIR=/tmp/vitaGL-master
+VITAGL_REPO=https://github.com/Brendonm17/vitaGL.git
+VITAGL_BRANCH=async-compressed-tex-prep
+VITAGL_DIR=/tmp/vitaGL-acvita
 
-# Always re-download to get latest source
+# Always re-clone to get latest source from the fork
 if [ -d "$VITAGL_DIR" ]; then
     echo "--- Removing old vitaGL source ---"
     rm -rf "$VITAGL_DIR"
 fi
 
-if [ ! -d "$VITAGL_DIR" ]; then
-    echo "--- Downloading vitaGL source ---"
-    cd /tmp
-    wget -q https://github.com/Rinnegatamante/vitaGL/archive/refs/heads/master.zip -O vitaGL.zip
-    unzip -q vitaGL.zip
-    rm vitaGL.zip
-fi
+echo "--- Cloning vitaGL fork ($VITAGL_BRANCH) ---"
+git clone --depth 1 --branch "$VITAGL_BRANCH" "$VITAGL_REPO" "$VITAGL_DIR"
 
 cd "$VITAGL_DIR"
 
-# Patch vglMul mat*mat: M1*M2 -> M2*M1 (CG row-major fix)
+# Patch vglMul mat*mat: M1*M2 -> M2*M1
+#
+# vitaGL's GLSL-to-Cg translator wraps every matrix-times-matrix in a
+# helper called vglMul, defined in source/shaders/glsl_translator_hdr.h.
+# GLSL is column-major; psp2cgc compiles the translated shader as Cg
+# row-major. In that mode, `M1 * M2` yields the transpose of what the
+# original GLSL expression meant, so every MVP chain comes out inverted
+# and geometry renders in the wrong place (or not at all).
+#
+# Swapping to `M2 * M1` cancels out the row-major/column-major flip and
+# restores the intended GLSL semantics. Keeping the patch local here
+# (instead of committing it to the vitaGL fork) lets the fork stay
+# close to upstream - other projects using vitaGL without the shader
+# translator rely on the unpatched order.
 HDR_FILE="source/shaders/glsl_translator_hdr.h"
 if [ -f "$HDR_FILE" ]; then
     if grep -q 'return M1 \* M2' "$HDR_FILE"; then

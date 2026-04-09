@@ -2,6 +2,10 @@
 #include "pc_gx_internal.h"
 #include "pc_gx_backend.h"
 #include "pc_texture_pack.h"
+#ifdef TARGET_VITA
+#include "vita_gx_cmdbuf.h" // for efb_captures scan
+#include <vitaGL.h>
+#endif
 #include <dolphin/gx/GXEnum.h>
 #include <stdlib.h>
 
@@ -168,20 +172,24 @@ static void tex_hash_rebuild(void) {
 #ifdef TARGET_VITA
 extern volatile int vita_on_worker_thread;
 
-// Deferred texture deletion.
-// VitaGL/GXM crashes if a texture is deleted while the GPU still references it.
-// Collect and flush at start of next frame after vglSwapBuffers.
-#define VITA_TEX_DELETE_MAX 4096
+// deferred texture deletion. GXM crashes if a texture is deleted while
+// the GPU still references it, so we queue deletes and flush at the
+// start of the next frame after vglSwapBuffers. the queue is sized so
+// overflow should never happen in practice; on overflow we leak rather
+// than stall on glFinish.
+#define VITA_TEX_DELETE_MAX 16384
 static GLuint vita_tex_delete_queue[VITA_TEX_DELETE_MAX];
 static int vita_tex_delete_count = 0;
 
 void vita_defer_tex_delete(GLuint tex) {
     if (tex == 0) return;
     if (vita_tex_delete_count >= VITA_TEX_DELETE_MAX) {
-        // Queue full, sync GPU then flush
-        glFinish();
-        glDeleteTextures(vita_tex_delete_count, vita_tex_delete_queue);
-        vita_tex_delete_count = 0;
+        // overflow: leak the texture rather than stall on glFinish
+        static int _leaked = 0;
+        if ((_leaked++ & 0xFF) == 0) {
+            printf("[VITA] WARN: tex delete queue full, leaked %d\n", _leaked);
+        }
+        return;
     }
     vita_tex_delete_queue[vita_tex_delete_count++] = tex;
 }
@@ -243,21 +251,39 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
                                        u32 tlut_ptr, u32 tlut_hash, u32 data_hash, GLuint gl_tex) {
     tex_cache_lock();
     if (tex_cache_count >= TEX_CACHE_SIZE - 32) {
-        // Incremental eviction: evict oldest 32 entries instead of half.
-        // Triggers earlier (at 480) to avoid sudden bursts at 512.
+        // evict oldest non-external entries. external (HD upgraded)
+        // entries are compacted to the front so they survive eviction.
+        // losing an external entry forces a GXLoadTexObj re-fetch which
+        // creates a new GC entry and then waits for the upgrade scan to
+        // re-upgrade it, causing visible HD->normal->HD cycling.
         int evict_n = 32;
-        for (int i = 0; i < evict_n; i++) {
-            if (tex_cache[i].gl_tex) {
-                for (int s = 0; s < 8; s++) {
-                    if (g_gx.gl_textures[s] == tex_cache[i].gl_tex)
-                        g_gx.gl_textures[s] = 0;
+        int src = 0;
+        int dst = 0;
+        // walk the first 32 slots. keep externals (compact forward);
+        // drop everything else, deleting the GL tex if present. non-
+        // external entries with a null gl_tex still count as dropped
+        // so the removed-slot count stays consistent.
+        for (src = 0; src < evict_n && src < tex_cache_count; src++) {
+            if (tex_cache[src].external) {
+                if (dst != src) tex_cache[dst] = tex_cache[src];
+                dst++;
+            } else {
+                if (tex_cache[src].gl_tex) {
+                    for (int s = 0; s < 8; s++) {
+                        if (g_gx.gl_textures[s] == tex_cache[src].gl_tex)
+                            g_gx.gl_textures[s] = 0;
+                    }
+                    PC_DELETE_TEXTURE(tex_cache[src].gl_tex);
                 }
-                if (!tex_cache[i].external)
-                    PC_DELETE_TEXTURE(tex_cache[i].gl_tex);
             }
         }
-        memmove(&tex_cache[0], &tex_cache[evict_n], (tex_cache_count - evict_n) * sizeof(TexCacheEntry));
-        tex_cache_count -= evict_n;
+        // shift the tail forward to close the gap left by dropped slots.
+        int removed = src - dst;
+        if (removed > 0 && src < tex_cache_count) {
+            memmove(&tex_cache[dst], &tex_cache[src],
+                    (tex_cache_count - src) * sizeof(TexCacheEntry));
+        }
+        tex_cache_count -= removed;
 #ifdef TARGET_VITA
         tex_hash_rebuild();
 #endif
@@ -353,18 +379,11 @@ int vita_deferred_uploaded_count = 0;
 GLuint vita_just_uploaded_tex[8] = {0};
 
 // Invalidate tex_cache entries referencing a specific GL texture.
-// Called when VTC loaded_cache evicts an HD texture.
+// no longer called: VTC loaded_cache marks claimed entries and skips
+// eviction for them, so tex_cache references stay valid. kept as a stub
+// in case something else ends up calling it.
 void pc_gx_texture_invalidate_gl_tex(GLuint tex) {
-    if (!tex) return;
-    tex_cache_lock();
-    for (int i = 0; i < tex_cache_count; i++) {
-        if (tex_cache[i].gl_tex == tex) {
-            tex_cache[i].gl_tex = 0;
-            tex_cache[i].data_ptr = 0;
-            tex_cache[i].external = 0;
-        }
-    }
-    tex_cache_unlock();
+    (void)tex;
 }
 
 // Per-frame timing for stutter diagnosis
@@ -394,6 +413,7 @@ void pc_gx_texture_process_deferred_uploads(void) {
     // Drain READY I/O slots into loaded_cache before processing deferred uploads
     {
         extern int vita_vtc_check_ready(int, unsigned char**, int*, int*, int*, int*);
+        extern vglPendingTexture* vita_vtc_take_ready_pending(int slot, int* out_w, int* out_h);
         extern void vita_vtc_release_slot(int);
         extern void vtc_loaded_insert(unsigned long long, GLuint, int, int, int);
         extern int vtc_estimate_vram(int, int, int);
@@ -413,8 +433,18 @@ void pc_gx_texture_process_deferred_uploads(void) {
             glGenTextures(1, &hd_tex);
             glActiveTexture(GL_TEXTURE7);
             glBindTexture(GL_TEXTURE_2D, hd_tex);
-            glCompressedTexImage2D(GL_TEXTURE_2D, 0, (GLenum)gl_fmt,
-                                   hd_w, hd_h, 0, dxt_size, dxt_data);
+
+            // commit the pre-swizzled handle from the io thread. main
+            // just runs a descriptor init here, no swizzle on this path.
+            int p_w = 0, p_h = 0;
+            vglPendingTexture* pending = vita_vtc_take_ready_pending(si, &p_w, &p_h);
+            if (pending) {
+                vglCommitPendingTexture(pending);
+            } else {
+                // fallback if the io thread prepare couldn't allocate
+                glCompressedTexImage2D(GL_TEXTURE_2D, 0, (GLenum)gl_fmt,
+                                       hd_w, hd_h, 0, dxt_size, dxt_data);
+            }
             glActiveTexture(GL_TEXTURE0);
             vita_vtc_release_slot(si);
 
@@ -433,7 +463,9 @@ void pc_gx_texture_process_deferred_uploads(void) {
         _section_drain_us = sceKernelGetProcessTimeLow() - _drain_t0;
     }
 
-    // Standalone upgrade scan
+    // upgrade scan. checks tex_cache entries for an HD version in
+    // vita_vtc_loaded_cache and swaps them in. held under tex_cache
+    // spinlock so the worker thread may block here.
     {
         unsigned int _upgrade_t0 = sceKernelGetProcessTimeLow();
         extern GLuint vita_vtc_loaded_cache_lookup(unsigned long long key);
@@ -441,9 +473,15 @@ void pc_gx_texture_process_deferred_uploads(void) {
         static int scan_pos = 0;
         unsigned int _t0 = sceKernelGetProcessTimeLow();
         int upgrades = 0, requeues = 0, checked = 0;
+        #define UPGRADE_SCAN_PER_FRAME 32
+        #define UPGRADE_MAX_PER_FRAME  32
+
+        // collect upgrade targets under the lock, apply GL state after release
+        struct { GLuint hd; u32 ws, wt, mf; } pending[UPGRADE_MAX_PER_FRAME];
+        int pending_n = 0;
 
         tex_cache_lock();
-        for (int n = 0; n < 32 && n < tex_cache_count; n++) {
+        for (int n = 0; n < UPGRADE_SCAN_PER_FRAME && n < tex_cache_count; n++) {
             int ci = (scan_pos + n) % tex_cache_count;
             if (!tex_cache[ci].vtc_cache_key || tex_cache[ci].external || !tex_cache[ci].gl_tex)
                 continue;
@@ -457,17 +495,50 @@ void pc_gx_texture_process_deferred_uploads(void) {
                 continue;
             }
 
+            if (upgrades >= UPGRADE_MAX_PER_FRAME) continue;
+
+            // keep the existing wrap/filter values so no flash on bind
+            u32 ws = tex_cache[ci].wrap_s;
+            u32 wt = tex_cache[ci].wrap_t;
+            u32 mf = tex_cache[ci].min_filter;
+
             vita_defer_tex_delete(tex_cache[ci].gl_tex);
             tex_cache[ci].gl_tex = hd_tex;
             tex_cache[ci].external = 1;
             tex_cache[ci].vtc_cache_key = 0;
-            tex_cache[ci].wrap_s = 0xFFFFFFFF;
-            tex_cache[ci].wrap_t = 0xFFFFFFFF;
-            tex_cache[ci].min_filter = 0xFFFFFFFF;
+            // wrap/filter stay the same so the next GXLoadTexObj sees a match
+
+            if (ws != 0xFFFFFFFF && pending_n < UPGRADE_MAX_PER_FRAME) {
+                pending[pending_n].hd = hd_tex;
+                pending[pending_n].ws = ws;
+                pending[pending_n].wt = wt;
+                pending[pending_n].mf = mf;
+                pending_n++;
+            }
             upgrades++;
         }
-        scan_pos = (scan_pos + 32) % (tex_cache_count > 0 ? tex_cache_count : 1);
+        scan_pos = (scan_pos + UPGRADE_SCAN_PER_FRAME) % (tex_cache_count > 0 ? tex_cache_count : 1);
         tex_cache_unlock();
+
+        // apply wrap/filter to the hd_tex objects so they render with
+        // correct state on their first bind. without this, the default
+        // GL state (GL_REPEAT wrap) shows for a frame and causes a flash.
+        if (pending_n > 0) {
+            glActiveTexture(GL_TEXTURE7);
+            for (int i = 0; i < pending_n; i++) {
+                GLenum gl_ws = (pending[i].ws == 2) ? GL_MIRRORED_REPEAT :
+                               (pending[i].ws == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                GLenum gl_wt = (pending[i].wt == 2) ? GL_MIRRORED_REPEAT :
+                               (pending[i].wt == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                GLenum gl_f = pending[i].mf ? GL_LINEAR : GL_NEAREST;
+                glBindTexture(GL_TEXTURE_2D, pending[i].hd);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_ws);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_wt);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_f);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_f);
+            }
+            glActiveTexture(GL_TEXTURE0);
+        }
 
         _section_upgrade_us = sceKernelGetProcessTimeLow() - _upgrade_t0;
         {
@@ -479,26 +550,41 @@ void pc_gx_texture_process_deferred_uploads(void) {
         }
     }
 
-    for (int i = 0; i < cnt; i++) {
-        VitaDeferredTexUpload* up = &vita_tex_upload_db[rd][i];
-        GLuint tex;
-        glGenTextures(1, &tex);
-        glActiveTexture(GL_TEXTURE7);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        if (up->rgba && up->width > 0 && up->height > 0) {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, up->width, up->height, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, up->rgba);
-        } else {
-            u8 white[4] = {255, 255, 255, 255};
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
-        }
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, up->gl_filter);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, up->gl_filter);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, up->gl_wrap_s);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, up->gl_wrap_t);
-        glActiveTexture(GL_TEXTURE0);
+    // time budget rate limit: cap deferred uploads to 2ms per frame.
+    // on scene transitions cnt can spike to 50-100 uploads each with a
+    // ~500us glTexImage2D call. overflow uploads stay in the queue for
+    // the next frame, and draws referencing them are skipped for one
+    // frame by the replay loop tex_missing check.
+    #define DEFERRED_UPLOAD_BUDGET_US 2000
+    unsigned int _upload_budget_start = sceKernelGetProcessTimeLow();
+    int uploads_done = 0;
 
-        // Try VTC HD replacement via pre-computed key from worker thread
+    for (int i = 0; i < cnt; i++) {
+        // always do at least one upload so forward progress is guaranteed
+        if (uploads_done > 0 &&
+            (sceKernelGetProcessTimeLow() - _upload_budget_start) >= DEFERRED_UPLOAD_BUDGET_US) {
+            int remain = cnt - i;
+            if (remain > 0 && i > 0) {
+                memmove(&vita_tex_upload_db[rd][0], &vita_tex_upload_db[rd][i],
+                        remain * sizeof(VitaDeferredTexUpload));
+            }
+            vita_tex_upload_count_db[rd] = remain;
+            pc_gx_deferred_tex_uploads = i;  // only i actually uploaded this frame
+            _section_upload_us = sceKernelGetProcessTimeLow() - _frame_t0
+                                 - _section_drain_us - _section_upgrade_us;
+            extern void vita_vtc_tick_frame(void);
+            vita_vtc_tick_frame();
+            return;
+        }
+        uploads_done++;
+        VitaDeferredTexUpload* up = &vita_tex_upload_db[rd][i];
+        GLuint tex = 0;
+        int used_hd = 0;
+
+        // try HD replacement first. if the vtc loaded_cache already has
+        // the texture, skip the GC upload entirely so we don't waste
+        // glTexImage2D bandwidth uploading the GC rgba then throwing it
+        // away on transition bursts.
         if (!up->compressed && up->vtc_cache_key != 0) {
             extern GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h);
             int hd_w = 0, hd_h = 0;
@@ -511,12 +597,29 @@ void pc_gx_texture_process_deferred_uploads(void) {
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, up->gl_wrap_s);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, up->gl_wrap_t);
                 glActiveTexture(GL_TEXTURE0);
-                vita_defer_tex_delete(tex);
                 tex = hd_tex;
                 up->external = 1;
+                used_hd = 1;
             }
-            // If HD not ready yet, fall through to cache as GC.
-            // HD version loads on natural tex_cache eviction + re-request.
+        }
+
+        // fall back to GC upload when no HD version is available
+        if (!used_hd) {
+            glGenTextures(1, &tex);
+            glActiveTexture(GL_TEXTURE7);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            if (up->rgba && up->width > 0 && up->height > 0) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, up->width, up->height, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, up->rgba);
+            } else {
+                u8 white[4] = {255, 255, 255, 255};
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+            }
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, up->gl_filter);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, up->gl_filter);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, up->gl_wrap_s);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, up->gl_wrap_t);
+            glActiveTexture(GL_TEXTURE0);
         }
 
         TexCacheEntry* entry = tex_cache_insert(up->data_ptr, up->cache_w, up->cache_h,
@@ -555,6 +658,13 @@ void pc_gx_texture_cache_invalidate(void) {
     tex_hash_clear();
 #endif
     tex_cache_unlock();
+#ifdef TARGET_VITA
+    // tex_cache no longer references any VTC loaded_cache entries, so
+    // clear their claimed flags. without this, scene-transition orphans
+    // pile up in loaded_cache and LRU eviction can't reclaim the vram.
+    extern void vita_vtc_loaded_cache_unclaim_all(void);
+    vita_vtc_loaded_cache_unclaim_all();
+#endif
 }
 
 void pc_gx_texture_init(void) {
@@ -1043,12 +1153,42 @@ void GXLoadTexObj(void* obj, u32 id) {
     }
 
 #ifdef PC_ENHANCEMENTS
-    /* EFB capture bypass: use full-res FBO texture instead of re-decoding */
+    /* EFB capture bypass: use full-res FBO texture instead of re-decoding.
+     * On Vita, the worker snapshots cmd state ahead of main's replay, so
+     * the global capture table can be stale or empty for a dest_ptr that
+     * is ACTIVELY being captured this frame.
+     *
+     * Detection: a dest_ptr is EFB-sourced if ANY of the following is true:
+     *   (1) currently in the global s_efb_captures table
+     *   (2) pending in this frame's efb_captures[] queue
+     *   (3) has EVER been used as an EFB capture target (known_efb_ptrs)
+     *
+     * Rule (3) is essential: when a menu re-opens, the game may issue
+     * GXLoadTexObj on the same dest_ptr it previously used, and we must
+     * not fall through to tex_cache lookup (which could return stale
+     * sprite data). Instead, mark it for late re-resolve at replay.
+     */
     {
-        GLuint efb_tex = pc_gx_efb_capture_find(o[TEXOBJ_IMAGE_PTR]);
-        if (efb_tex) {
+        u32 efb_dest_ptr = o[TEXOBJ_IMAGE_PTR];
+        GLuint efb_tex = pc_gx_efb_capture_find(efb_dest_ptr);
+        int efb_known = pc_gx_efb_is_known_ptr(efb_dest_ptr);
 #ifdef TARGET_VITA
-            if (!vita_on_worker_thread) {
+        int efb_pending_this_frame = 0;
+        {
+            int ec = efb_capture_count;
+            for (int e = 0; e < ec; e++) {
+                if (efb_captures[e].dest_ptr == efb_dest_ptr) {
+                    efb_pending_this_frame = 1;
+                    break;
+                }
+            }
+        }
+        int is_efb = (efb_tex != 0) || efb_pending_this_frame || efb_known;
+        if (is_efb && id >= 0 && id < 8) {
+            g_gx.efb_src_ptr[id] = efb_dest_ptr;
+        }
+        if (is_efb) {
+            if (!vita_on_worker_thread && efb_tex) {
                 glActiveTexture(GL_TEXTURE7);
                 glBindTexture(GL_TEXTURE_2D, efb_tex);
                 GLenum gl_filter = filter_mode ? GL_LINEAR : GL_NEAREST;
@@ -1056,28 +1196,38 @@ void GXLoadTexObj(void* obj, u32 id) {
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter);
                 glActiveTexture(GL_TEXTURE0);
             }
+            // efb_tex may be 0 if captured later this frame; replay re-resolves
+            o[TEXOBJ_GL_TEX] = efb_tex;
+            g_gx.gl_textures[id] = efb_tex;
+            g_gx.gl_tex_deferred[id] = -1;
+            g_gx.tex_obj_w[id] = width;
+            g_gx.tex_obj_h[id] = height;
+            g_gx.tex_obj_fmt[id] = (int)format;
+            g_gx.efb_v_flip = 1; // VitaGL glCopyTexImage2D is V-flipped
+            DIRTY(PC_GX_DIRTY_TEXTURES);
+            return;
+        }
 #else
+        if (efb_tex) {
             glBindTexture(GL_TEXTURE_2D, efb_tex);
             GLenum gl_filter = filter_mode ? GL_LINEAR : GL_NEAREST;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_filter);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter);
-#endif
             o[TEXOBJ_GL_TEX] = efb_tex;
             g_gx.gl_textures[id] = efb_tex; g_gx.gl_tex_deferred[id] = -1;
             g_gx.tex_obj_w[id] = width;
             g_gx.tex_obj_h[id] = height;
             g_gx.tex_obj_fmt[id] = (int)format;
-#ifdef TARGET_VITA
-            g_gx.efb_v_flip = 1; // VitaGL glCopyTexImage2D is V-flipped
-#endif
             DIRTY(PC_GX_DIRTY_TEXTURES);
             return;
         }
+#endif
     }
 #endif
 
 #ifdef TARGET_VITA
     g_gx.efb_v_flip = 0;
+    if (id >= 0 && id < 8) g_gx.efb_src_ptr[id] = 0;
 #endif
 
     /* detect when emu64 reuses the same buffer with different data */
@@ -1209,9 +1359,48 @@ void GXLoadTexObj(void* obj, u32 id) {
         }
     }
 
+    // worker-thread fast path: if the HD version is already in the vtc
+    // loaded_cache, skip the GC decode. main's HD-first upload path will
+    // pick up the HD texture without ever touching rgba, which avoids
+    // the malloc + decode pass during miss bursts. the loaded_cache
+    // lookup is a lockless hash probe so this is safe off main.
+#ifdef TARGET_VITA
+    unsigned long long early_vtc_key = 0;
+    int skip_decode = 0;
+    if (vita_on_worker_thread && image_ptr && width > 0 && height > 0) {
+        extern unsigned long long vita_vtc_compute_key(const void*, int, int, int,
+                                                        unsigned int, const void*, int, int,
+                                                        unsigned int, unsigned int, unsigned int);
+        extern GLuint vita_vtc_loaded_cache_lookup(unsigned long long key);
+        const void* tp_tlut = NULL;
+        int tp_tlut_entries = 0;
+        int tp_tlut_is_be = 1;
+        if (format == GX_TF_C4 || format == GX_TF_C8) {
+            int tn = (int)o[TEXOBJ_TLUT_NAME];
+            if (tn >= 0 && tn < 16 && g_gx.tlut[tn].data) {
+                tp_tlut = g_gx.tlut[tn].data;
+                tp_tlut_entries = g_gx.tlut[tn].n_entries;
+                tp_tlut_is_be = g_gx.tlut[tn].is_be;
+            }
+        }
+        int dsz = (width * height * gc_format_bpp(format)) / 8;
+        early_vtc_key = vita_vtc_compute_key(image_ptr, dsz,
+                                              width, height, format,
+                                              tp_tlut, tp_tlut_entries, tp_tlut_is_be,
+                                              o[TEXOBJ_IMAGE_PTR], hash, tlut_hash_key);
+        if (early_vtc_key != 0 && vita_vtc_loaded_cache_lookup(early_vtc_key) != 0) {
+            skip_decode = 1;
+        }
+    }
+#endif
+
     // decode texture data (safe on any thread)
     u8* rgba = NULL;
-    if (image_ptr && width > 0 && height > 0 && width <= 1024 && height <= 1024) {
+    if (
+#ifdef TARGET_VITA
+        !skip_decode &&
+#endif
+        image_ptr && width > 0 && height > 0 && width <= 1024 && height <= 1024) {
         rgba = (u8*)malloc(width * height * 4);
         if (rgba) {
             u8 palette[256][4];
@@ -1286,7 +1475,7 @@ void GXLoadTexObj(void* obj, u32 id) {
             up->gl_tex_slot = id;
             up->compressed = 0;
             up->external = 0;
-            // compute VTC cache key (no I/O, no GL -- safe on worker)
+            // compute VTC cache key. no I/O or GL calls here, safe on worker.
             {
                 extern unsigned long long vita_vtc_compute_key(const void*, int, int, int,
                                                                unsigned int, const void*, int, int,

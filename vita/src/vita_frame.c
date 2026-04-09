@@ -1,5 +1,5 @@
-// vita frame orchestration
-// double-buffer swap, emu64 dispatch, perf logging
+// vita_frame.c
+// double buffer swap, emu64 dispatch, perf logging
 #ifdef TARGET_VITA
 
 #include "pc_platform.h"
@@ -11,11 +11,8 @@
 #include <psp2/kernel/processmgr.h>
 #include <stdio.h>
 
-// frame state
 static int vita_first_frame = 1;
 static int vita_worker_pending = 0;
-
-// perf logging (compile-time optional)
 
 static int vita_perf_log_init_done = 0;
 
@@ -58,8 +55,6 @@ static void vita_perf_log_frame(void) {
 }
 #endif
 
-// threaded frame path
-
 static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     if (!vita_first_frame) {
         if (!vita_gpu_skip_draws) {
@@ -80,13 +75,14 @@ static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     vita_worker_pending = 1;
 
     if (!vita_first_frame) {
-#ifdef VITA_DEBUG
         unsigned int st0 = sceKernelGetProcessTimeLow();
-#endif
         pc_gx_submit_frame();
+        vita_timing.submit_us = sceKernelGetProcessTimeLow() - st0;
 #ifdef VITA_DEBUG
-        vita_submit_us = sceKernelGetProcessTimeLow() - st0;
+        vita_submit_us = vita_timing.submit_us;
 #endif
+    } else {
+        vita_timing.submit_us = 0;
     }
 
 #ifdef VITA_DEBUG
@@ -95,8 +91,6 @@ static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
 
     vita_first_frame = 0;
 }
-
-// single-threaded fallback
 
 static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
     JW_BeginFrame();
@@ -127,8 +121,6 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
 #endif
 }
 
-// public API
-
 void vita_frame_run(ucode_info* ucode, void* gfx_list) {
     if (vita_emu64_worker_active()) {
         vita_frame_run_threaded(ucode, gfx_list);
@@ -142,6 +134,10 @@ void vita_frame_wait_worker(void) {
         vita_emu64_wait_done();
         emu64_cleanup();
         vita_worker_pending = 0;
+        // prefetch runs on main so variable latency doesn't block the worker
+        // loop. queues slots to the VTC io thread, no file io itself.
+        extern void vita_vtc_prefetch(void);
+        vita_vtc_prefetch();
     }
 }
 

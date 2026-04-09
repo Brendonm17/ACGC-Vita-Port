@@ -1706,6 +1706,7 @@ unsigned char* pc_texture_pack_lookup_rgba(const void* data, int data_size,
 #ifdef TARGET_VITA
 #include <SDL2/SDL_thread.h>
 #include <SDL2/SDL_mutex.h>
+#include <psp2/kernel/threadmgr.h>
 
 #define ASYNC_QUEUE_SIZE 256  /* power of 2 */
 #define ASYNC_QUEUE_MASK (ASYNC_QUEUE_SIZE - 1)
@@ -1820,8 +1821,16 @@ void pc_texture_pack_start_async(void) {
     g_async_result_mutex = SDL_CreateMutex();
     g_async_semaphore = SDL_CreateSemaphore(0);
     g_async_loader_thread = SDL_CreateThread(async_loader_thread_func, "TexPackLoader", NULL);
-    if (g_async_loader_thread)
+    if (g_async_loader_thread) {
         printf("[TexturePack] Async loader started\n");
+#ifdef TARGET_VITA
+        // pin to core 0 with main at low priority so main preempts.
+        // CPU-heavy decompression here was saturating core 2 when it
+        // also hosted VTC io and audio.
+        SceUID tid = (SceUID)SDL_GetThreadID(g_async_loader_thread);
+        sceKernelChangeThreadCpuAffinityMask(tid, SCE_KERNEL_CPU_MASK_USER_0);
+#endif
+    }
 }
 
 void pc_texture_pack_stop_async(void) {

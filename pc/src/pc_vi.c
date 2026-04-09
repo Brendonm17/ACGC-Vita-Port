@@ -99,13 +99,9 @@ void VIWaitForRetrace(void) {
             acc_pace_ms += pa;
 #ifdef TARGET_VITA
             acc_draws += vita_stats.draw_calls;
+            acc_emu64_ms += (double)vita_timing.emu64_us / 1000.0;
 #else
             acc_draws += pc_gx_draw_call_count;
-#endif
-#ifdef TARGET_VITA
-            {
-                acc_emu64_ms += (double)vita_timing.emu64_us / 1000.0;
-            }
 #endif
         }
         if (fps_count >= 120) {
@@ -123,17 +119,11 @@ void VIWaitForRetrace(void) {
 #ifdef VITA_PERF_LOG
             {
                 extern int tex_cache_hits, tex_cache_misses;
-                extern unsigned int vita_vtc_prefetch_us;
-                vita_log("[PERF] %.0ffps frame=%.1fms emu64=%.1fms swap=%.1fms draws=%d flush=%.1fms tex=%.1fms tev=%.1fms prefetch=%.1fms hit=%d miss=%d\n",
+                vita_log("[PERF] %.0ffps frame=%.1fms emu64=%.1fms swap=%.1fms draws=%d hit=%d miss=%d\n",
                          fps, avg_frame, avg_emu64, avg_swap, avg_draws,
-                         (double)vita_timing.flush_us / 1000.0,
-                         (double)vita_timing.texload_us / 1000.0,
-                         (double)vita_timing.tevmatch_us / 1000.0,
-                         (double)vita_vtc_prefetch_us / 1000.0,
                          tex_cache_hits, tex_cache_misses);
                 tex_cache_hits = 0;
                 tex_cache_misses = 0;
-                vita_vtc_prefetch_us = 0;
             }
 #endif
 #else
@@ -165,6 +155,15 @@ void VIWaitForRetrace(void) {
 
     retrace_count++;
     pc_frame_counter++;
+
+#ifdef TARGET_VITA
+    // rerun thread scan at specific frames to catch late created threads
+    // (SDL audio device, VTC io, etc) that don't exist at platform init time
+    if (pc_frame_counter == 5 || pc_frame_counter == 30 || pc_frame_counter == 120) {
+        extern void vita_pin_hidden_threads(void);
+        vita_pin_hidden_threads();
+    }
+#endif
 }
 
 u32 VIGetRetraceCount(void) { return retrace_count; }

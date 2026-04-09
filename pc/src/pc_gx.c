@@ -4,6 +4,7 @@
 #ifdef TARGET_VITA
 #include "pc_settings.h"
 #include "vita_banner.h"
+#include "vita_gx_cmdbuf.h"
 #endif
 #include <stddef.h>
 #include <stdlib.h>
@@ -51,10 +52,39 @@ static struct {
 } s_efb_captures[MAX_EFB_CAPTURES];
 static int s_efb_capture_count = 0;
 
+// persistent set of dest_ptrs that have ever been used as an EFB capture
+// target. once remembered, subsequent loads of that pointer are always
+// treated as EFB-sourced even if the current frame hasn't captured yet
+// or s_efb_captures evicted the old entry. closes a race where the
+// worker snapshots a cmd before main has stored the fresh capture.
+#define MAX_KNOWN_EFB_PTRS 16
+static u32 s_known_efb_ptrs[MAX_KNOWN_EFB_PTRS];
+static int s_known_efb_count = 0;
+
+int pc_gx_efb_is_known_ptr(u32 dest_ptr) {
+    for (int i = 0; i < s_known_efb_count; i++)
+        if (s_known_efb_ptrs[i] == dest_ptr) return 1;
+    return 0;
+}
+
+void pc_gx_efb_remember_ptr(u32 dest_ptr) {
+    for (int i = 0; i < s_known_efb_count; i++)
+        if (s_known_efb_ptrs[i] == dest_ptr) return;
+    if (s_known_efb_count < MAX_KNOWN_EFB_PTRS) {
+        s_known_efb_ptrs[s_known_efb_count++] = dest_ptr;
+    } else {
+        // LRU-ish, shift out oldest
+        memmove(&s_known_efb_ptrs[0], &s_known_efb_ptrs[1],
+                (MAX_KNOWN_EFB_PTRS - 1) * sizeof(u32));
+        s_known_efb_ptrs[MAX_KNOWN_EFB_PTRS - 1] = dest_ptr;
+    }
+}
+
 void pc_gx_efb_capture_store(u32 dest_ptr, GLuint gl_tex) {
+    pc_gx_efb_remember_ptr(dest_ptr);
     for (int i = 0; i < s_efb_capture_count; i++) {
         if (s_efb_captures[i].dest_ptr == dest_ptr) {
-            if (s_efb_captures[i].gl_tex)
+            if (s_efb_captures[i].gl_tex && s_efb_captures[i].gl_tex != gl_tex)
                 PC_DELETE_TEXTURE(s_efb_captures[i].gl_tex);
             s_efb_captures[i].gl_tex = gl_tex;
             return;
@@ -72,10 +102,45 @@ void pc_gx_efb_capture_store(u32 dest_ptr, GLuint gl_tex) {
     s_efb_capture_count++;
 }
 
+// returns the GL texture id for this dest_ptr, allocating one on first
+// use. the caller must then glCopyTexImage2D into the returned tex with
+// it bound to GL_TEXTURE_2D. reusing the same id across repeated captures
+// of the same dest_ptr avoids texture churn and stale-texture leaks.
+GLuint pc_gx_efb_capture_get_or_create(u32 dest_ptr) {
+    pc_gx_efb_remember_ptr(dest_ptr);
+    for (int i = 0; i < s_efb_capture_count; i++) {
+        if (s_efb_captures[i].dest_ptr == dest_ptr) {
+            if (s_efb_captures[i].gl_tex != 0) {
+                return s_efb_captures[i].gl_tex;
+            }
+            // slot exists but tex is 0, allocate in place
+            GLuint tex = 0;
+            glGenTextures(1, &tex);
+            s_efb_captures[i].gl_tex = tex;
+            return tex;
+        }
+    }
+    // not found, allocate a slot and evict the oldest if full
+    if (s_efb_capture_count >= MAX_EFB_CAPTURES) {
+        if (s_efb_captures[0].gl_tex)
+            PC_DELETE_TEXTURE(s_efb_captures[0].gl_tex);
+        memmove(&s_efb_captures[0], &s_efb_captures[1],
+                (MAX_EFB_CAPTURES - 1) * sizeof(s_efb_captures[0]));
+        s_efb_capture_count = MAX_EFB_CAPTURES - 1;
+    }
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    s_efb_captures[s_efb_capture_count].dest_ptr = dest_ptr;
+    s_efb_captures[s_efb_capture_count].gl_tex = tex;
+    s_efb_capture_count++;
+    return tex;
+}
+
 GLuint pc_gx_efb_capture_find(u32 data_ptr) {
     for (int i = 0; i < s_efb_capture_count; i++) {
-        if (s_efb_captures[i].dest_ptr == data_ptr)
+        if (s_efb_captures[i].dest_ptr == data_ptr) {
             return s_efb_captures[i].gl_tex;
+        }
     }
     return 0;
 }
@@ -201,6 +266,10 @@ void pc_gx_init(void) {
     g_gx.scissor[3] = 480;
 
 #ifdef TARGET_VITA
+    // vertex_write_ptr starts at the fallback vertex_buffer. GXBegin
+    // re-points it into cmd_verts when a batch actually starts.
+    g_gx.vertex_write_ptr = &g_gx.vertex_buffer[0];
+    g_gx.current_vtx = NULL;
     vita_cmdbuf_init();
 #endif
 
@@ -412,7 +481,10 @@ void GXBegin(u32 primitive, u32 vtxfmt, u16 nverts) {
     g_gx.in_begin = 1;
     g_gx.vertex_pending = 0;
 #ifdef TARGET_VITA
-    // direct-write path
+    // point the write target at cmd_verts so GXPosition/Normal/Color/
+    // TexCoord write straight into the per-frame buffer, no flush memcpy.
+    g_gx.vertex_write_ptr = vita_cmdbuf_begin_vertex_batch((int)nverts);
+    g_gx.current_vtx = NULL;
 #else
     /* Clear vertex without full memset -position/normal/texcoord zeroed,
      * color0 set to white (GX default). Avoids 48-byte memset per batch. */
@@ -442,15 +514,17 @@ void GXEnd(void) {
 
 void GXPosition3f32(f32 x, f32 y, f32 z) {
 #ifdef TARGET_VITA
-    // direct-write to vertex_buffer[]
+    // direct-write to vertex_write_ptr, which points into cmd_verts or the fallback buffer
     if (g_gx.vertex_pending) {
         g_gx.current_vertex_idx++;
     }
     if (g_gx.current_vertex_idx >= PC_GX_MAX_VERTS) {
         g_gx.vertex_pending = 0;
+        g_gx.current_vtx = NULL;
         return;
     }
-    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    PCGXVertex* v = &g_gx.vertex_write_ptr[g_gx.current_vertex_idx];
+    g_gx.current_vtx = v;
     v->position[0] = x;
     v->position[1] = y;
     v->position[2] = z;
@@ -458,9 +532,6 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     v->normal[1] = 0.0f;
     v->normal[2] = 0.0f;
     *(u32*)v->color0 = 0xFFFFFFFF;
-#ifndef TARGET_VITA
-    *(u32*)v->color1 = 0;          /* single 32-bit store */
-#endif
     v->texcoord[0][0] = 0.0f;
     v->texcoord[0][1] = 0.0f;
     v->texcoord[1][0] = 0.0f;
@@ -515,7 +586,8 @@ void GXPosition1x8(u8 index) { GXPosition1x16(index); }
 
 void GXNormal3f32(f32 x, f32 y, f32 z) {
 #ifdef TARGET_VITA
-    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    PCGXVertex* v = g_gx.current_vtx;
+    if (!v) return;
     v->normal[0] = x;
     v->normal[1] = y;
     v->normal[2] = z;
@@ -542,7 +614,8 @@ void GXNormal1x8(u8 index) { GXNormal1x16(index); }
 
 void GXColor4u8(u8 r, u8 g, u8 b, u8 a) {
 #ifdef TARGET_VITA
-    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    PCGXVertex* v = g_gx.current_vtx;
+    if (!v) return;
     v->color0[0] = r;
     v->color0[1] = g;
     v->color0[2] = b;
@@ -576,7 +649,8 @@ void GXColor4f32(float r, float g, float b, float a) {
 void GXTexCoord2f32(f32 s, f32 t) {
 #ifdef TARGET_VITA
     // EFB V-flip: VitaGL glCopyTexImage2D is flipped vs desktop GL
-    PCGXVertex* v = &g_gx.vertex_buffer[g_gx.current_vertex_idx];
+    PCGXVertex* v = g_gx.current_vtx;
+    if (!v) return;
     v->texcoord[0][0] = s;
     v->texcoord[0][1] = g_gx.efb_v_flip ? (1.0f - t) : t;
 #else
@@ -1529,6 +1603,10 @@ void GXSetTevColorS10(u32 id, s16 r, s16 g, s16 b, s16 a) {
 void GXSetTevKColor(u32 id, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
     if (id < 4) {
+#ifdef TARGET_VITA
+        if (g_gx.tev_k_color_packed_cache[id] == color_packed) return;
+        g_gx.tev_k_color_packed_cache[id] = color_packed;
+#endif
         pc_unpack_rgba8f(color_packed, g_gx.tev_k_colors[id]);
         DIRTY(PC_GX_DIRTY_KONST);
         PC_DIRTY_TEV_IF_VITA();
@@ -1715,6 +1793,10 @@ void GXSetChanAmbColor(u32 chan, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
     int idx = pc_gx_chan_index(chan);
     if (idx >= 0 && idx < 2) {
+#ifdef TARGET_VITA
+        if (g_gx.chan_amb_packed_cache[idx] == color_packed) return;
+        g_gx.chan_amb_packed_cache[idx] = color_packed;
+#endif
         pc_unpack_gxcolor_f(color_packed, g_gx.chan_amb_color[idx]);
         DIRTY(PC_GX_DIRTY_LIGHTING);
     }
@@ -1724,6 +1806,10 @@ void GXSetChanMatColor(u32 chan, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
     int idx = pc_gx_chan_index(chan);
     if (idx >= 0 && idx < 2) {
+#ifdef TARGET_VITA
+        if (g_gx.chan_mat_packed_cache[idx] == color_packed) return;
+        g_gx.chan_mat_packed_cache[idx] = color_packed;
+#endif
         pc_unpack_gxcolor_f(color_packed, g_gx.chan_mat_color[idx]);
         DIRTY(PC_GX_DIRTY_LIGHTING);
     }
@@ -2036,17 +2122,22 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
         }
         return;
     }
-    // GPU-only copy via glCopyTexImage2D (avoids slow glReadPixels readback)
+    // GPU-only copy via glCopyTexImage2D to avoid a slow glReadPixels
+    // readback. uses a persistent GL texture per dest_ptr so repeated
+    // captures overwrite the same id, matching the worker/replay path.
     {
-        GLuint efb_tex;
-        glGenTextures(1, &efb_tex);
-        glActiveTexture(GL_TEXTURE7);
-        glBindTexture(GL_TEXTURE_2D, efb_tex);
-        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, read_left, gl_y, read_wd, read_ht, 0);
-        vita_efb_setup_texture((u32)(uintptr_t)dest, efb_tex);
-        glActiveTexture(GL_TEXTURE0);
+        GLuint efb_tex = pc_gx_efb_capture_get_or_create((u32)(uintptr_t)dest);
+        if (efb_tex) {
+            glActiveTexture(GL_TEXTURE7);
+            glBindTexture(GL_TEXTURE_2D, efb_tex);
+            glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, read_left, gl_y, read_wd, read_ht, 0);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glActiveTexture(GL_TEXTURE0);
+        }
     }
-    // skip CPU readback path below
     // skip mid-frame clear on vita; next frame init clears anyway
     return;
 #else
