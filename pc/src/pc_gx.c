@@ -382,6 +382,17 @@ void pc_gx_init(void) {
     g_gx.dirty = PC_GX_DIRTY_ALL;
 }
 
+#ifdef TARGET_VITA
+int g_vita_force_state_resync = 0;
+#endif
+
+void pc_gx_invalidate_all_state(void) {
+    g_gx.dirty = PC_GX_DIRTY_ALL;
+#ifdef TARGET_VITA
+    g_vita_force_state_resync = 1;
+#endif
+}
+
 void pc_gx_begin_frame(void) {
     // deferred tex deletes happen at end of submit_frame, not here
     g_gx.copy_disp_done = 0;
@@ -1577,10 +1588,6 @@ void GXSetTevOrder(u32 stage, u32 coord, u32 map, u32 color) {
 void GXSetTevColor(u32 id, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
     if (id < GX_MAX_TEVREG) {
-#ifdef TARGET_VITA
-        if (g_gx.tev_color_packed_cache[id] == color_packed) return;
-        g_gx.tev_color_packed_cache[id] = color_packed;
-#endif
         if (id == GX_TEVREG0) pc_unpack_gxcolor_f(color_packed, g_gx.tev_colors[id]);
         else pc_unpack_rgba8f(color_packed, g_gx.tev_colors[id]);
         DIRTY(PC_GX_DIRTY_TEV_COLORS);
@@ -1603,10 +1610,6 @@ void GXSetTevColorS10(u32 id, s16 r, s16 g, s16 b, s16 a) {
 void GXSetTevKColor(u32 id, u32 color_packed) {
     pc_gx_flush_if_begin_complete();
     if (id < 4) {
-#ifdef TARGET_VITA
-        if (g_gx.tev_k_color_packed_cache[id] == color_packed) return;
-        g_gx.tev_k_color_packed_cache[id] = color_packed;
-#endif
         pc_unpack_rgba8f(color_packed, g_gx.tev_k_colors[id]);
         DIRTY(PC_GX_DIRTY_KONST);
         PC_DIRTY_TEV_IF_VITA();
@@ -2120,6 +2123,13 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
             cap->src_h = read_ht;
             cap->clear_after = 0; // skip mid-frame clear on vita; next frame init clears anyway
         }
+        // remember the dest_ptr here so the worker's own subsequent
+        // GXLoadTexObj calls treat it as EFB-sourced, even on first use.
+        // without this, the first capture of a new dest races main's
+        // replay: the next frame's worker pipeline snapshots GXLoadTexObj
+        // before main has run the capture, falls through to the tex_cache
+        // path, and decodes uninitialized framebuffer data (black flash).
+        pc_gx_efb_remember_ptr((u32)(uintptr_t)dest);
         return;
     }
     // GPU-only copy via glCopyTexImage2D to avoid a slow glReadPixels

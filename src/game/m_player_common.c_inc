@@ -3662,7 +3662,8 @@ static void Player_actor_Init_ScrollDemo_forWade_snowball(ACTOR* actorx) {
 static int Player_actor_Set_ScrollDemo_forWade(ACTOR* actorx, GAME* game, int npc_check_flag) {
 #ifdef TARGET_VITA
     if (g_pc_settings.free_cam) {
-        // detect acre change and spawn actors for the new acre
+        // free cam: skip scroll demo, fire wade side effects directly
+        // on block crossing so npcs still spawn via the normal pipeline
         static int s_last_bx = -1, s_last_bz = -1;
         int bx, bz;
         if (mFI_Wpos2BlockNum(&bx, &bz, actorx->world.position)) {
@@ -3670,6 +3671,7 @@ static int Player_actor_Set_ScrollDemo_forWade(ACTOR* actorx, GAME* game, int np
                 s_last_bx = bx;
                 s_last_bz = bz;
                 mFI_SetBearActor((GAME_PLAY*)game, actorx->world.position, TRUE);
+                mFI_trigger_freecam_wade();
                 Common_Set(in_initial_block, FALSE);
             }
         }

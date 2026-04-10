@@ -4470,6 +4470,12 @@ void emu64::dl_G_NOOP() {
                 g_pc_widescreen_stretch = 2; /* pillarbox mode for UI */
                 break;
             }
+            if (this->gfx.words.w1 == PC_NOOP_FULL_STATE_INVALIDATE) {
+                /* force every uniform field dirty so the next draw
+                 * re-snapshots fresh state. */
+                pc_gx_invalidate_all_state();
+                break;
+            }
 #endif
             if (this->gfx.words.w1 == 0) {
                 EMU64_LOG("gsDPNoOp(),");

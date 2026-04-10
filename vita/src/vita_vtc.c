@@ -66,7 +66,7 @@ typedef struct {
     int vram_bytes;      // vRAM consumed by this texture
     unsigned int last_used; // frame counter for LRU
     int occupied;
-    int claimed;         // 1 when tex_cache owns this texture, eviction skips
+    int ref_count;       // number of tex_cache entries holding this texture. eviction skips ref_count > 0. decremented on tex_cache_invalidate walk.
 } VtcLoadedEntry;
 
 static VtcLoadedEntry g_vtc_loaded[VTC_LOADED_CACHE_SIZE];
@@ -270,21 +270,21 @@ static VtcLoadedEntry* vtc_loaded_find(unsigned long long key) {
     return NULL;
 }
 
-// evict the oldest unclaimed entry from loaded cache to free vRAM.
-// claimed entries are owned by tex_cache and must not be deleted out
-// from under it; they stay until tex_cache itself releases them.
+// evict the oldest entry with no outstanding references from the loaded
+// cache. entries with ref_count > 0 are owned by tex_cache entries and
+// must not be deleted out from under them.
 static void vtc_loaded_evict_oldest(void) {
     int oldest_idx = -1;
     unsigned int oldest_frame = 0xFFFFFFFF;
 
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
-        if (g_vtc_loaded[i].occupied && !g_vtc_loaded[i].claimed &&
+        if (g_vtc_loaded[i].occupied && g_vtc_loaded[i].ref_count == 0 &&
             g_vtc_loaded[i].last_used < oldest_frame) {
             oldest_frame = g_vtc_loaded[i].last_used;
             oldest_idx = i;
         }
     }
-    if (oldest_idx < 0) return;  // nothing evictable (all claimed)
+    if (oldest_idx < 0) return;  // nothing evictable (all referenced)
 
     VtcLoadedEntry* victim = &g_vtc_loaded[oldest_idx];
 
@@ -294,7 +294,7 @@ static void vtc_loaded_evict_oldest(void) {
     g_vtc_evictions++;
 
     victim->occupied = 0;
-    victim->claimed = 0;
+    victim->ref_count = 0;
     victim->gl_tex = 0;
     victim->key = 0;
 }
@@ -304,7 +304,7 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
     while (g_vtc_vram_used + vram_bytes > VTC_VRAM_BUDGET) {
         int before = g_vtc_vram_used;
         vtc_loaded_evict_oldest();
-        if (g_vtc_vram_used == before) break; // nothing evictable (all claimed)
+        if (g_vtc_vram_used == before) break; // nothing evictable (all referenced)
     }
 
     unsigned int slot = (unsigned int)(key & VTC_LOADED_CACHE_MASK);
@@ -317,6 +317,7 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
             g_vtc_loaded[idx].tex_h = h;
             g_vtc_loaded[idx].vram_bytes = vram_bytes;
             g_vtc_loaded[idx].last_used = g_vtc_frame;
+            g_vtc_loaded[idx].ref_count = 0;
             g_vtc_loaded[idx].occupied = 1;
             g_vtc_vram_used += vram_bytes;
             return;
@@ -334,11 +335,14 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
             g_vtc_loaded[idx].tex_h = h;
             g_vtc_loaded[idx].vram_bytes = vram_bytes;
             g_vtc_loaded[idx].last_used = g_vtc_frame;
+            g_vtc_loaded[idx].ref_count = 0;
             g_vtc_loaded[idx].occupied = 1;
             g_vtc_vram_used += vram_bytes;
             return;
         }
     }
+    // no free slot and nothing evictable - HD texture leaked
+    vita_defer_tex_delete(tex);
 }
 
 // Call once per frame to advance LRU counter
@@ -515,27 +519,38 @@ void vita_vtc_shutdown(void) {
     g_vtc_active = 0;
 }
 
-// lookup from loaded cache, returns GL texture and marks the entry claimed.
-// claimed entries are skipped by LRU eviction so tex_cache retains the hd_tex.
+// lookup from loaded cache. pure read - does NOT change ref_count. use
+// vita_vtc_loaded_cache_acquire_key to take ownership after the lookup.
 GLuint vita_vtc_loaded_cache_lookup(unsigned long long key) {
     if (!g_vtc_active || key == 0) return 0;
     VtcLoadedEntry* e = vtc_loaded_find(key);
     if (!e) return 0;
-    e->claimed = 1;
     return e->gl_tex;
 }
 
-// drop the claimed flag on every loaded entry. called from tex_cache
-// invalidation (scene transitions) after the tex_cache is wiped, since
-// nothing references the HD textures anymore and they all need to be
-// LRU-evictable again. scene B either re-claims them on lookup or they
-// get freed when their vram is needed.
+// increment ref_count for an entry. called when a tex_cache entry
+// starts holding a reference to the loaded_cache texture. every call
+// must be matched by a release_key call when the reference is dropped.
+void vita_vtc_loaded_cache_acquire_key(unsigned long long key) {
+    if (!g_vtc_active || key == 0) return;
+    VtcLoadedEntry* e = vtc_loaded_find(key);
+    if (!e) return;
+    e->ref_count++;
+}
+
+// decrement ref_count for an entry. called when a tex_cache entry that
+// was holding a reference is wiped (scene transition) or evicted.
+// entries with ref_count == 0 become LRU-evictable on the next
+// vtc_loaded_insert that exceeds the vram budget.
+void vita_vtc_loaded_cache_release_key(unsigned long long key) {
+    if (!g_vtc_active || key == 0) return;
+    VtcLoadedEntry* e = vtc_loaded_find(key);
+    if (!e) return;
+    if (e->ref_count > 0) e->ref_count--;
+}
+
+// legacy no-op kept for compatibility with any older call sites.
 void vita_vtc_loaded_cache_unclaim_all(void) {
-    if (!g_vtc_active) return;
-    for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
-        if (g_vtc_loaded[i].occupied)
-            g_vtc_loaded[i].claimed = 0;
-    }
 }
 
 // Re-queue a key for prefetch if not already in loaded_cache or an I/O slot.
@@ -754,6 +769,9 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
 
 // Main thread: lookup by pre-computed cache_key, read DXT, upload GL texture.
 // Called from deferred upload processing after worker thread provided the key.
+// Every non-zero return increments the loaded_cache entry's ref_count; the
+// caller owns that reference and must eventually release it via
+// vita_vtc_loaded_cache_release_key.
 GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
     if (!g_vtc_active || key == 0) return 0;
 
@@ -762,6 +780,7 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
     if (loaded) {
         if (out_w) *out_w = loaded->tex_w;
         if (out_h) *out_h = loaded->tex_h;
+        loaded->ref_count++; // caller takes ownership
         return loaded->gl_tex;
     }
 
@@ -810,6 +829,9 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
 
             int vram = vtc_estimate_vram(hd_w, hd_h, slot_fmt);
             vtc_loaded_insert(key, tex, hd_w, hd_h, vram);
+            // increment ref_count for the caller's tex_cache entry.
+            VtcLoadedEntry* inserted = vtc_loaded_find(key);
+            if (inserted) inserted->ref_count++;
 
             if (out_w) *out_w = hd_w;
             if (out_h) *out_h = hd_h;

@@ -212,9 +212,17 @@ static void mNPS_island_schedule_manager() {
 extern void mNPS_schedule_manager() {
   int force_outside = FALSE;
 
+#ifdef TARGET_PC
+  // vanilla bug: first_job stays TRUE on stale saves, forcing all
+  // villagers outside forever. drop it; halloween still works.
+  if (mEv_check_status(mEv_EVENT_HALLOWEEN, mEv_STATUS_ACTIVE)) {
+    force_outside = TRUE;
+  }
+#else
   if (mEv_CheckFirstJob() == TRUE || mEv_check_status(mEv_EVENT_HALLOWEEN, mEv_STATUS_ACTIVE)) {
     force_outside = TRUE;
   }
+#endif
 
   if (force_outside == TRUE) {
     mNPS_schedule_manager_sub0();

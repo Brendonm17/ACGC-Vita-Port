@@ -469,6 +469,7 @@ void pc_gx_texture_process_deferred_uploads(void) {
     {
         unsigned int _upgrade_t0 = sceKernelGetProcessTimeLow();
         extern GLuint vita_vtc_loaded_cache_lookup(unsigned long long key);
+        extern void vita_vtc_loaded_cache_acquire_key(unsigned long long key);
         extern void vita_vtc_requeue_prefetch(unsigned long long key);
         static int scan_pos = 0;
         unsigned int _t0 = sceKernelGetProcessTimeLow();
@@ -502,10 +503,14 @@ void pc_gx_texture_process_deferred_uploads(void) {
             u32 wt = tex_cache[ci].wrap_t;
             u32 mf = tex_cache[ci].min_filter;
 
+            // acquire a loaded_cache ref for this tex_cache entry. the
+            // vtc_cache_key is preserved (not cleared) so invalidate can
+            // find and release the reference when the entry is wiped.
+            vita_vtc_loaded_cache_acquire_key(tex_cache[ci].vtc_cache_key);
+
             vita_defer_tex_delete(tex_cache[ci].gl_tex);
             tex_cache[ci].gl_tex = hd_tex;
             tex_cache[ci].external = 1;
-            tex_cache[ci].vtc_cache_key = 0;
             // wrap/filter stay the same so the next GXLoadTexObj sees a match
 
             if (ws != 0xFFFFFFFF && pending_n < UPGRADE_MAX_PER_FRAME) {
@@ -648,23 +653,30 @@ void pc_gx_texture_process_deferred_uploads(void) {
 #endif // TARGET_VITA deferred upload
 
 void pc_gx_texture_cache_invalidate(void) {
+#ifdef TARGET_VITA
+    extern void vita_vtc_loaded_cache_release_key(unsigned long long key);
+#endif
     tex_cache_lock();
     for (int i = 0; i < tex_cache_count; i++) {
-        if (tex_cache[i].gl_tex && !tex_cache[i].external)
+        if (tex_cache[i].gl_tex && !tex_cache[i].external) {
             PC_DELETE_TEXTURE(tex_cache[i].gl_tex);
+        }
+#ifdef TARGET_VITA
+        // release the loaded_cache reference held by this tex_cache entry.
+        // externals came from the VTC loaded_cache and hold a ref_count
+        // there. without this release, scene transitions leave behind
+        // "zombie" refs that prevent LRU eviction, and the 24 MB HD
+        // texture budget fills up over enough scene transitions.
+        if (tex_cache[i].external && tex_cache[i].vtc_cache_key != 0) {
+            vita_vtc_loaded_cache_release_key(tex_cache[i].vtc_cache_key);
+        }
+#endif
     }
     tex_cache_count = 0;
 #ifdef TARGET_VITA
     tex_hash_clear();
 #endif
     tex_cache_unlock();
-#ifdef TARGET_VITA
-    // tex_cache no longer references any VTC loaded_cache entries, so
-    // clear their claimed flags. without this, scene-transition orphans
-    // pile up in loaded_cache and LRU eviction can't reclaim the vram.
-    extern void vita_vtc_loaded_cache_unclaim_all(void);
-    vita_vtc_loaded_cache_unclaim_all();
-#endif
 }
 
 void pc_gx_texture_init(void) {

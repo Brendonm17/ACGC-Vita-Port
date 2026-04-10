@@ -743,12 +743,39 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
         play->submenu.mode = mSM_MODE_IDLE;
     }
 
+#if defined(TARGET_VITA)
+    /* Menu close flash hide: the first frames after the game exits
+     * PRERENDER_DONE render with stale cache/state from the menu-
+     * overlay pipeline, producing a visible one-frame wrong-color
+     * glitch on some draws (non-player house roofs in particular).
+     * bisection showed the bad state clears after 4 world frames, so
+     * set vita_gpu_skip_draws for 4 consecutive frames after the
+     * transition. JW_EndFrame sees the flag and skips the swap, so
+     * the menu stays visible until the pipeline stabilizes (~66 ms).
+     * this is a workaround - the underlying state leak is not yet
+     * identified. worth revisiting if the delay becomes noticeable. */
+    {
+        static int s_prev_submenu_mode = 0;
+        static int s_skip_remaining = 0;
+        if (s_prev_submenu_mode == mSM_MODE_PRERENDER_DONE &&
+            play->submenu.mode != mSM_MODE_PRERENDER_DONE) {
+            s_skip_remaining = 4;
+        }
+        if (s_skip_remaining > 0) {
+            extern int vita_gpu_skip_draws;
+            vita_gpu_skip_draws = 1;
+            s_skip_remaining--;
+        }
+        s_prev_submenu_mode = play->submenu.mode;
+    }
+#endif
+
     if (play->submenu.mode == mSM_MODE_PRERENDER_DONE) {
         poly = NOW_POLY_OPA_DISP;
 
 #ifdef TARGET_PC
         /* The prerendered background is a fullscreen textured rect that goes
-         * through ortho projection — enable stretch so it fills widescreen. */
+         * through ortho projection - enable stretch so it fills widescreen. */
         gDPNoOpTag(poly++, PC_NOOP_WIDESCREEN_STRETCH);
 #endif
         gDPPipeSync(poly++);
@@ -831,6 +858,7 @@ static void Game_play_draw(GAME_PLAY* play) {
 #endif
 
     DisplayList_initialize(graph, fill_r, fill_g, fill_b, &play->game);
+
     PC_DIAG(3, "Game_play_draw: DL_init done\n");
 
     if ((GETREG(HREG, 80) != 10) || (GETREG(HREG, 82) != 0)) {

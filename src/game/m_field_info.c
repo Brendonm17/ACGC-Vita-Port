@@ -9,6 +9,9 @@
 #include "m_player_lib.h"
 #include "m_bg_type.h"
 #include "m_fg_type.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static mCoBG_Collision_u l_edge_ut = { { 0, 31, 31, 31, 31, 31, mCoBG_ATTRIBUTE_GRASS0 } };
 
@@ -2054,10 +2057,31 @@ extern void mFI_InitMoveActorBitData() {
 
 static int l_player_wade;
 
+#ifdef TARGET_VITA
+// free cam: fake 2-frame wade (START then END) so the npc manager
+// runs its spawn pipeline on block crossings
+static int l_freecam_wade_ticks = 0;
+
+extern void mFI_trigger_freecam_wade(void) {
+    l_freecam_wade_ticks = 2;
+}
+#endif
+
 extern void mFI_SetPlayerWade(GAME* game) {
     PLAYER_ACTOR* player = GET_PLAYER_ACTOR_GAME(game);
 
     if (player != NULL) {
+#ifdef TARGET_VITA
+        if (g_pc_settings.free_cam && l_freecam_wade_ticks > 0) {
+            if (l_freecam_wade_ticks == 2) {
+                l_player_wade = mFI_WADE_START;
+            } else {
+                l_player_wade = mFI_WADE_END;
+            }
+            l_freecam_wade_ticks--;
+            return;
+        }
+#endif
         if (mPlib_check_player_actor_main_index_AllWade(game) == TRUE) {
             if (l_player_wade == mFI_WADE_NONE || l_player_wade == mFI_WADE_END) {
                 l_player_wade = mFI_WADE_START;

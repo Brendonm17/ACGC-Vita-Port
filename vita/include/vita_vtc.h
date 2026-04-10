@@ -28,7 +28,17 @@ GLuint vita_vtc_lookup(const void* data, int data_size, int w, int h,
                        unsigned int fmt, const void* tlut_data, int tlut_entries,
                        int tlut_is_be, int* out_w, int* out_h);
 
+// pure read of the loaded cache. does not change ref_count. returns
+// the GL tex if the key is loaded, 0 otherwise.
 GLuint vita_vtc_loaded_cache_lookup(unsigned long long key);
+
+// increment ref_count for an entry. the caller becomes the owner of
+// a reference that must eventually be released via release_key.
+void vita_vtc_loaded_cache_acquire_key(unsigned long long key);
+
+// decrement ref_count for an entry. zero ref_count makes the entry
+// eligible for LRU eviction when the VRAM budget is exceeded.
+void vita_vtc_loaded_cache_release_key(unsigned long long key);
 
 GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h);
 

@@ -157,6 +157,28 @@ static void aNPC_schedule_proc(NPC_ACTOR* nactorx, GAME_PLAY* play) {
     if (type != aNPC_SCHEDULE_NONE) {
         Animal_c* animal = aNPC_GET_ANM(nactorx);
 
+#ifdef TARGET_PC
+        // SLEEP-only save repair: force is_home TRUE and snap position
+        // so stale saves don't leave villagers sleeping in the field.
+        // also force the schedule transition so sleep actually runs.
+        if (nactorx->npc_info.schedule != NULL &&
+            nactorx->condition_info.talk_condition == aNPC_TALK_TYPE_NONE) {
+            u8 live_type = nactorx->npc_info.schedule->current_type;
+
+            if (live_type == mNPS_SCHED_SLEEP) {
+                if (animal != NULL && !animal->is_home &&
+                    nactorx->npc_info.list != NULL) {
+                    animal->is_home = TRUE;
+                    nactorx->npc_info.list->position = nactorx->npc_info.list->house_position;
+                }
+                if (nactorx->schedule.type != live_type) {
+                    aNPC_set_schedule(nactorx, play);
+                    type = nactorx->schedule.type;
+                }
+            }
+        }
+#endif
+
         if (animal != NULL && mNpc_CheckIslandAnimal(animal) == TRUE) {
             (*aNPC_island_sche_proc[type])(nactorx, play, aNPC_SCHEDULE_PROC_MAIN);
         } else {

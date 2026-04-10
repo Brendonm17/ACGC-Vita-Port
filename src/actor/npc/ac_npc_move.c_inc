@@ -690,6 +690,32 @@ static void aNPC_actor_move_show(ACTOR* actorx, GAME* game) {
 static void aNPC_actor_move(ACTOR* actorx, GAME* game) {
     NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
 
+#ifdef TARGET_PC
+    // overworld SLEEP: hide villagers who are at their home block
+    // (they're inside sleeping). villagers still out in the field
+    // keep their visible sleep behavior from vanilla.
+    if (Save_Get(scene_no) == SCENE_FG &&
+        aNPC_GET_ANM(nactorx) != NULL &&
+        nactorx->npc_info.schedule != NULL) {
+        u8 live_type = nactorx->npc_info.schedule->current_type;
+        if (live_type == mNPS_SCHED_SLEEP &&
+            actorx->block_x == aNPC_GET_ANM(nactorx)->home_info.block_x &&
+            actorx->block_z == aNPC_GET_ANM(nactorx)->home_info.block_z) {
+            aNPC_GET_ANM(nactorx)->is_home = TRUE;
+            if (nactorx->npc_info.list != NULL) {
+                nactorx->npc_info.list->position = nactorx->npc_info.list->house_position;
+                actorx->world.position.x = nactorx->npc_info.list->house_position.x;
+                actorx->world.position.z = nactorx->npc_info.list->house_position.z;
+            }
+            nactorx->condition_info.hide_flg = TRUE;
+            nactorx->condition_info.hide_request = TRUE;
+            actorx->shape_info.draw_shadow = FALSE;
+            aNPC_actor_move_hide(actorx, game);
+            return;
+        }
+    }
+#endif
+
     if (nactorx->condition_info.hide_flg != nactorx->condition_info.hide_request) {
         u8 hide_req = nactorx->condition_info.hide_request;
 

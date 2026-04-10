@@ -55,26 +55,26 @@ static void aBC_deleteActor_part(GAME_PLAY* play, int part) {
     if (actor == NULL) {
       break;
     }
-    
+
     check_bx = actor->block_x;
     check_bz = actor->block_z;
-
-#ifdef TARGET_VITA
-    if (g_pc_settings.free_cam) {
-      int dx = check_bx - now_bx;
-      int dz = check_bz - now_bz;
-      if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
-        actor = actor->next_actor;
-        continue;
-      }
-    }
-#endif
 
     /* Delete any actors which aren't in the current block or the last block */
     if (
       (check_bx >= 0 && check_bx != last_bx && check_bx != now_bx) &&
       (check_bz >= 0 && check_bz != last_bz && check_bz != now_bz)
     ) {
+#ifdef TARGET_VITA
+      // free cam: keep non-npc actors alive within 2 blocks for widescreen
+      if (g_pc_settings.free_cam && part != ACTOR_PART_NPC) {
+        int dx = check_bx - now_bx;
+        int dz = check_bz - now_bz;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+          actor = actor->next_actor;
+          continue;
+        }
+      }
+#endif
       Actor_delete(actor);
     }
 
@@ -300,10 +300,28 @@ static void aBC_set_boat(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
 }
 
 #ifdef TARGET_VITA
+// return TRUE if this item already has an actor in the given block
+static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz) {
+  ACTOR* actor = play->actor_info.list[ACTOR_PART_ITEM].actor;
+  while (actor != NULL) {
+    if (actor->block_x == bx && actor->block_z == bz && actor->npc_id == item_id) {
+      return TRUE;
+    }
+    actor = actor->next_actor;
+  }
+  return FALSE;
+}
+
 static int aBC_setupOtherActor_block(GAME_PLAY* play, mActor_name_t actor_id, s16 profile,
     f32 pos_x, f32 pos_z, mActor_name_t clear_item, s8 bx, s8 bz) {
   xyz_t pos;
   int res = FALSE;
+
+  // dedup: skip if already spawned in this block
+  if (aBC_item_exists_in_block(play, actor_id, bx, bz)) {
+    return res;
+  }
+
   pos.x = pos_x;
   pos.z = pos_z;
   pos.y = mCoBG_GetBgY_OnlyCenter_FromWpos2(pos, 0.0f);
@@ -320,18 +338,8 @@ static int aBC_setupOtherActor_block(GAME_PLAY* play, mActor_name_t actor_id, s1
   return res;
 }
 
-static int aBC_block_has_actors(GAME_PLAY* play, s8 bx, s8 bz) {
-  ACTOR* actor = play->actor_info.list[ACTOR_PART_ITEM].actor;
-  while (actor != NULL) {
-    if (actor->block_x == bx && actor->block_z == bz) return TRUE;
-    actor = actor->next_actor;
-  }
-  return FALSE;
-}
-
 static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
   if (!mFI_BlockCheck(bx, bz)) return;
-  if (aBC_block_has_actors(play, bx, bz)) return;
 
   int num = mFI_GetBlockNum(bx, bz);
   mActor_name_t* item_p = g_fdinfo->block_info[num].fg_info.items_p;
@@ -354,7 +362,9 @@ static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
           break;
         }
         case NAME_TYPE_STRUCT:
-          if (Common_Get(clip).structure_clip != NULL) {
+          // dedup: skip if this struct is already spawned
+          if (Common_Get(clip).structure_clip != NULL &&
+              !aBC_item_exists_in_block(play, item, bx, bz)) {
             (*Common_Get(clip).structure_clip->setup_actor_proc)(
               (GAME*)play, item, -1,
               base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
@@ -392,7 +402,7 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   }
 
   g_fdinfo->born_actor = FALSE;
-  
+
   if (play->game.pad_initialized == TRUE) {
     if (birth_control->setup_actor_flag) {
       aBC_deleteActor_part(play, ACTOR_PART_ITEM);

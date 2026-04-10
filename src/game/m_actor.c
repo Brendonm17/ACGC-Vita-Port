@@ -244,6 +244,12 @@ static void Actor_draw_ta_clr(ACTOR* actor, GAME_PLAY* play) {
     CLOSE_DISP(g);
 }
 
+#ifdef TARGET_VITA
+// no-op: lighting cache caused flicker on vita
+extern void Actor_lit_cache_reset(void) {
+}
+#endif
+
 static void Actor_draw(GAME_PLAY* play, ACTOR* actor) {
     LightsN* lights;
     lights = Global_light_read(&play->global_light, play->game.graph);
@@ -282,12 +288,12 @@ extern int Actor_draw_actor_no_culling_check2(ACTOR* actor, xyz_t* camera_pos, f
     f32 height = actor->cull_height;
 
 #ifdef TARGET_VITA
-    // free cam sees slightly further than normal; pre-spawning covers the rest
+    // free cam: widen cull bounds so widescreen adjacent-block actors don't pop
     if (g_pc_settings.free_cam) {
-        dist *= 1.3f;
-        width *= 1.2f;
-        radius *= 1.2f;
-        height *= 1.2f;
+        dist *= 3.0f;
+        width *= 3.0f;
+        radius *= 3.0f;
+        height *= 2.0f;
     }
 #endif
 
@@ -330,7 +336,8 @@ static void Actor_delete_check(ACTOR* actor, GAME* game) {
         if (actor->npc_id != EMPTY_NO) {
             if (actor->block_x >= 0 && actor->block_z >= 0) {
 #ifdef TARGET_VITA
-                if (g_pc_settings.free_cam) {
+                // free cam: keep non-npc actors alive within 2 blocks for widescreen
+                if (g_pc_settings.free_cam && actor->part != ACTOR_PART_NPC) {
                     int dx = actor->block_x - play->block_table.block_x;
                     int dz = actor->block_z - play->block_table.block_z;
                     if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) return;
@@ -493,8 +500,7 @@ extern void Actor_info_call_actor(GAME_PLAY* play, Actor_info* actor_info) {
                 } else {
                     play->game.doing_point_specific = 160;
 #ifdef TARGET_VITA
-                    // skip expensive per-frame cache updates for distant idle actors
-                    // these calcs feed mv_proc which doesn't run for culled non-NPC actors anyway
+                    // skip per-frame updates for distant idle actors
                     if (actor->block_x >= 0 &&
                         !(actor->state_bitfield & (ACTOR_STATE_NO_MOVE_WHILE_CULLED | ACTOR_STATE_NO_CULL)) &&
                         actor->part != ACTOR_PART_NPC) {

@@ -619,6 +619,17 @@ void pc_gx_submit_frame(void) {
     int last_lighting_valid = 0;
     int last_konst_valid    = 0;
 
+    // consume the force-resync flag set by the PC_NOOP_FULL_STATE_INVALIDATE
+    // tag. this also invalidates gl_cache so the first draw re-binds all
+    // textures and re-applies wrap/filter state that the prerender rect's
+    // sampler parameters may have left in the driver.
+    extern int g_vita_force_state_resync;
+    if (g_vita_force_state_resync) {
+        gl_cache_reset();
+        gl_cache_reset_textures();
+        g_vita_force_state_resync = 0;
+    }
+
     // viewport/scissor input cache. skips the per-draw scale/4:3/widescreen
     // math when the raw inputs match the previous draw. the GL calls are
     // already cached downstream but the math still runs every draw.
@@ -1373,10 +1384,24 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
             // resolve itself is dozens of small function calls per draw.
             // g_gx.tev_resolved_* persists across calls so the prior
             // result is still present and can be reused on a cache hit.
+            // the cache key must include every input the resolve reads:
+            // stages, tev_colors, AND tev_k_colors (via GX_CC_KONST /
+            // GX_CA_KONST paths). missing k_colors here caused a one-
+            // frame wrong-color flash on non-player house roofs every
+            // time a menu closed.
             static PCGXTevStage last_resolved_stages[PC_GX_MAX_TEV_STAGES];
             static float last_resolved_colors[4][4];
+            static float last_resolved_k_colors[4][4];
             static int last_resolved_num = -1;
             static int last_resolved_valid = 0;
+
+            // PC_NOOP_FULL_STATE_INVALIDATE tag invalidates this cache
+            // by clearing last_resolved_valid so the next draw re-runs
+            // resolve from fresh state.
+            extern int g_vita_force_state_resync;
+            if (g_vita_force_state_resync) {
+                last_resolved_valid = 0;
+            }
 
             int n = g_gx.num_tev_stages;
             if (n > PC_GX_MAX_TEV_STAGES) n = PC_GX_MAX_TEV_STAGES;
@@ -1387,7 +1412,9 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
                  __builtin_memcmp(g_gx.tev_stages, last_resolved_stages,
                                   n * sizeof(PCGXTevStage)) == 0) &&
                 __builtin_memcmp(g_gx.tev_colors, last_resolved_colors,
-                                 sizeof(g_gx.tev_colors)) == 0;
+                                 sizeof(g_gx.tev_colors)) == 0 &&
+                __builtin_memcmp(g_gx.tev_k_colors, last_resolved_k_colors,
+                                 sizeof(g_gx.tev_k_colors)) == 0;
 
             if (!matches) {
                 for (int s = 0; s < n; s++) {
@@ -1437,6 +1464,8 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
                 }
                 __builtin_memcpy(last_resolved_colors, g_gx.tev_colors,
                                  sizeof(g_gx.tev_colors));
+                __builtin_memcpy(last_resolved_k_colors, g_gx.tev_k_colors,
+                                 sizeof(g_gx.tev_k_colors));
                 last_resolved_valid = 1;
             }
         }
@@ -1652,13 +1681,18 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     cmd_vert_count += count;
     cmd_queue_count++;
 
+    // clear dirty before the cpu-lit restore so the next cmd picks up
+    // the lighting re-mark. previously `g_gx.dirty = 0` was below the
+    // restore, which erased the DIRTY_LIGHTING bit we just set, so the
+    // next non-cpu-lit draw kept the cpu-lit lighting snapshot state
+    // and rendered with wrong lighting uniforms for one frame.
+    g_gx.dirty = 0;
     if (vita_cpu_lit_active) {
         g_gx.chan_ctrl_enable[0] = saved_enable;
         g_gx.chan_ctrl_mat_src[0] = saved_mat;
         g_gx.chan_ctrl_mat_src[1] = saved_amat;
         g_gx.dirty |= PC_GX_DIRTY_LIGHTING;
     }
-    g_gx.dirty = 0;
 
     vita_timing.flush_us += sceKernelGetProcessTimeLow() - _flush_t0;
 }

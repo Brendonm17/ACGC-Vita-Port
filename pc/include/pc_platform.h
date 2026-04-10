@@ -117,7 +117,18 @@ void pc_platform_update_window_size(void);
  *   ON (0xAC5701) -> 1, OFF (0xAC5700) -> 2. emu64 reads these during DL processing. */
 #define PC_NOOP_WIDESCREEN_STRETCH     0xAC5701u
 #define PC_NOOP_WIDESCREEN_STRETCH_OFF 0xAC5700u
+/* --- Full state invalidate marker ---
+ * Emitted by m_play.c around the prerendered menu background rect. The rect
+ * uses COPY mode and ends up sharing TEV/shader state with some world draws,
+ * so the first world draw after the menu closes can inherit stale uniform
+ * values. emu64 treats this tag as a request to set g_gx.dirty = ALL so the
+ * next draw re-snapshots every uniform field from fresh g_gx state. */
+#define PC_NOOP_FULL_STATE_INVALIDATE  0xAC5702u
 extern int g_pc_widescreen_stretch;
+
+/* Sets g_gx.dirty = PC_GX_DIRTY_ALL. Safe to call from emu64 code that
+ * doesn't include pc_gx_internal.h. Defined in pc_gx.c. */
+void pc_gx_invalidate_all_state(void);
 
 /* --- Functions --- */
 void pc_platform_init(void);

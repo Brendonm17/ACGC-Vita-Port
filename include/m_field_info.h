@@ -323,6 +323,9 @@ extern void mFI_InitMoveActorBitData();
 extern void mFI_SetPlayerWade(GAME* game);
 extern int mFI_CheckPlayerWade(int wade);
 extern int mFI_GetPlayerWade();
+#ifdef TARGET_VITA
+extern void mFI_trigger_freecam_wade(void);
+#endif
 extern int mFI_GetNextBlockNum(int* bx, int* bz);
 extern u16* mFI_GetDepositP(int bx, int bz);
 extern void mFI_ClearDeposit(int bx, int bz);
