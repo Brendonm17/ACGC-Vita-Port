@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -308,6 +309,7 @@ static void pc_save_rotate_backups(const char* base_path) {
     }
 }
 
+// returns mCD_TRANS_ERR code for proper NPC error messages
 static int pc_save_write_gci_to(const char* gci_path) {
     FILE* fp;
     u8* file_data;
@@ -317,7 +319,7 @@ static int pc_save_write_gci_to(const char* gci_path) {
     u8* others_ptr;
     char tmp_path[300];
 
-    if (!pc_save_ready) return TRUE;
+    if (!pc_save_ready) return mCD_TRANS_ERR_NONE;
 
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", gci_path);
 
@@ -334,7 +336,7 @@ static int pc_save_write_gci_to(const char* gci_path) {
     mFRm_SetSaveCheckData(Save_GetPointer(save_check));
 
     file_data = (u8*)calloc(1, GCI_FILE_DATA_SIZE);
-    if (!file_data) return FALSE;
+    if (!file_data) return mCD_TRANS_ERR_IOERROR;
 
     others_ptr = file_data + GCI_OTHERS_OFFSET;
     {
@@ -406,18 +408,20 @@ static int pc_save_write_gci_to(const char* gci_path) {
 
     fp = fopen(tmp_path, "wb");
     if (!fp) {
-        OSReport("[PC] GCI save: failed to open temp file '%s'\n", tmp_path);
+        int err = errno;
+        OSReport("[PC] GCI save: fopen('%s') failed (errno=%d)\n", tmp_path, err);
         free(file_data);
-        return FALSE;
+        return (err == ENOSPC) ? mCD_TRANS_ERR_NO_SPACE : mCD_TRANS_ERR_IOERROR;
     }
 
     if (fwrite(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1 ||
         fwrite(file_data, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
-        OSReport("[PC] GCI save: fwrite failed (disk full?)\n");
+        int err = errno;
+        OSReport("[PC] GCI save: fwrite failed (errno=%d)\n", err);
         fclose(fp);
         remove(tmp_path);
         free(file_data);
-        return FALSE;
+        return (err == ENOSPC) ? mCD_TRANS_ERR_NO_SPACE : mCD_TRANS_ERR_IOERROR;
     }
 
     fflush(fp);
@@ -433,12 +437,12 @@ static int pc_save_write_gci_to(const char* gci_path) {
             rename(bak1, gci_path);
         }
         remove(tmp_path);
-        return FALSE;
+        return mCD_TRANS_ERR_IOERROR;
     }
 
     OSReport("[PC] GCI save: written to '%s'\n", gci_path);
     pc_save_loaded = 1;
-    return TRUE;
+    return mCD_TRANS_ERR_NONE;
 }
 
 static int pc_save_write_gci(void) {
@@ -683,19 +687,18 @@ void mCD_LoadLand(void) {
 
 int mCD_SaveHome_bg(int param_1, int* chan) {
     int is_visiting = (Common_Get(player_no) == mPr_FOREIGNER);
-    int result;
+    int err;
     if (is_visiting && l_slot_b_gci_path[0]) {
-        result = pc_save_write_gci_to(l_slot_b_gci_path);
+        err = pc_save_write_gci_to(l_slot_b_gci_path);
         if (chan) *chan = mCD_SLOT_B;
     } else {
-        result = pc_save_write_gci();
+        err = pc_save_write_gci();
         if (chan) *chan = mCD_SLOT_A;
     }
-    if (!result) {
-        OSReport("[PC] mCD_SaveHome_bg: save failed!\n");
-        return mCD_TRANS_ERR_IOERROR;
+    if (err != mCD_TRANS_ERR_NONE) {
+        OSReport("[PC] mCD_SaveHome_bg: save failed (err=%d)\n", err);
     }
-    return mCD_TRANS_ERR_NONE;
+    return err;
 }
 
 void mCD_toNextLand(void) {
@@ -909,6 +912,7 @@ int mCD_CheckStation_bg(s32* chan) {
 
 int mCD_SaveStation_NextLand_bg(s32* chan) {
     int is_foreigner = (Common_Get(player_no) == mPr_FOREIGNER);
+    int err;
 
     if (is_foreigner) {
         // returning home: save visited town to slot B, load home from slot A
@@ -922,10 +926,11 @@ int mCD_SaveStation_NextLand_bg(s32* chan) {
         if (chan) *chan = mCD_SLOT_A;
     } else {
         // going to visit: save home to slot A, load slot B into keeps
-        if (!pc_save_write_gci()) {
+        err = pc_save_write_gci();
+        if (err != mCD_TRANS_ERR_NONE) {
             OSReport("[PC] SaveStation: home save failed, aborting trip\n");
             if (chan) *chan = mCD_SLOT_A;
-            return mCD_TRANS_ERR_IOERROR;
+            return err;
         }
 
         // save the current player's private data for use as foreigner
