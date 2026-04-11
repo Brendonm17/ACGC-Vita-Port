@@ -73,9 +73,9 @@ static void card_slot_free(CARDFileInfo_PC* fi) {
 }
 
 #ifdef TARGET_VITA
-static char save_dir[256] = "ux0:data/AnimalCrossing/saves";
+static char save_dir[256] = "ux0:data/AnimalCrossing/saves/slot_a";
 #else
-static char save_dir[256] = "save";
+static char save_dir[256] = "save/slot_a";
 #endif
 static int card_mounted[2] = {0, 0};
 

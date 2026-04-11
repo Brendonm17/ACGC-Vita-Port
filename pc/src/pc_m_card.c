@@ -1,4 +1,5 @@
-/* pc_m_card.c - memory card manager: GCI save/load, village generation, ARAM data blocks */
+// pc_m_card.c
+// memory card manager: GCI save/load, village generation, ARAM data, town visiting
 #include "m_card.h"
 #include "m_start_data_init.h"
 #include "m_common_data.h"
@@ -11,6 +12,14 @@
 #include "m_font.h"
 #include "m_vibctl.h"
 #include "m_bg_item.h"
+#include "m_event.h"
+#include "m_time.h"
+#include "m_land.h"
+#include "m_private.h"
+#include "m_diary.h"
+#include "m_needlework.h"
+#include "lb_rtc.h"
+#include "sys_math3d.h"
 #include "pc_save_bswap.h"
 #include "game.h"
 
@@ -20,6 +29,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 #ifdef _WIN32
 #include <direct.h>  /* _mkdir */
 #endif
@@ -29,13 +39,15 @@
 #include <dolphin/os.h>  /* OSReport */
 
 #ifdef TARGET_VITA
-#define PC_GCI_PATH     "ux0:data/AnimalCrossing/saves/DobutsunomoriP_MURA.gci"
-#define PC_GCI_TMP_PATH "ux0:data/AnimalCrossing/saves/DobutsunomoriP_MURA.gci.tmp"
-#define PC_SAVE_DIR     "ux0:data/AnimalCrossing/saves"
+#define PC_GCI_PATH     "ux0:data/AnimalCrossing/saves/slot_a/DobutsunomoriP_MURA.gci"
+#define PC_GCI_TMP_PATH "ux0:data/AnimalCrossing/saves/slot_a/DobutsunomoriP_MURA.gci.tmp"
+#define PC_SAVE_DIR     "ux0:data/AnimalCrossing/saves/slot_a"
+#define PC_SLOT_B_DIR   "ux0:data/AnimalCrossing/saves/slot_b"
 #else
-#define PC_GCI_PATH     "save/DobutsunomoriP_MURA.gci"
-#define PC_GCI_TMP_PATH "save/DobutsunomoriP_MURA.gci.tmp"
-#define PC_SAVE_DIR     "save"
+#define PC_GCI_PATH     "save/slot_a/DobutsunomoriP_MURA.gci"
+#define PC_GCI_TMP_PATH "save/slot_a/DobutsunomoriP_MURA.gci.tmp"
+#define PC_SAVE_DIR     "save/slot_a"
+#define PC_SLOT_B_DIR   "save/slot_b"
 #endif
 #define PC_SAVE_MAX_BACKUPS 3
 
@@ -48,6 +60,15 @@
 
 int pc_save_loaded = 0;
 static int pc_save_ready = 0;
+
+// town visiting state (slot B)
+static Save l_keepSave __attribute__((aligned(32)));
+static int l_keepSave_set = FALSE;
+static mCD_keep_mail_c l_keepMail __attribute__((aligned(32)));
+static mCD_keep_original_c l_keepOriginal __attribute__((aligned(32)));
+static mCD_keep_diary_c l_keepDiary __attribute__((aligned(32)));
+static Private_c l_foreigner_priv;
+static char l_slot_b_gci_path[300];
 
 /* ARAM data blocks (mail/diary/original designs) -malloc'd instead of ARAM DMA */
 
@@ -159,6 +180,110 @@ static void put_be16(u8* dst, u16 val) {
     dst[1] = (u8)(val);
 }
 
+static void pc_init_original_entries(void* block) {
+    mCD_keep_original_c* keep = (mCD_keep_original_c*)block;
+    int i, j;
+    for (i = 0; i < mCD_KEEP_ORIGINAL_PAGE_COUNT; i++) {
+        mem_clear(keep->folder_names[i], sizeof(keep->folder_names[i]), CHAR_SPACE);
+        for (j = 0; j < mCD_KEEP_ORIGINAL_COUNT; j++) {
+            mNW_InitOriginalData(&keep->original[i][j]);
+        }
+    }
+}
+
+static int pc_str_ends_with_gci(const char* name) {
+    size_t n = strlen(name);
+    if (n < 5) return FALSE;
+    const char* ext = name + n - 4;
+    return (ext[0] == '.' &&
+            (ext[1] == 'g' || ext[1] == 'G') &&
+            (ext[2] == 'c' || ext[2] == 'C') &&
+            (ext[3] == 'i' || ext[3] == 'I'));
+}
+
+static int pc_slot_b_find_gci(char* out_path, size_t len) {
+    DIR* dir = opendir(PC_SLOT_B_DIR);
+    struct dirent* ent;
+    if (!dir) {
+        OSReport("[PC] slot B: directory '%s' not found\n", PC_SLOT_B_DIR);
+        return FALSE;
+    }
+    while ((ent = readdir(dir)) != NULL) {
+        if (pc_str_ends_with_gci(ent->d_name)) {
+            snprintf(out_path, len, "%s/%s", PC_SLOT_B_DIR, ent->d_name);
+            closedir(dir);
+            return TRUE;
+        }
+    }
+    closedir(dir);
+    return FALSE;
+}
+
+// read a GCI into the keep buffers (for town visiting)
+static int pc_save_read_gci_into_keep(const char* path) {
+    FILE* fp;
+    CARDDir dir_hdr;
+    u8* file_data;
+    Save_t* save_src;
+    u32 offset;
+
+    fp = fopen(path, "rb");
+    if (!fp) {
+        OSReport("[PC] slot B: fopen('%s') failed\n", path);
+        return FALSE;
+    }
+
+    if (fread(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1) {
+        fclose(fp);
+        return FALSE;
+    }
+    if (memcmp(dir_hdr.gameName, "GAFE", 4) != 0) {
+        OSReport("[PC] slot B: not a USA AC save ('%.4s')\n", dir_hdr.gameName);
+        fclose(fp);
+        return FALSE;
+    }
+
+    file_data = (u8*)malloc(GCI_FILE_DATA_SIZE);
+    if (!file_data) { fclose(fp); return FALSE; }
+
+    if (fread(file_data, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
+        fclose(fp);
+        free(file_data);
+        return FALSE;
+    }
+    fclose(fp);
+
+    // extract save
+    save_src = (Save_t*)(file_data + GCI_SAVE_MAIN_OFFSET);
+    memcpy(&l_keepSave.save, save_src, sizeof(Save_t));
+    pc_save_bswap(&l_keepSave.save, PC_BSWAP_FROM_BE);
+
+    // extract ARAM blocks into keep buffers
+    {
+        u8* others_ptr = file_data + GCI_OTHERS_OFFSET;
+        offset = sizeof(MemcardHeader_c) + 32;
+
+        offset = ALIGN_NEXT(offset, 32);
+        memcpy(&l_keepOriginal, others_ptr + offset, l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL]);
+        pc_save_bswap_keep_original(&l_keepOriginal, PC_BSWAP_FROM_BE);
+        offset += l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL];
+
+        offset = ALIGN_NEXT(offset, 32);
+        memcpy(&l_keepMail, others_ptr + offset, l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL]);
+        pc_save_bswap_keep_mail(&l_keepMail, PC_BSWAP_FROM_BE);
+        offset += l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL];
+
+        offset = ALIGN_NEXT(offset, 32);
+        memcpy(&l_keepDiary, others_ptr + offset, l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY]);
+        pc_save_bswap_keep_diary(&l_keepDiary, PC_BSWAP_FROM_BE);
+    }
+
+    free(file_data);
+    l_keepSave_set = TRUE;
+    OSReport("[PC] slot B: loaded keep save from '%s'\n", path);
+    return TRUE;
+}
+
 /* rotate backups: .bak3→delete, .bak2→.bak3, .bak1→.bak2, current→.bak1 */
 static void pc_save_rotate_backups(const char* base_path) {
     char older[300], newer[300];
@@ -183,15 +308,18 @@ static void pc_save_rotate_backups(const char* base_path) {
     }
 }
 
-static int pc_save_write_gci(void) {
+static int pc_save_write_gci_to(const char* gci_path) {
     FILE* fp;
     u8* file_data;
     CARDDir dir_hdr;
     Save_t* save_copy;
     u16 checksum;
     u8* others_ptr;
+    char tmp_path[300];
 
     if (!pc_save_ready) return TRUE;
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", gci_path);
 
 #ifdef _WIN32
     _mkdir(PC_SAVE_DIR);
@@ -208,7 +336,6 @@ static int pc_save_write_gci(void) {
     file_data = (u8*)calloc(1, GCI_FILE_DATA_SIZE);
     if (!file_data) return FALSE;
 
-    /* Others block (offset 0) -comment, banner, ARAM blocks */
     others_ptr = file_data + GCI_OTHERS_OFFSET;
     {
         const char* title = "DobutsunomoriP (AC PC Port)";
@@ -218,9 +345,8 @@ static int pc_save_write_gci(void) {
         memcpy(comment + 32, Save_Get(land_info).name, 8);
     }
 
-    /* ARAM blocks: original, mail, diary */
     {
-        u32 offset = sizeof(MemcardHeader_c) + 32; /* 0x1460 */
+        u32 offset = sizeof(MemcardHeader_c) + 32;
         offset = ALIGN_NEXT(offset, 32);
         if (l_aram_block_p_table[mCD_ARAM_DATA_ORIGINAL]) {
             memcpy(others_ptr + offset, l_aram_block_p_table[mCD_ARAM_DATA_ORIGINAL],
@@ -245,7 +371,6 @@ static int pc_save_write_gci(void) {
         }
     }
 
-    /* Main Save_t (offset 0x26000) */
     save_copy = (Save_t*)(file_data + GCI_SAVE_MAIN_OFFSET);
     memcpy(save_copy, &common_data.save.save, sizeof(Save_t));
 
@@ -258,10 +383,8 @@ static int pc_save_write_gci(void) {
     checksum = pc_checksum_be((const u8*)save_copy, sizeof(Save_t), 0);
     put_be16((u8*)&save_copy->save_check.checksum, checksum);
 
-    /* Backup = copy of main */
     memcpy(file_data + GCI_SAVE_BACK_OFFSET, file_data + GCI_SAVE_MAIN_OFFSET, sizeof(Save));
 
-    /* CARDDir header */
     memset(&dir_hdr, 0, sizeof(dir_hdr));
     memcpy(dir_hdr.gameName, "GAFE", 4);
     memcpy(dir_hdr.company, "01", 2);
@@ -281,10 +404,9 @@ static int pc_save_write_gci(void) {
     put_be16((u8*)&dir_hdr.length, (u16)(GCI_FILE_DATA_SIZE / GCI_SECTOR_SIZE));
     put_be32((u8*)&dir_hdr.commentAddr, 0);
 
-    /* write temp file → rotate backups → rename */
-    fp = fopen(PC_GCI_TMP_PATH, "wb");
+    fp = fopen(tmp_path, "wb");
     if (!fp) {
-        OSReport("[PC] GCI save: failed to open temp file '%s'\n", PC_GCI_TMP_PATH);
+        OSReport("[PC] GCI save: failed to open temp file '%s'\n", tmp_path);
         free(file_data);
         return FALSE;
     }
@@ -293,7 +415,7 @@ static int pc_save_write_gci(void) {
         fwrite(file_data, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
         OSReport("[PC] GCI save: fwrite failed (disk full?)\n");
         fclose(fp);
-        remove(PC_GCI_TMP_PATH);
+        remove(tmp_path);
         free(file_data);
         return FALSE;
     }
@@ -302,23 +424,25 @@ static int pc_save_write_gci(void) {
     fclose(fp);
     free(file_data);
 
-    pc_save_rotate_backups(PC_GCI_PATH);
-    if (rename(PC_GCI_TMP_PATH, PC_GCI_PATH) != 0) {
-        OSReport("[PC] GCI save: rename '%s' → '%s' failed, recovering...\n",
-                 PC_GCI_TMP_PATH, PC_GCI_PATH);
-        /* restore .bak1 so the save isn't orphaned */
+    pc_save_rotate_backups(gci_path);
+    if (rename(tmp_path, gci_path) != 0) {
+        OSReport("[PC] GCI save: rename failed, recovering...\n");
         {
             char bak1[300];
-            snprintf(bak1, sizeof(bak1), "%s.bak1", PC_GCI_PATH);
-            rename(bak1, PC_GCI_PATH);
+            snprintf(bak1, sizeof(bak1), "%s.bak1", gci_path);
+            rename(bak1, gci_path);
         }
-        remove(PC_GCI_TMP_PATH);
+        remove(tmp_path);
         return FALSE;
     }
 
-    OSReport("[PC] GCI save: written successfully (backups rotated)\n");
+    OSReport("[PC] GCI save: written to '%s'\n", gci_path);
     pc_save_loaded = 1;
     return TRUE;
+}
+
+static int pc_save_write_gci(void) {
+    return pc_save_write_gci_to(PC_GCI_PATH);
 }
 
 static int pc_save_read_gci(const char* path) {
@@ -558,8 +682,15 @@ void mCD_LoadLand(void) {
 }
 
 int mCD_SaveHome_bg(int param_1, int* chan) {
-    int result = pc_save_write_gci();
-    if (chan) *chan = mCD_SLOT_A;
+    int is_visiting = (Common_Get(player_no) == mPr_FOREIGNER);
+    int result;
+    if (is_visiting && l_slot_b_gci_path[0]) {
+        result = pc_save_write_gci_to(l_slot_b_gci_path);
+        if (chan) *chan = mCD_SLOT_B;
+    } else {
+        result = pc_save_write_gci();
+        if (chan) *chan = mCD_SLOT_A;
+    }
     if (!result) {
         OSReport("[PC] mCD_SaveHome_bg: save failed!\n");
         return mCD_TRANS_ERR_IOERROR;
@@ -567,38 +698,271 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
     return mCD_TRANS_ERR_NONE;
 }
 
-void mCD_toNextLand(void) {}
+void mCD_toNextLand(void) {
+    mCD_persistent_data_c persis;
+    Save_t* save = &l_keepSave.save;
+    int scene_no = Save_Get(scene_no);
+    int last_scene_no;
+    mLd_land_info_c* land_info;
+    mActor_name_t last_field_id;
+    s16 demo_profile[2];
+    Time_c time;
+    Transition_c transition;
+    int rtc_enabled;
+    int was_foreigner;
+
+    if (l_keepSave_set != TRUE) return;
+
+    land_info = &save->land_info;
+    if (mLd_CheckId(land_info->id) != TRUE) return;
+    if (mFRm_ReturnCheckSum((u16*)save, sizeof(Save)) != 0) return;
+
+    was_foreigner = (Common_Get(player_no) == mPr_FOREIGNER);
+
+    // snapshot persistent state
+    bcopy(Common_GetPointer(travel_persistent_data), &persis, sizeof(persis));
+    last_scene_no = Common_Get(last_scene_no);
+    last_field_id = Common_Get(last_field_id);
+    bcopy(Common_Get(demo_profiles), demo_profile, sizeof(demo_profile));
+    bcopy(Common_GetPointer(time), &time, sizeof(time));
+    bcopy(Common_GetPointer(transition), &transition, sizeof(transition));
+
+    // wipe all common data
+    bzero(&common_data, sizeof(common_data_t));
+
+    // restore persistent state
+    bcopy(&persis, Common_GetPointer(travel_persistent_data), sizeof(persis));
+    Common_Set(last_field_id, last_field_id);
+    Common_Set(last_scene_no, last_scene_no);
+    bcopy(demo_profile, Common_Get(demo_profiles), sizeof(demo_profile));
+    bcopy(&time, Common_GetPointer(time), sizeof(time));
+    bcopy(&transition, Common_GetPointer(transition), sizeof(transition));
+
+    // load the destination town's save
+    bcopy(save, Common_GetPointer(save), sizeof(Save));
+    Common_Set(copy_protect, Save_Get(copy_protect));
+    Save_Set(scene_no, scene_no);
+
+    // RTC
+    rtc_enabled = Common_Get(time.rtc_enabled);
+    Common_Set(time.rtc_enabled, TRUE);
+    mTM_rtcTime_limit_check();
+    Common_Set(time.rtc_enabled, rtc_enabled);
+    lbRTC_GetTime(Common_GetPointer(time.rtc_time));
+
+    if (was_foreigner) {
+        // returning home: merge updated inventory into home save's player slot
+        Private_c* home_priv = Save_GetPointer(private_data[mPr_PLAYER_0]);
+        mPr_CopyPrivateInfo(home_priv, &l_foreigner_priv);
+        home_priv->exists = TRUE;
+        Common_Set(now_private, home_priv);
+        Common_Set(player_no, mPr_PLAYER_0);
+    } else {
+        // going to visit: set up as foreigner with current inventory
+        Common_Set(now_private, &l_foreigner_priv);
+        Common_Set(player_no, mPr_FOREIGNER);
+        // foreigner-specific init (normally runs in mSDI_StartInitPak/After)
+        mNpc_SetRemoveAnimalNo(Save_GetPointer(remove_animal_idx), Save_Get(animals), -1);
+        mNpc_SetReturnAnimal(mNpc_GetInAnimalP());
+        mNpc_SendRegisteredGoodbyMail();
+        mPr_SendForeingerAnimalMail(Common_Get(now_private));
+        mPr_RenewalMapInfo(Common_Get(now_private)->maps, mPr_FOREIGN_MAP_COUNT,
+                           Save_GetPointer(land_info));
+    }
+
+    Common_Set(auto_nwrite_set, FALSE);
+    bzero(Common_GetPointer(auto_nwrite_time), sizeof(Common_Get(auto_nwrite_time)));
+    Common_Set(ball_pos, ZeroVec);
+
+    // clear game state
+    mTM_clear_renew_is();
+    mEv_ClearEventInfo();
+    mEv_toland_clear_common();
+    // trigger train arrival sequence at destination
+    mEv_SetGateway();
+    mNpc_ClearInAnimal();
+    mNpc_FirstClearGoodbyMail();
+    mQst_ClearGrabItemInfo();
+    bzero(Common_Get(npc_schedule), sizeof(Common_Get(npc_schedule)));
+    mISL_ClearKeepIsland();
+    mNpc_ClearCacheName();
+
+    Common_Set(submenu_disabled, TRUE);
+
+    // check save integrity
+    if (mFRm_CheckSaveData_common(Save_GetPointer(save_check), Save_Get(land_info).id)) {
+        if (Save_Get(save_check).version == 5) {
+            bcopy(&Save_Get(save_check).time, Save_GetPointer(saved_auto_nwrite_time),
+                  sizeof(lbRTC_time_c));
+        }
+    }
+
+    // load ARAM keep data
+    if (mFRm_ReturnCheckSum((u16*)&l_keepMail, l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL]) == 0) {
+        mCD_save_data_main_to_aram(&l_keepMail, l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL],
+                                   mCD_ARAM_DATA_MAIL);
+    }
+    pc_init_mail_entries(&l_keepMail);
+
+    if (mFRm_ReturnCheckSum((u16*)&l_keepOriginal,
+                            l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL]) == 0) {
+        mCD_save_data_main_to_aram(&l_keepOriginal, l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL],
+                                   mCD_ARAM_DATA_ORIGINAL);
+    }
+    pc_init_original_entries(&l_keepOriginal);
+
+    if (mFRm_ReturnCheckSum((u16*)&l_keepDiary, l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY]) == 0) {
+        mCD_save_data_main_to_aram(&l_keepDiary, l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY],
+                                   mCD_ARAM_DATA_DIARY);
+    }
+    pc_init_diary_entries(&l_keepDiary);
+
+    // clear keep state
+    bzero(&l_keepSave, sizeof(Save));
+    l_keepSave_set = FALSE;
+
+    OSReport("[PC] mCD_toNextLand: context switch complete\n");
+}
 
 void mCD_ReCheckLoadLand(GAME_PLAY* play) {
     (void)play;
 }
 
 int mCD_CheckStation_bg(s32* chan) {
-    if (chan) *chan = mCD_SLOT_A;
-    return mCD_TRANS_ERR_NONE;
+    int is_foreigner = (Common_Get(player_no) == mPr_FOREIGNER);
+
+    if (is_foreigner) {
+        // returning home: validate slot A save exists
+        struct stat st;
+        if (stat(PC_GCI_PATH, &st) != 0) {
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_NO_TOWN_DATA;
+        }
+        if (chan) *chan = mCD_SLOT_A;
+        return mCD_TRANS_ERR_NONE_NEXTLAND;
+    }
+
+    // going to visit: scan slot B for a GCI
+    if (!pc_slot_b_find_gci(l_slot_b_gci_path, sizeof(l_slot_b_gci_path))) {
+        if (chan) *chan = mCD_SLOT_A;
+        return mCD_TRANS_ERR_NO_TOWN_DATA;
+    }
+
+    // validate the slot B GCI
+    {
+        FILE* fp;
+        CARDDir dir_hdr;
+        u8* save_buf;
+        Save_t* save_check;
+        int valid = FALSE;
+
+        fp = fopen(l_slot_b_gci_path, "rb");
+        if (!fp) {
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_NO_TOWN_DATA;
+        }
+
+        if (fread(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1 ||
+            memcmp(dir_hdr.gameName, "GAFE", 4) != 0) {
+            fclose(fp);
+            l_slot_b_gci_path[0] = '\0';
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_CORRUPT;
+        }
+
+        save_buf = (u8*)malloc(GCI_FILE_DATA_SIZE);
+        if (!save_buf) { fclose(fp); if (chan) *chan = mCD_SLOT_A; return mCD_TRANS_ERR_IOERROR; }
+
+        if (fread(save_buf, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
+            fclose(fp);
+            free(save_buf);
+            l_slot_b_gci_path[0] = '\0';
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_CORRUPT;
+        }
+        fclose(fp);
+
+        // byte-swap in place to validate (save_buf is freed after)
+        save_check = (Save_t*)(save_buf + GCI_SAVE_MAIN_OFFSET);
+        pc_save_bswap(save_check, PC_BSWAP_FROM_BE);
+
+        if (mLd_CheckId(save_check->land_info.id) == TRUE &&
+            mFRm_ReturnCheckSum((u16*)save_check, sizeof(Save)) == 0) {
+            if (mLd_CheckThisLand(save_check->land_info.name, save_check->land_info.id) == FALSE) {
+                valid = TRUE;
+            }
+        }
+
+        free(save_buf);
+
+        if (!valid) {
+            l_slot_b_gci_path[0] = '\0';
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_NO_TOWN_DATA;
+        }
+    }
+
+    OSReport("[PC] CheckStation: found valid town in '%s'\n", l_slot_b_gci_path);
+    if (chan) *chan = mCD_SLOT_B;
+    return mCD_TRANS_ERR_NONE_NEXTLAND;
 }
 
 int mCD_SaveStation_NextLand_bg(s32* chan) {
-    if (chan) *chan = mCD_SLOT_A;
+    int is_foreigner = (Common_Get(player_no) == mPr_FOREIGNER);
+
+    if (is_foreigner) {
+        // returning home: save visited town to slot B, load home from slot A
+        if (l_slot_b_gci_path[0]) {
+            pc_save_write_gci_to(l_slot_b_gci_path);
+        }
+        if (!pc_save_read_gci_into_keep(PC_GCI_PATH)) {
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_IOERROR;
+        }
+        if (chan) *chan = mCD_SLOT_A;
+    } else {
+        // going to visit: save home to slot A, load slot B into keeps
+        if (!pc_save_write_gci()) {
+            OSReport("[PC] SaveStation: home save failed, aborting trip\n");
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_IOERROR;
+        }
+
+        // save the current player's private data for use as foreigner
+        mPr_CopyPrivateInfo(&l_foreigner_priv, Now_Private);
+
+        if (!pc_save_read_gci_into_keep(l_slot_b_gci_path)) {
+            if (chan) *chan = mCD_SLOT_A;
+            return mCD_TRANS_ERR_IOERROR;
+        }
+        if (chan) *chan = mCD_SLOT_B;
+    }
+
     return mCD_TRANS_ERR_NONE;
 }
 
 int mCD_SaveStation_Passport_bg(s32* chan) {
     if (chan) *chan = mCD_SLOT_A;
-    return mCD_TRANS_ERR_NONE;
+    return mCD_TRANS_ERR_NO_TOWN_DATA;
 }
 
 int mCD_GetThisLandSlotNo(void) {
+    if (Common_Get(player_no) == mPr_FOREIGNER)
+        return mCD_SLOT_B;
     return mCD_SLOT_A;
 }
 
 int mCD_GetThisLandSlotNo_code(int* player_no, s32* slot_card_results) {
     (void)player_no;
     (void)slot_card_results;
+    if (Common_Get(player_no) == mPr_FOREIGNER)
+        return mCD_SLOT_B;
     return mCD_SLOT_A;
 }
 
 int mCD_GetSaveHomeSlotNo(void) {
+    if (Common_Get(player_no) == mPr_FOREIGNER)
+        return mCD_SLOT_B;
     return mCD_SLOT_A;
 }
 
