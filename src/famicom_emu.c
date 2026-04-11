@@ -115,8 +115,8 @@ extern void famicom_emu_main(GAME* famicom) {
 }
 
 extern void famicom_emu_init(GAME* game) {
-#ifdef TARGET_PC
-    /* NES emulators are not implemented on PC — immediately return to room */
+#if defined(TARGET_PC) && !defined(TARGET_VITA)
+    /* NES not implemented on PC */
     game->exec = famicom_emu_main;
     game->cleanup = famicom_emu_cleanup;
     famicom_done = TRUE;
@@ -159,6 +159,19 @@ extern void famicom_emu_init(GAME* game) {
     freeXfbSize = render->fbWidth * render->xfbHeight * sizeof(u16);
 
     my_alloc_init(game, freeXfbBase, freeXfbSize);
+
+#ifdef TARGET_VITA
+    // empty nes console: scan ux0 for custom roms, show picker if any found
+    if (rom_id == 0) {
+        extern int vita_nes_scan_roms(void);
+        extern int vita_nes_show_picker(void);
+        if (vita_nes_scan_roms() > 0) {
+            int picked = vita_nes_show_picker();
+            if (picked >= 0)
+                rom_id = 1;
+        }
+    }
+#endif
 
     if (famicom_init(rom_id, &my_malloc_func, player) != 0) {
         Common_Set(my_room_message_control_flags, Common_Get(my_room_message_control_flags) | 1);

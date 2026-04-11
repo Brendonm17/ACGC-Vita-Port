@@ -310,3 +310,17 @@ s32 CARDFormatAsync(s32 chan, void* callback) {
     if (callback) ((void (*)(s32, s32))callback)(chan, CARD_RESULT_READY);
     return CARD_RESULT_READY;
 }
+
+s32 CARDFastOpen(s32 chan, s32 fileNo, void* fileInfo) {
+    (void)chan; (void)fileNo; (void)fileInfo;
+    return CARD_RESULT_NOFILE;
+}
+s32 CARDGetAttributes(s32 chan, s32 fileNo, u8* attr) {
+    (void)chan; (void)fileNo;
+    if (attr) *attr = 0;
+    return CARD_RESULT_READY;
+}
+s32 CARDSetAttributes(s32 chan, s32 fileNo, u8 attr) {
+    (void)chan; (void)fileNo; (void)attr;
+    return CARD_RESULT_READY;
+}

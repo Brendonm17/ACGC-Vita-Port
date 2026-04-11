@@ -99,6 +99,7 @@ list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/ac_animal_logo_misc\\.c$")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/m_item_debug\\.c$")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/actor/npc/.*_anime\\.c$")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/osreport\\.c$")
+# Famicom C sources: no .c files in Famicom dir, but keep filter in case upstream adds any
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/Famicom/.*")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/MSL_C/.*")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/jaudio_NES/internal/dsp_cardunlock\\.c$")
@@ -118,7 +119,11 @@ list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/dolphin/.*")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/TRK_MINNOW_DOLPHIN/.*")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/Runtime\\.PPCEABI\\.H/.*")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/MSL_C\\.PPCEABI\\.bare\\.H/.*")
-list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/Famicom/.*")
+# Famicom: keep famicom.cpp + famicom_nesinfo.cpp (pure C++, no ASM).
+# Exclude ks_nes_core.cpp (PowerPC ASM CPU) and ks_nes_draw.cpp (GX indirect texturing).
+# Our vita_nes_cpu.c/vita_nes_ppu.c provide complete C replacements.
+list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/ks_nes_core\\.cpp$")
+list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/ks_nes_draw\\.cpp$")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/emu64_print\\.cpp$")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/jsyswrapper_ext\\.cpp$")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/jsyswrapper_main\\.cpp$")
@@ -157,6 +162,9 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_frame.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_banner.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_texpack.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_cpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_ppu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/agnes.c
 
     ${DECOMP_ROOT}/pc/src/pc_gx.c
     ${DECOMP_ROOT}/pc/src/pc_gx_tev.c
