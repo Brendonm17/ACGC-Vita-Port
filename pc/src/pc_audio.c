@@ -44,10 +44,6 @@ static int pc_audio_producer_func(void* data) {
         if (fill < AUDIO_PRODUCE_THRESHOLD) {
             pc_audio_process_frame();
         } else {
-            // sleep one game frame instead of spinning. the ring buffer
-            // holds 512 ms of audio with a 70 ms refill threshold, so the
-            // extra latency stays well above threshold and scheduling
-            // overhead on core 2 drops from ~1000 wakeups/sec to ~62.
             SDL_Delay(16);
         }
     }

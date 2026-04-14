@@ -88,6 +88,7 @@ void VIWaitForRetrace(void) {
         static double acc_swap_ms = 0.0;
         static double acc_pace_ms = 0.0;
         static double acc_emu64_ms = 0.0;
+        static double acc_submit_ms = 0.0;
         static int acc_draws = 0;
         if (fps_start == 0) fps_start = SDL_GetPerformanceCounter();
         fps_count++;
@@ -100,6 +101,7 @@ void VIWaitForRetrace(void) {
 #ifdef TARGET_VITA
             acc_draws += vita_stats.draw_calls;
             acc_emu64_ms += (double)vita_timing.emu64_us / 1000.0;
+            acc_submit_ms += (double)vita_timing.submit_us / 1000.0;
 #else
             acc_draws += pc_gx_draw_call_count;
 #endif
@@ -119,11 +121,13 @@ void VIWaitForRetrace(void) {
 #ifdef VITA_PERF_LOG
             {
                 extern int tex_cache_hits, tex_cache_misses;
-                vita_log("[PERF] %.0ffps frame=%.1fms emu64=%.1fms swap=%.1fms draws=%d hit=%d miss=%d\n",
-                         fps, avg_frame, avg_emu64, avg_swap, avg_draws,
+                double avg_submit = acc_submit_ms / fps_count;
+                vita_log("[PERF] %.0ffps frame=%.1fms emu64=%.1fms submit=%.1fms swap=%.1fms draws=%d hit=%d miss=%d\n",
+                         fps, avg_frame, avg_emu64, avg_submit, avg_swap, avg_draws,
                          tex_cache_hits, tex_cache_misses);
                 tex_cache_hits = 0;
                 tex_cache_misses = 0;
+                acc_submit_ms = 0.0;
             }
 #endif
 #else

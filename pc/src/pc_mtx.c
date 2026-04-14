@@ -73,6 +73,44 @@ void PSMTXInverse(const MtxP src, MtxP inv) {
     memcpy(inv, tmp, 12 * sizeof(f32));
 }
 
+#if defined(TARGET_VITA) && defined(__ARM_NEON__)
+#include <arm_neon.h>
+
+void PSMTXMultVec(const MtxP m, const Vec* src, Vec* dst) {
+    float32x4_t v = {src->x, src->y, src->z, 1.0f};
+    float32x4_t r0 = vld1q_f32(m[0]);
+    float32x4_t r1 = vld1q_f32(m[1]);
+    float32x4_t r2 = vld1q_f32(m[2]);
+    float32x4_t x = vmulq_f32(r0, v);
+    float32x4_t y = vmulq_f32(r1, v);
+    float32x4_t z = vmulq_f32(r2, v);
+    // horizontal add: a+b, c+d, then sum
+    float32x2_t xp = vadd_f32(vget_low_f32(x), vget_high_f32(x));
+    float32x2_t yp = vadd_f32(vget_low_f32(y), vget_high_f32(y));
+    float32x2_t zp = vadd_f32(vget_low_f32(z), vget_high_f32(z));
+    dst->x = vget_lane_f32(vpadd_f32(xp, xp), 0);
+    dst->y = vget_lane_f32(vpadd_f32(yp, yp), 0);
+    dst->z = vget_lane_f32(vpadd_f32(zp, zp), 0);
+}
+
+void PSMTXMultVecSR(const MtxP m, const Vec* src, Vec* dst) {
+    float32x4_t v = {src->x, src->y, src->z, 0.0f};
+    float32x4_t r0 = vld1q_f32(m[0]);
+    float32x4_t r1 = vld1q_f32(m[1]);
+    float32x4_t r2 = vld1q_f32(m[2]);
+    float32x4_t x = vmulq_f32(r0, v);
+    float32x4_t y = vmulq_f32(r1, v);
+    float32x4_t z = vmulq_f32(r2, v);
+    float32x2_t xp = vadd_f32(vget_low_f32(x), vget_high_f32(x));
+    float32x2_t yp = vadd_f32(vget_low_f32(y), vget_high_f32(y));
+    float32x2_t zp = vadd_f32(vget_low_f32(z), vget_high_f32(z));
+    dst->x = vget_lane_f32(vpadd_f32(xp, xp), 0);
+    dst->y = vget_lane_f32(vpadd_f32(yp, yp), 0);
+    dst->z = vget_lane_f32(vpadd_f32(zp, zp), 0);
+}
+
+#else
+
 void PSMTXMultVec(const MtxP m, const Vec* src, Vec* dst) {
     f32 x = m[0][0]*src->x + m[0][1]*src->y + m[0][2]*src->z + m[0][3];
     f32 y = m[1][0]*src->x + m[1][1]*src->y + m[1][2]*src->z + m[1][3];
@@ -86,6 +124,8 @@ void PSMTXMultVecSR(const MtxP m, const Vec* src, Vec* dst) {
     f32 z = m[2][0]*src->x + m[2][1]*src->y + m[2][2]*src->z;
     dst->x = x; dst->y = y; dst->z = z;
 }
+
+#endif
 
 void PSMTXMultVecArray(const MtxP m, const Vec* srcBase, Vec* dstBase, u32 count) {
     for (u32 i = 0; i < count; i++) {
@@ -121,6 +161,22 @@ void PSMTXScaleApply(const MtxP src, MtxP dst, f32 sx, f32 sy, f32 sz) {
 }
 
 void PSVECNormalize(const Vec* src, Vec* dst) {
+#if defined(TARGET_VITA) && defined(__ARM_NEON__)
+    float32x2_t xy = {src->x, src->y};
+    float32x2_t zz = {src->z, 0.0f};
+    float32x2_t d = vmla_f32(vmul_f32(zz, zz), xy, xy);
+    float32x2_t sum = vpadd_f32(d, d);
+    float32x2_t est = vrsqrte_f32(sum);
+    est = vmul_f32(est, vrsqrts_f32(vmul_f32(sum, est), est));
+    f32 inv = vget_lane_f32(est, 0);
+    if (vget_lane_f32(sum, 0) > 0.0f) {
+        dst->x = src->x * inv;
+        dst->y = src->y * inv;
+        dst->z = src->z * inv;
+    } else {
+        dst->x = dst->y = dst->z = 0.0f;
+    }
+#else
     f32 mag = sqrtf(src->x*src->x + src->y*src->y + src->z*src->z);
     if (mag > 0.0f) {
         f32 inv = 1.0f / mag;
@@ -130,6 +186,7 @@ void PSVECNormalize(const Vec* src, Vec* dst) {
     } else {
         dst->x = dst->y = dst->z = 0.0f;
     }
+#endif
 }
 
 void PSVECCrossProduct(const Vec* a, const Vec* b, Vec* dst) {

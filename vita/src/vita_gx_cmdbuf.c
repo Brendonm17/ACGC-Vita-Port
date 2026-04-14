@@ -494,18 +494,18 @@ void pc_gx_submit_frame(void) {
         return;
     }
 
-    // single vertex upload for the entire frame
-    glBufferData(GL_ARRAY_BUFFER, rd_verts * sizeof(PCGXVertex),
-                 cmd_verts_db[rd], GL_STREAM_DRAW);
+    // upload vertices in-place (avoid glBufferData orphan -> GC pressure)
+    glBufferSubData(GL_ARRAY_BUFFER, 0, rd_verts * sizeof(PCGXVertex),
+                    cmd_verts_db[rd]);
 
     vita_set_vertex_attrib_pointers();
 
-    // index buffer is built inline by the worker as it flushes each draw
+    // index buffer: in-place update
     {
         int total_indices = frame_idx_count_db[rd];
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, total_indices * sizeof(GLushort),
-                     frame_indices_db[rd], GL_STREAM_DRAW);
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, total_indices * sizeof(GLushort),
+                        frame_indices_db[rd]);
     }
 
     // pre-dedup pass. clears PROJ/MODELVIEW/TEXTURES/FOG dirty bits on

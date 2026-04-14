@@ -1005,10 +1005,9 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
 #endif
     if (vita_force_uber) goto use_complex;
 
-    // fast path: literal-config hash lookup. catches the bulk of draws
-    // with a single 16-byte key compare instead of the linear cascade.
-    // misses fall through to the pattern-config cascade below.
-    if (tev_lit_built && vita_tev_ops_trivial(state)) {
+    int ops_trivial = vita_tev_ops_trivial(state);
+
+    if (tev_lit_built && ops_trivial) {
         u32 hkey[4];
         hkey[0] = (u32)state->num_tev_stages;
         if (state->num_tev_stages >= 1) {
@@ -1044,7 +1043,7 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
     }
 
     // specialized shader matching
-    if (vita_tev_ops_trivial(state)) {
+    if (ops_trivial) {
         PCGXTevStage* s0 = &state->tev_stages[0];
 
         if (state->num_tev_stages == 2) {

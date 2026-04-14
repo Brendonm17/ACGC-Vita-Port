@@ -290,6 +290,8 @@ static void vita_atexit_cleanup(void) {
 void vita_pin_hidden_threads(void) {
     SceKernelThreadInfo info;
     int misses_in_row = 0;
+    static int dump_done = 0;
+
     for (SceUID uid = 0x40010001; uid < 0x40020000 && misses_in_row < 500; uid++) {
         if (sceKernelGetThreadmgrUIDClass(uid) != SCE_KERNEL_TMID_Thread) {
             misses_in_row++;
@@ -302,23 +304,23 @@ void vita_pin_hidden_threads(void) {
         }
         misses_in_row = 0;
 
-        // skip threads pinned at creation time
+        // skip threads already pinned at creation
         if (strcmp(info.name, "emu64_worker") == 0 ||
             strcmp(info.name, "vtc_io") == 0 ||
-            strcmp(info.name, "AudioProducer") == 0 ||
-            strcmp(info.name, "TexPackLoader") == 0 ||
-            strcmp(info.name, "ACGC00001") == 0) continue;
+            strcmp(info.name, "TexPackLoader") == 0) continue;
 
+        // core 0: main thread (GL submit), SceGxmDisplayQueue (frame present)
+        // core 1: emu64 worker (display list interp)
+        // core 2: audio, GC, timers, misc
         int target = 0;
-        if (strcmp(info.name, "SceGxmDisplayQueue") == 0 ||
-            strcmp(info.name, "SDLTimer") == 0 ||
-            strcmp(info.name, "SceCommonDialogWorker") == 0) {
-            target = SCE_KERNEL_CPU_MASK_USER_1;
-        } else if (strcmp(info.name, "SDLAudioP1") == 0 ||
-                   strcmp(info.name, "SDLAudioC1") == 0) {
+        if (strcmp(info.name, "ACGC00001") == 0 ||
+            strcmp(info.name, "SceGxmDisplayQueue") == 0) {
             target = SCE_KERNEL_CPU_MASK_USER_0;
-        } else if (strcmp(info.name, "Garbage Collector") == 0) {
-            // GC does heavy periodic cleanup, would preempt worker on core 1
+        } else if (strncmp(info.name, "SDLAudio", 8) == 0 ||
+                   strcmp(info.name, "AudioProducer") == 0 ||
+                   strcmp(info.name, "Garbage Collector") == 0 ||
+                   strcmp(info.name, "SDLTimer") == 0 ||
+                   strcmp(info.name, "SceCommonDialogWorker") == 0) {
             target = SCE_KERNEL_CPU_MASK_USER_2;
         }
 
@@ -326,6 +328,8 @@ void vita_pin_hidden_threads(void) {
             sceKernelChangeThreadCpuAffinityMask(uid, target);
         }
     }
+
+    dump_done = 1;
 }
 
 void pc_platform_init(void) {

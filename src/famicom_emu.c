@@ -139,8 +139,6 @@ extern void famicom_emu_main(GAME* famicom) {
             pc_gx_submit_frame();
             cmd_write = 1 - cmd_write;
         } else {
-            // NES active: skip GX submit (result_bufp is garbage),
-            // draw fixNES framebuffer directly
             vita_fixnes_draw_screen();
         }
     }
