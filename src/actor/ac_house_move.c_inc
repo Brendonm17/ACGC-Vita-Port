@@ -95,19 +95,6 @@ static int aHUS_odekake_check(HOUSE_ACTOR* house, GAME_PLAY* play) {
     name = Common_Get(npclist[idx]).name;
     npc_actor_p = Actor_info_fgName_search(&play->actor_info, Common_Get(npclist[idx]).name, ACTOR_PART_NPC);
 
-#ifdef TARGET_PC
-    // door lock override: FIELD=locked, IN_HOUSE/SLEEP=unlocked
-    // (sleep doors open since we now show the villager sleeping inside)
-    if (house->arg3 == mNPS_SCHED_FIELD) {
-        house->arg0_f = 1.0f;
-        return TRUE;
-    }
-    if (house->arg3 == mNPS_SCHED_IN_HOUSE || house->arg3 == mNPS_SCHED_SLEEP) {
-        house->arg0_f = 0.0f;
-        return FALSE;
-    }
-#endif
-
     if (mEvNM_CheckJointEvent(name)) {
         house->arg0_f = 1.0f;
         ret = TRUE;
@@ -282,16 +269,6 @@ static int aHUS_check_player(HOUSE_ACTOR* house, GAME_PLAY* play) {
     name = house->actor_class.npc_id;
     name = name - NPC_HOUSE_START + DUMMY_NPC_HOUSE_000;
     if ((mActor_name_t)player->item_in_front == name && chkTrigger(BUTTON_A)) {
-#ifdef TARGET_PC
-        // use real schedule type since first_job force-outside is removed
-        if (mEv_check_status(mEv_EVENT_HALLOWEEN, mEv_STATUS_ACTIVE)) {
-            house->arg3 = 0;
-        } else {
-            animal_p = aHUS_GET_ANIMAL_P(house);
-            sched_p = mNPS_get_schedule_area(&animal_p->id);
-            house->arg3 = sched_p->current_type;
-        }
-#else
         if ((mEv_CheckFirstJob() == TRUE || mEv_check_status(mEv_EVENT_HALLOWEEN, mEv_STATUS_ACTIVE)) == TRUE) {
             house->arg3 = 0;
         } else {
@@ -299,7 +276,6 @@ static int aHUS_check_player(HOUSE_ACTOR* house, GAME_PLAY* play) {
             sched_p = mNPS_get_schedule_area(&animal_p->id);
             house->arg3 = sched_p->current_type;
         }
-#endif
 
         if (aHUS_odekake_check(house, play)) {
             mDemo_Request(mDemo_TYPE_SPEAK, (ACTOR*)house, &aHUS_set_talk_info_check_player);
