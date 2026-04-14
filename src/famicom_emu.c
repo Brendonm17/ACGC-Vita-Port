@@ -1,4 +1,7 @@
 
+#ifdef TARGET_PC
+#include <stdlib.h>
+#endif
 #include "famicom_emu.h"
 
 #include "Famicom/famicomPriv.h"
@@ -18,6 +21,16 @@ static void* freeXfbBase = NULL;
 static u32 freeXfbSize = 0;
 
 static void my_alloc_init(GAME* game, void* start, size_t size) {
+#ifdef TARGET_PC
+    /* On PC, don't consume the game's THA — it corrupts gamealloc on cleanup.
+     * Just init the zelda arena from the malloc'd block directly. */
+    (void)game;
+    if (start != NULL && size != 0) {
+        u32 aligned = ALIGN_NEXT((u32)start, 16);
+        u32 tsize = aligned - (u32)start;
+        zelda_InitArena((void*)aligned, size - tsize);
+    }
+#else
     u32 freebytes;
     u32 alloc;
     u32 aligned;
@@ -33,6 +46,7 @@ static void my_alloc_init(GAME* game, void* start, size_t size) {
     if ((start != NULL) && (size != 0)) {
         zelda_AddBlockArena(start, size);
     }
+#endif
 }
 
 static void my_alloc_cleanup() {
@@ -104,6 +118,9 @@ extern void famicom_emu_main(GAME* famicom) {
     famicom->disable_display = 1;
 
     if (!famicom_done) {
+#ifdef TARGET_PC
+        sAdo_GameFrame(); /* Pump audio engine each NES frame */
+#endif
         famicom_1frame();
     } else {
         static GXColor black_color = { 0, 0, 0, 0 };
@@ -111,20 +128,27 @@ extern void famicom_emu_main(GAME* famicom) {
 
         JC_JFWDisplay_clearEfb(manager, black_color);
     }
+#ifdef TARGET_VITA
+    {
+        extern int cmd_write;
+        extern void pc_gx_submit_frame(void);
+        extern void vita_fixnes_draw_screen(void);
+        if (famicom_done) {
+            // fade-out: submit GX clear commands normally
+            cmd_write = 1 - cmd_write;
+            pc_gx_submit_frame();
+            cmd_write = 1 - cmd_write;
+        } else {
+            // NES active: skip GX submit (result_bufp is garbage),
+            // draw fixNES framebuffer directly
+            vita_fixnes_draw_screen();
+        }
+    }
+#endif
     JW_EndFrame();
 }
 
 extern void famicom_emu_init(GAME* game) {
-#if defined(TARGET_PC) && !defined(TARGET_VITA)
-    /* NES not implemented on PC */
-    game->exec = famicom_emu_main;
-    game->cleanup = famicom_emu_cleanup;
-    famicom_done = TRUE;
-    famicom_done_countdown = 0;
-    Common_Set(my_room_message_control_flags, Common_Get(my_room_message_control_flags) | 1);
-    return_emu_game(game);
-    return;
-#endif
     int rom_id;
     u8 player;
     int debug;
@@ -148,26 +172,39 @@ extern void famicom_emu_init(GAME* game) {
     game->exec = famicom_emu_main;
     game->cleanup = famicom_emu_cleanup;
 
+#ifdef TARGET_PC
+    /* Pump audio system until it transitions to sub-game (NES) mode */
+    for (int i = 0; i < 120 && sAdo_SubGameOK() == FALSE; i++) {
+        sAdo_GameFrame();
+    }
+#else
     while (sAdo_SubGameOK() == FALSE) {
         VIWaitForRetrace();
         sAdo_GameFrame();
     }
+#endif
 
+#ifdef TARGET_PC
+    /* On PC there are no XFBs to repurpose — allocate a heap for the NES emulator */
+    freeXfbSize = 0x400000; /* 4MB — enough for NES state + ROM + buffers */
+    freeXfbBase = malloc(freeXfbSize);
+    my_alloc_init(game, freeXfbBase, freeXfbSize);
+#else
     manager = JC_JFWDisplay_getManager();
     render = JC_JFWDisplay_getRenderMode(manager);
     freeXfbBase = JC_JFWDisplay_changeToSingleXfb(manager, 1);
     freeXfbSize = render->fbWidth * render->xfbHeight * sizeof(u16);
 
     my_alloc_init(game, freeXfbBase, freeXfbSize);
+#endif
 
 #ifdef TARGET_VITA
-    // empty nes console: scan ux0 for custom roms, show picker if any found
+    // empty NES console: scan ux0 for custom ROMs, show picker
     if (rom_id == 0) {
         extern int vita_nes_scan_roms(void);
         extern int vita_nes_show_picker(void);
         if (vita_nes_scan_roms() > 0) {
-            int picked = vita_nes_show_picker();
-            if (picked >= 0)
+            if (vita_nes_show_picker() >= 0)
                 rom_id = 1;
         }
     }
@@ -189,7 +226,11 @@ extern void famicom_emu_cleanup(GAME* game) {
     my_alloc_cleanup();
 
     if (freeXfbBase != NULL) {
+#ifdef TARGET_PC
+        free(freeXfbBase);
+#else
         JC_JFWDisplay_changeToDoubleXfb(JC_JFWDisplay_getManager());
+#endif
         freeXfbBase = NULL;
         freeXfbSize = 0;
     }

@@ -14,10 +14,27 @@ unsigned char cKF_Animation_R_getKeyTable[4] = {0};
 char _e_data = 0;
 char _f_rodata = 0;
 
-#ifndef TARGET_VITA
-void* my_malloc_current = NULL;
-u8 save_game_image = 0;
-#endif
+/* my_malloc_current and save_game_image provided by famicom.cpp */
+
+/* ksNes stubs: ks_nes_core.cpp excluded, fixNES handles NES CPU.
+ * ksNesReset parses iNES header to fill sp metadata fields.
+ * offsets from ks_nes_common.h comments: nesromp=0x0000 (wp),
+ * sp: mapper=0x1764, prg_size=0x1860, chr_size=0x1864, nesromp=0x1868 */
+int ksNesReset(void* wp_v, void* sp_v, u32 flags, u8* chrramp, u8* bbramp) {
+    (void)flags; (void)chrramp; (void)bbramp;
+    u8* rom = *(u8**)wp_v;
+    if (!rom) return -1;
+    if (rom[0] != 'N' || rom[1] != 'E' || rom[2] != 'S' || rom[3] != 0x1A)
+        return 0x57a;
+    u8* sp = (u8*)sp_v;
+    *(u8*)(sp + 0x1764) = (rom[7] & 0xf0) | (rom[6] >> 4);
+    *(u32*)(sp + 0x1860) = (u32)rom[4] << 14;
+    *(u32*)(sp + 0x1864) = (u32)rom[5] << 13;
+    *(u8**)(sp + 0x1868) = rom;
+    return 0;
+}
+void ksNesPushResetButton(void* sp) { (void)sp; }
+u32 ksNesResetAsm(void* wp, void* sp) { (void)wp; (void)sp; return 0; }
 
 /* DVD */
 BOOL DVDCheckDisk(void) { return 0; }
@@ -39,45 +56,6 @@ s32 GBAJoyBootAsync(s32 chan, s32 palette_color, s32 palette_speed, u8* programp
 }
 
 /* OS threads */
-#ifdef TARGET_VITA
-#include <pthread.h>
-static pthread_t vita_nes_thread;
-static void* (*vita_thread_func)(void*);
-static void* vita_thread_param;
-static void* vita_thread_result;
-static int vita_thread_created;
-
-BOOL OSCreateThread(void* thread, void* (*func)(void*), void* param,
-                    void* stack, u32 stackSize, OSPriority priority, u16 attr) {
-    (void)thread; (void)stack; (void)stackSize; (void)priority; (void)attr;
-    vita_thread_func = func;
-    vita_thread_param = param;
-    vita_thread_created = 0;
-    return 1;
-}
-void OSCancelThread(void* thread) { (void)thread; }
-void OSDetachThread(void* thread) { (void)thread; }
-s32 OSResumeThread(void* thread) {
-    (void)thread;
-    if (!vita_thread_created && vita_thread_func) {
-        pthread_create(&vita_nes_thread, NULL, vita_thread_func, vita_thread_param);
-        vita_thread_created = 1;
-    }
-    return 0;
-}
-s32 OSSuspendThread(void* thread) { (void)thread; return 0; }
-s32 OSGetThreadPriority(void* thread) { (void)thread; return 16; }
-BOOL OSJoinThread(void* thread, void** val) {
-    (void)thread;
-    if (vita_thread_created) {
-        pthread_join(vita_nes_thread, &vita_thread_result);
-        vita_thread_created = 0;
-    }
-    if (val) *val = vita_thread_result;
-    return 1;
-}
-BOOL OSIsThreadTerminated(void* thread) { (void)thread; return !vita_thread_created; }
-#else
 BOOL OSCreateThread(void* thread, void* (*func)(void*), void* param,
                     void* stack, u32 stackSize, OSPriority priority, u16 attr) {
     (void)thread; (void)func; (void)param; (void)stack;
@@ -87,10 +65,8 @@ void OSCancelThread(void* thread) { (void)thread; }
 void OSDetachThread(void* thread) { (void)thread; }
 s32 OSResumeThread(void* thread) { (void)thread; return 0; }
 s32 OSSuspendThread(void* thread) { (void)thread; return 0; }
-s32 OSGetThreadPriority(void* thread) { (void)thread; return 16; }
-BOOL OSJoinThread(void* thread, void** val) { (void)thread; (void)val; return 1; }
 BOOL OSIsThreadTerminated(void* thread) { (void)thread; return 1; }
-#endif
+BOOL OSJoinThread(void* thread, void** val) { (void)thread; (void)val; return 1; }
 s32 OSEnableScheduler(void) { return 0; }
 void OSYieldThread(void) {}
 long OSCheckActiveThreads(void) { return 0; }
@@ -116,26 +92,16 @@ void VIConfigurePan(u16 x_origin, u16 y_origin, u16 width, u16 height) {
 int __abs(int x) { return x < 0 ? -x : x; }
 void _strip(float x) { (void)x; }
 
-/* famicom */
-#ifndef TARGET_VITA
-void famicom_1frame(void) {}
-int famicom_cleanup(void) { return 0; }
-int famicom_external_data_save(void) { return 0; }
-int famicom_external_data_save_check(void) { return 0; }
-int famicom_getErrorChan(void) { return 0; }
-int famicom_get_disksystem_titles(int* n_games, char* title_name_bufp, int namebuf_size) {
-    (void)n_games; (void)title_name_bufp; (void)namebuf_size; return 0;
-}
-int famicom_init(int rom_idx, void* malloc_info, int player_no) {
-    (void)rom_idx; (void)malloc_info; (void)player_no; return 0;
-}
-int famicom_internal_data_load(void) { return 0; }
-int famicom_internal_data_save(void) { return 0; }
-void famicom_mount_archive(void) {}
-int famicom_mount_archive_end_check(void) { return 1; }
-int famicom_rom_load_check(void) { return 0; }
-void famicom_setCallback_getSaveChan(void* proc) { (void)proc; }
-#endif
+/* famicom (NES emulator) — real implementation in famicom.cpp, stubs for linker */
+void ksNesEmuFrame(void* wp, void* sp, u32 flags) { (void)wp; (void)sp; (void)flags; }
+
+/* famicom.cpp dependencies: CARD functions, nesinfo, misc */
+int CARDGetAttributes(int chan, int fileNo, u8* attr) { (void)chan; (void)fileNo; (void)attr; return -1; }
+int CARDSetAttributes(int chan, int fileNo, u8 attr) { (void)chan; (void)fileNo; (void)attr; return -1; }
+int CARDFastOpen(int chan, int fileNo, void* fileInfo) { (void)chan; (void)fileNo; (void)fileInfo; return -1; }
+int bcmp(const void* a, const void* b, unsigned int n) { return memcmp(a, b, n); }
+
+/* nesinfo — now provided by famicom_nesinfo.cpp */
 
 /* libultra */
 void osContGetQuery(void* status) { (void)status; }

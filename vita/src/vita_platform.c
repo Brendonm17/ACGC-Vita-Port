@@ -113,41 +113,6 @@ void vita_init(void) {
         }
     }
     {
-        int mk_ret_slota = sceIoMkdir("ux0:data/AnimalCrossing/saves/slot_a", 0777);
-        if (mk_ret_slota < 0 && mk_ret_slota != VITA_EEXIST)
-            printf("[VITA] WARNING: slot_a dir failed: 0x%08X\n", mk_ret_slota);
-    }
-    // migrate old saves from saves/ to saves/slot_a/ (backwards compat)
-    {
-        static const char* migrate_files[] = {
-            "DobutsunomoriP_MURA.gci",
-            "DobutsunomoriP_MURA.gci.tmp",
-            "DobutsunomoriP_MURA.gci.bak1",
-            "DobutsunomoriP_MURA.gci.bak2",
-            "DobutsunomoriP_MURA.gci.bak3",
-            NULL
-        };
-        int i;
-        for (i = 0; migrate_files[i] != NULL; i++) {
-            char old_path[256], new_path[256];
-            SceIoStat st;
-            snprintf(old_path, sizeof(old_path), "ux0:data/AnimalCrossing/saves/%s", migrate_files[i]);
-            if (sceIoGetstat(old_path, &st) >= 0) {
-                snprintf(new_path, sizeof(new_path), "ux0:data/AnimalCrossing/saves/slot_a/%s", migrate_files[i]);
-                if (sceIoRename(old_path, new_path) >= 0) {
-                    printf("[VITA] Migrated %s to slot_a/\n", migrate_files[i]);
-                } else {
-                    printf("[VITA] WARNING: failed to migrate %s\n", migrate_files[i]);
-                }
-            }
-        }
-    }
-    {
-        int mk_ret_slotb = sceIoMkdir("ux0:data/AnimalCrossing/saves/slot_b", 0777);
-        if (mk_ret_slotb < 0 && mk_ret_slotb != VITA_EEXIST)
-            printf("[VITA] WARNING: slot_b dir failed: 0x%08X\n", mk_ret_slotb);
-    }
-    {
         int mk_ret3 = sceIoMkdir("ux0:data/AnimalCrossing/rom", 0777);
         if (mk_ret3 < 0 && mk_ret3 != VITA_EEXIST) {
             fprintf(stderr, "[VITA] FATAL: Cannot create rom directory: 0x%08X\n", mk_ret3);

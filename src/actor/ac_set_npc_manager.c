@@ -7,9 +7,11 @@
 #include "libultra/libultra.h"
 #include "m_random_field.h"
 #include "m_event_map_npc.h"
-
 #ifdef TARGET_PC
 #include "pc_settings.h"
+#endif
+
+#ifdef TARGET_PC
 // save-state repair: if schedule says home but is_home is stuck FALSE,
 // fix it so villagers don't sleep outside or skip emerge animations
 static void Vita_sync_is_home_with_schedule(Animal_c* animal_p, mNpc_NpcList_c* list_p, mNPS_schedule_c* schedule_p) {

@@ -13,6 +13,8 @@ typedef struct {
     int window_height;
     int fullscreen;
     int vsync;
+    int disable_resetti;
+    int nes_aspect;
 
 #ifdef TARGET_VITA
     // Vita graphics

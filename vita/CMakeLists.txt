@@ -51,6 +51,8 @@ add_compile_options(-fno-strict-aliasing -fwrapv -w)
 
 set(DECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
+set(NOFRENDO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/nofrendo)
+
 include_directories(
     ${DECOMP_ROOT}/include
     ${DECOMP_ROOT}/src
@@ -59,6 +61,12 @@ include_directories(
     $ENV{VITASDK}/arm-vita-eabi/include
     ${DECOMP_ROOT}/pc/include
     ${DECOMP_ROOT}/pc/lib
+    ${NOFRENDO_DIR}
+    ${NOFRENDO_DIR}/cpu
+    ${NOFRENDO_DIR}/nes
+    ${NOFRENDO_DIR}/sndhrdw
+    ${NOFRENDO_DIR}/mappers
+    ${NOFRENDO_DIR}/libsnss
 )
 
 # game source files (same filtering as PC port)
@@ -99,7 +107,6 @@ list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/ac_animal_logo_misc\\.c$")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/m_item_debug\\.c$")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/actor/npc/.*_anime\\.c$")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/osreport\\.c$")
-# Famicom C sources: no .c files in Famicom dir, but keep filter in case upstream adds any
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/Famicom/.*")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/MSL_C/.*")
 list(FILTER GAME_C_SOURCES EXCLUDE REGEX ".*/jaudio_NES/internal/dsp_cardunlock\\.c$")
@@ -119,9 +126,10 @@ list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/dolphin/.*")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/TRK_MINNOW_DOLPHIN/.*")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/Runtime\\.PPCEABI\\.H/.*")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/MSL_C\\.PPCEABI\\.bare\\.H/.*")
-# Famicom: keep famicom.cpp + famicom_nesinfo.cpp (pure C++, no ASM).
-# Exclude ks_nes_core.cpp (PowerPC ASM CPU) and ks_nes_draw.cpp (GX indirect texturing).
-# Our vita_nes_cpu.c/vita_nes_ppu.c provide complete C replacements.
+# Famicom: keep famicom.cpp + famicom_nesinfo.cpp + ks_nes_draw.cpp (scene management, ROM loading, NES display).
+# Exclude ks_nes_core.cpp (PowerPC ASM NES CPU, replaced by fixNES)
+# and ks_nes_draw.cpp (decomp PPU renderer, fixNES produces its own framebuffer).
+# vita_nes_fixnes.c provides ksNesDrawInit/ksNesDraw/ksNesDrawEnd replacements.
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/ks_nes_core\\.cpp$")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/ks_nes_draw\\.cpp$")
 list(FILTER GAME_CXX_SOURCES EXCLUDE REGEX ".*/emu64_print\\.cpp$")
@@ -162,9 +170,7 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_frame.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_banner.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_texpack.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_cpu.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_ppu.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/agnes.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_fixnes.c
 
     ${DECOMP_ROOT}/pc/src/pc_gx.c
     ${DECOMP_ROOT}/pc/src/pc_gx_tev.c
@@ -261,10 +267,41 @@ set_source_files_properties(
     PROPERTIES COMPILE_OPTIONS "-O2;-w"
 )
 
+# Nofrendo NES emulator (scanline-based, fast, 40+ mappers)
+file(GLOB NOFRENDO_MAPPER_SOURCES ${NOFRENDO_DIR}/mappers/*.c)
+set(NOFRENDO_SOURCES
+    ${NOFRENDO_DIR}/cpu/nes6502.c
+    ${NOFRENDO_DIR}/nes/nes.c
+    ${NOFRENDO_DIR}/nes/nes_mmc.c
+    ${NOFRENDO_DIR}/nes/nes_pal.c
+    ${NOFRENDO_DIR}/nes/nes_ppu.c
+    ${NOFRENDO_DIR}/nes/nes_rom.c
+    ${NOFRENDO_DIR}/nes/nesinput.c
+    ${NOFRENDO_DIR}/nes/nesstate.c
+    ${NOFRENDO_DIR}/nes/mmclist.c
+    ${NOFRENDO_DIR}/sndhrdw/nes_apu.c
+    ${NOFRENDO_DIR}/sndhrdw/fds_snd.c
+    ${NOFRENDO_DIR}/sndhrdw/mmc5_snd.c
+    ${NOFRENDO_DIR}/sndhrdw/vrcvisnd.c
+    ${NOFRENDO_DIR}/libsnss/libsnss.c
+    ${NOFRENDO_DIR}/pcx.c
+    ${NOFRENDO_DIR}/bitmap.c
+    ${NOFRENDO_DIR}/vid_drv.c
+    ${NOFRENDO_DIR}/log.c
+    ${NOFRENDO_DIR}/event.c
+    ${NOFRENDO_DIR}/gui.c
+    ${NOFRENDO_DIR}/nofrendo.c
+    ${NOFRENDO_MAPPER_SOURCES}
+)
+set_source_files_properties(${NOFRENDO_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "-w;-O2"
+)
+
 add_executable(${PROJECT_NAME}
     ${VITA_SOURCES}
     ${CODE_C_SOURCES}
     ${GAME_CXX_SOURCES}
+    ${NOFRENDO_SOURCES}
 )
 
 target_link_options(${PROJECT_NAME} PRIVATE
