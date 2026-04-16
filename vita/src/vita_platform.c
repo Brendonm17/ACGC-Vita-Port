@@ -309,19 +309,20 @@ void vita_pin_hidden_threads(void) {
             strcmp(info.name, "vtc_io") == 0 ||
             strcmp(info.name, "TexPackLoader") == 0) continue;
 
-        // core 0: main thread (GL submit), SceGxmDisplayQueue (frame present)
-        // core 1: emu64 worker (display list interp)
-        // core 2: audio, GC, timers, misc
+        // core 0: vtc_io, SDL audio callback
+        // core 1: emu64 worker
+        // core 2: main thread (GL submit), GC, audio producer, misc
         int target = 0;
         if (strcmp(info.name, "ACGC00001") == 0 ||
-            strcmp(info.name, "SceGxmDisplayQueue") == 0) {
-            target = SCE_KERNEL_CPU_MASK_USER_0;
-        } else if (strncmp(info.name, "SDLAudio", 8) == 0 ||
-                   strcmp(info.name, "AudioProducer") == 0 ||
-                   strcmp(info.name, "Garbage Collector") == 0 ||
+            strcmp(info.name, "Garbage Collector") == 0 ||
+            strcmp(info.name, "AudioProducer") == 0) {
+            target = SCE_KERNEL_CPU_MASK_USER_2;
+        } else if (strcmp(info.name, "SceGxmDisplayQueue") == 0 ||
                    strcmp(info.name, "SDLTimer") == 0 ||
                    strcmp(info.name, "SceCommonDialogWorker") == 0) {
-            target = SCE_KERNEL_CPU_MASK_USER_2;
+            target = SCE_KERNEL_CPU_MASK_USER_1;
+        } else if (strncmp(info.name, "SDLAudio", 8) == 0) {
+            target = SCE_KERNEL_CPU_MASK_USER_0;
         }
 
         if (target && info.currentCpuAffinityMask != (SceUInt32)target) {

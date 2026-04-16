@@ -537,6 +537,12 @@ extern int goto_other_scene(GAME_PLAY* play, Door_data_c* door_data, int update_
 
             restore_fgdata_all(play);
             play->game.pad_initialized = FALSE;
+#ifdef TARGET_VITA
+            // single-mode for the wipe + transition so the threaded
+            // submit lag doesn't expose pre-wipe frames
+            extern int vita_use_single_mode_frames;
+            vita_use_single_mode_frames = 60;
+#endif
             res = 1; // success
         } else {
             res = 2; // already changing scenes

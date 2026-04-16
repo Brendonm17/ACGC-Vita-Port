@@ -5,7 +5,9 @@
 #include "pc_settings.h"
 #include "vita_banner.h"
 #include "vita_gx_cmdbuf.h"
+#include "vita_shared.h"
 #endif
+
 #include <stddef.h>
 #include <stdlib.h>
 static GLushort quad_index_buf[(PC_GX_MAX_VERTS / 4) * 6];
@@ -393,6 +395,179 @@ void pc_gx_invalidate_all_state(void) {
 #endif
 }
 
+#ifdef TARGET_VITA
+// snapshot of g_gx fields the menu mutates, so world state can be
+// restored on close. excludes GL handles, per-call scratch, and caches.
+typedef struct {
+    int            num_tev_stages;
+    PCGXTevStage   tev_stages[16];
+    float          tev_colors[4][4];
+    float          tev_k_colors[4][4];
+    PCGXTevSwapTable tev_swap_table[4];
+    int            num_chans;
+    float          chan_amb_color[2][4];
+    float          chan_mat_color[2][4];
+    int            chan_ctrl_enable[4];
+    int            chan_ctrl_amb_src[4];
+    int            chan_ctrl_mat_src[4];
+    int            chan_ctrl_light_mask[4];
+    int            chan_ctrl_diff_fn[4];
+    int            chan_ctrl_attn_fn[4];
+    struct {
+        float pos[3];
+        float dir[3];
+        float color[4];
+        float a0, a1, a2;
+        float k0, k1, k2;
+    } lights[8];
+    int            num_tex_gens;
+    int            tex_gen_type[8];
+    int            tex_gen_src[8];
+    int            tex_gen_mtx[8];
+    int            blend_mode, blend_src, blend_dst, blend_logic_op;
+    int            z_compare_enable, z_compare_func, z_update_enable;
+    int            color_update_enable, alpha_update_enable;
+    int            alpha_comp0, alpha_ref0, alpha_op, alpha_comp1, alpha_ref1;
+    int            cull_mode;
+    int            fog_type;
+    float          fog_start, fog_end, fog_near, fog_far;
+    float          fog_color[4];
+    int            num_ind_stages;
+    int            valid;
+} PCGXWorldStateSnapshot;
+
+static PCGXWorldStateSnapshot s_world_state = { .valid = 0 };
+
+#define PC_GX_SAVE_FIELD(f) (s_world_state.f = g_gx.f)
+#define PC_GX_SAVE_ARRAY(f) memcpy(s_world_state.f, g_gx.f, sizeof(s_world_state.f))
+#define PC_GX_LOAD_FIELD(f) (g_gx.f = s_world_state.f)
+#define PC_GX_LOAD_ARRAY(f) memcpy(g_gx.f, s_world_state.f, sizeof(g_gx.f))
+
+void pc_gx_save_world_state(void) {
+    PC_GX_SAVE_FIELD(num_tev_stages);
+    PC_GX_SAVE_ARRAY(tev_stages);
+    PC_GX_SAVE_ARRAY(tev_colors);
+    PC_GX_SAVE_ARRAY(tev_k_colors);
+    PC_GX_SAVE_ARRAY(tev_swap_table);
+    PC_GX_SAVE_FIELD(num_chans);
+    PC_GX_SAVE_ARRAY(chan_amb_color);
+    PC_GX_SAVE_ARRAY(chan_mat_color);
+    PC_GX_SAVE_ARRAY(chan_ctrl_enable);
+    PC_GX_SAVE_ARRAY(chan_ctrl_amb_src);
+    PC_GX_SAVE_ARRAY(chan_ctrl_mat_src);
+    PC_GX_SAVE_ARRAY(chan_ctrl_light_mask);
+    PC_GX_SAVE_ARRAY(chan_ctrl_diff_fn);
+    PC_GX_SAVE_ARRAY(chan_ctrl_attn_fn);
+    memcpy(s_world_state.lights, g_gx.lights, sizeof(s_world_state.lights));
+    PC_GX_SAVE_FIELD(num_tex_gens);
+    PC_GX_SAVE_ARRAY(tex_gen_type);
+    PC_GX_SAVE_ARRAY(tex_gen_src);
+    PC_GX_SAVE_ARRAY(tex_gen_mtx);
+    PC_GX_SAVE_FIELD(blend_mode);
+    PC_GX_SAVE_FIELD(blend_src);
+    PC_GX_SAVE_FIELD(blend_dst);
+    PC_GX_SAVE_FIELD(blend_logic_op);
+    PC_GX_SAVE_FIELD(z_compare_enable);
+    PC_GX_SAVE_FIELD(z_compare_func);
+    PC_GX_SAVE_FIELD(z_update_enable);
+    PC_GX_SAVE_FIELD(color_update_enable);
+    PC_GX_SAVE_FIELD(alpha_update_enable);
+    PC_GX_SAVE_FIELD(alpha_comp0);
+    PC_GX_SAVE_FIELD(alpha_ref0);
+    PC_GX_SAVE_FIELD(alpha_op);
+    PC_GX_SAVE_FIELD(alpha_comp1);
+    PC_GX_SAVE_FIELD(alpha_ref1);
+    PC_GX_SAVE_FIELD(cull_mode);
+    PC_GX_SAVE_FIELD(fog_type);
+    PC_GX_SAVE_FIELD(fog_start);
+    PC_GX_SAVE_FIELD(fog_end);
+    PC_GX_SAVE_FIELD(fog_near);
+    PC_GX_SAVE_FIELD(fog_far);
+    PC_GX_SAVE_ARRAY(fog_color);
+    PC_GX_SAVE_FIELD(num_ind_stages);
+    s_world_state.valid = 1;
+}
+
+// called from play_init. force latched clear to black and extend the
+// single-mode window to cover the new scene's iris-in.
+void pc_gx_notify_scene_change(void) {
+    g_gx.latched_clear_color[0] = 0.0f;
+    g_gx.latched_clear_color[1] = 0.0f;
+    g_gx.latched_clear_color[2] = 0.0f;
+    g_gx.latched_clear_color[3] = 1.0f;
+    g_gx.clear_color[0] = 0.0f;
+    g_gx.clear_color[1] = 0.0f;
+    g_gx.clear_color[2] = 0.0f;
+    g_gx.clear_color[3] = 1.0f;
+
+    extern int vita_use_single_mode_frames;
+    int extend_to = 60;
+    if (vita_use_single_mode_frames < extend_to)
+        vita_use_single_mode_frames = extend_to;
+}
+
+// called from m_play.c on prerender menu close transition.
+void pc_gx_notify_menu_close(void) {
+    extern int vita_use_single_mode_frames;
+    int extend_to = 4;
+    if (vita_use_single_mode_frames < extend_to)
+        vita_use_single_mode_frames = extend_to;
+}
+
+void pc_gx_restore_world_state(void) {
+    if (!s_world_state.valid) return;
+    PC_GX_LOAD_FIELD(num_tev_stages);
+    PC_GX_LOAD_ARRAY(tev_stages);
+    PC_GX_LOAD_ARRAY(tev_colors);
+    PC_GX_LOAD_ARRAY(tev_k_colors);
+    PC_GX_LOAD_ARRAY(tev_swap_table);
+    PC_GX_LOAD_FIELD(num_chans);
+    PC_GX_LOAD_ARRAY(chan_amb_color);
+    PC_GX_LOAD_ARRAY(chan_mat_color);
+    PC_GX_LOAD_ARRAY(chan_ctrl_enable);
+    PC_GX_LOAD_ARRAY(chan_ctrl_amb_src);
+    PC_GX_LOAD_ARRAY(chan_ctrl_mat_src);
+    PC_GX_LOAD_ARRAY(chan_ctrl_light_mask);
+    PC_GX_LOAD_ARRAY(chan_ctrl_diff_fn);
+    PC_GX_LOAD_ARRAY(chan_ctrl_attn_fn);
+    memcpy(g_gx.lights, s_world_state.lights, sizeof(g_gx.lights));
+    PC_GX_LOAD_FIELD(num_tex_gens);
+    PC_GX_LOAD_ARRAY(tex_gen_type);
+    PC_GX_LOAD_ARRAY(tex_gen_src);
+    PC_GX_LOAD_ARRAY(tex_gen_mtx);
+    PC_GX_LOAD_FIELD(blend_mode);
+    PC_GX_LOAD_FIELD(blend_src);
+    PC_GX_LOAD_FIELD(blend_dst);
+    PC_GX_LOAD_FIELD(blend_logic_op);
+    PC_GX_LOAD_FIELD(z_compare_enable);
+    PC_GX_LOAD_FIELD(z_compare_func);
+    PC_GX_LOAD_FIELD(z_update_enable);
+    PC_GX_LOAD_FIELD(color_update_enable);
+    PC_GX_LOAD_FIELD(alpha_update_enable);
+    PC_GX_LOAD_FIELD(alpha_comp0);
+    PC_GX_LOAD_FIELD(alpha_ref0);
+    PC_GX_LOAD_FIELD(alpha_op);
+    PC_GX_LOAD_FIELD(alpha_comp1);
+    PC_GX_LOAD_FIELD(alpha_ref1);
+    PC_GX_LOAD_FIELD(cull_mode);
+    PC_GX_LOAD_FIELD(fog_type);
+    PC_GX_LOAD_FIELD(fog_start);
+    PC_GX_LOAD_FIELD(fog_end);
+    PC_GX_LOAD_FIELD(fog_near);
+    PC_GX_LOAD_FIELD(fog_far);
+    PC_GX_LOAD_ARRAY(fog_color);
+    PC_GX_LOAD_FIELD(num_ind_stages);
+
+    // force fresh state on next cmd snapshot
+    pc_gx_invalidate_all_state();
+}
+
+#undef PC_GX_SAVE_FIELD
+#undef PC_GX_SAVE_ARRAY
+#undef PC_GX_LOAD_FIELD
+#undef PC_GX_LOAD_ARRAY
+#endif
+
 void pc_gx_begin_frame(void) {
     // deferred tex deletes happen at end of submit_frame, not here
     g_gx.copy_disp_done = 0;
@@ -742,7 +917,8 @@ void pc_gx_cache_uniform_locations(GLuint shader) {
         g_gx.uloc.tev_color_op[i] = UL(name);
         snprintf(name, sizeof(name), "u_tev_alpha_op[%d]", i);
         g_gx.uloc.tev_alpha_op[i] = UL(name);
-        snprintf(name, sizeof(name), "u_tev_tc_src[%d]", i);
+        // shader has scalar u_tev0_tc_src / u_tev1_tc_src, not an array
+        snprintf(name, sizeof(name), "u_tev%d_tc_src", i);
         g_gx.uloc.tev_tc_src[i] = UL(name);
         snprintf(name, sizeof(name), "u_tev_ind_cfg[%d]", i);
         g_gx.uloc.tev_ind_cfg[i] = UL(name);

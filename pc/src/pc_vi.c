@@ -163,7 +163,8 @@ void VIWaitForRetrace(void) {
 #ifdef TARGET_VITA
     // rerun thread scan at specific frames to catch late created threads
     // (SDL audio device, VTC io, etc) that don't exist at platform init time
-    if (pc_frame_counter == 5 || pc_frame_counter == 30 || pc_frame_counter == 120) {
+    if (pc_frame_counter == 5 || pc_frame_counter == 30 || pc_frame_counter == 120 ||
+        (pc_frame_counter % 600 == 0)) {
         extern void vita_pin_hidden_threads(void);
         vita_pin_hidden_threads();
     }

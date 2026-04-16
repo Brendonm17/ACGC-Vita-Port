@@ -11,6 +11,14 @@
 #include <psp2/kernel/processmgr.h>
 #include <stdio.h>
 
+// > 0 = use single-mode path this frame to mask threaded submit lag
+// during transitions. set by notify_scene_change / notify_menu_close.
+int vita_use_single_mode_frames = 0;
+
+// suppress one threaded top-swap after returning from single-mode so
+// single's bottom swap isn't undone.
+int vita_skip_next_top_swap = 0;
+
 static int vita_first_frame = 1;
 static int vita_worker_pending = 0;
 
@@ -57,7 +65,9 @@ static void vita_perf_log_frame(void) {
 
 static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     if (!vita_first_frame) {
-        if (!vita_gpu_skip_draws) {
+        int skip_top_swap = vita_skip_next_top_swap;
+        vita_skip_next_top_swap = 0;
+        if (!vita_gpu_skip_draws && !skip_top_swap) {
             JW_EndFrame();
         }
         vita_gpu_skip_draws = 0;
@@ -122,7 +132,23 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
 }
 
 void vita_frame_run(ucode_info* ucode, void* gfx_list) {
-    if (vita_emu64_worker_active()) {
+    int worker_active = vita_emu64_worker_active();
+    if (worker_active && vita_use_single_mode_frames > 0) {
+        vita_use_single_mode_frames--;
+        // drain pending worker before running emu64 on main
+        if (vita_worker_pending) {
+            vita_emu64_wait_done();
+            emu64_cleanup();
+            vita_worker_pending = 0;
+        }
+        vita_frame_run_single(ucode, gfx_list);
+        // arm the skip so next threaded frame doesn't double-swap
+        if (vita_use_single_mode_frames == 0) {
+            vita_skip_next_top_swap = 1;
+        }
+        return;
+    }
+    if (worker_active) {
         vita_frame_run_threaded(ucode, gfx_list);
     } else {
         vita_frame_run_single(ucode, gfx_list);

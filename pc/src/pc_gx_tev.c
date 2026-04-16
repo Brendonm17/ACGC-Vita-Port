@@ -43,6 +43,7 @@ void vita_log(const char* fmt, ...) {
     (void)fmt;
 #endif
 }
+
 #endif
 
 /* --- file I/O --- */

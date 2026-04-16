@@ -475,6 +475,15 @@ extern void play_init(GAME* game) {
 
     play->fade_color_value.rgba8888 = 0;
 
+#ifdef TARGET_VITA
+    // arm the cmd-replay skip so the worker's last-OLD-scene cmds and
+    // this frame's first-NEW-scene cmds don't display before the iris
+    // animation is ready (Vita's threaded path lags the swap by one
+    // frame, exposing both as a "scene flash before vignette").
+    extern void pc_gx_notify_scene_change(void);
+    pc_gx_notify_scene_change();
+#endif
+
     freebytes = game_getFreeBytes(game);
     alloc = (u32)THA_alloc16(&game->tha, freebytes);
     aligned = ALIGN_NEXT(alloc, 16);
@@ -744,27 +753,27 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
     }
 
 #if defined(TARGET_VITA)
-    /* Menu close flash hide: the first frames after the game exits
-     * PRERENDER_DONE render with stale cache/state from the menu-
-     * overlay pipeline, producing a visible one-frame wrong-color
-     * glitch on some draws (non-player house roofs in particular).
-     * bisection showed the bad state clears after 4 world frames, so
-     * set vita_gpu_skip_draws for 4 consecutive frames after the
-     * transition. JW_EndFrame sees the flag and skips the swap, so
-     * the menu stays visible until the pipeline stabilizes (~66 ms).
-     * this is a workaround - the underlying state leak is not yet
-     * identified. worth revisiting if the delay becomes noticeable. */
+    // snapshot/restore GX state around the menu's prerender window so
+    // menu draws don't pollute world state.
     {
         static int s_prev_submenu_mode = 0;
-        static int s_skip_remaining = 0;
-        if (s_prev_submenu_mode == mSM_MODE_PRERENDER_DONE &&
-            play->submenu.mode != mSM_MODE_PRERENDER_DONE) {
-            s_skip_remaining = 4;
-        }
-        if (s_skip_remaining > 0) {
-            extern int vita_gpu_skip_draws;
-            vita_gpu_skip_draws = 1;
-            s_skip_remaining--;
+        int prev_active = (s_prev_submenu_mode == mSM_MODE_PRERENDER_INIT ||
+                           s_prev_submenu_mode == mSM_MODE_PRERENDER_WAIT ||
+                           s_prev_submenu_mode == mSM_MODE_PRERENDER_DONE);
+        int curr_active = (play->submenu.mode == mSM_MODE_PRERENDER_INIT ||
+                           play->submenu.mode == mSM_MODE_PRERENDER_WAIT ||
+                           play->submenu.mode == mSM_MODE_PRERENDER_DONE);
+        if (!prev_active && curr_active) {
+            extern void pc_gx_save_world_state(void);
+            pc_gx_save_world_state();
+        } else if (prev_active && !curr_active) {
+            extern void pc_gx_restore_world_state(void);
+            pc_gx_restore_world_state();
+            Gfx* poly = NOW_POLY_OPA_DISP;
+            gDPNoOpTag(poly++, PC_NOOP_FULL_STATE_INVALIDATE);
+            SET_POLY_OPA_DISP(poly);
+            extern void pc_gx_notify_menu_close(void);
+            pc_gx_notify_menu_close();
         }
         s_prev_submenu_mode = play->submenu.mode;
     }
