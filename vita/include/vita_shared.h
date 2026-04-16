@@ -48,6 +48,9 @@ typedef struct {
     int dropped_draws;
     int shader_switches;
     int deferred_tex_uploads;
+    int opaque_draws;
+    int blended_draws;
+    int sort_merged;
 } VitaFrameStats;
 extern VitaFrameStats vita_stats;
 

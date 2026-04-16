@@ -15,71 +15,188 @@
 #include <stdlib.h>
 
 // pre-dedup pass. runs on the worker thread while cmd_queue data is still
-// hot in core 1's cache, clearing PROJ/MODELVIEW/TEXTURES/FOG dirty bits
-// when consecutive draws have byte-identical state. running this on main
-// was much slower due to DRAM bandwidth contention with core 1's writeback
-// still draining, whereas here the data is freshly written and cache-hot.
+// hot in core 1's cache, clearing dirty bits when consecutive draws have
+// byte-identical state. covers all 16 dirty flag types so that the merge
+// pass and submit_frame replay see minimal redundant state. running this
+// on the worker is free (parallel with submit) and data is cache-hot.
 void vita_cmdbuf_prededup(void) {
-    int wr = cmd_write;  // worker's current write buffer
+    int wr = cmd_write;
     int count = cmd_queue_count_db[wr];
     if (count <= 0) return;
 
-    PCGXCmdTextures  last_textures_pm;
-    PCGXCmdFog       last_fog_pm;
-    float            last_proj_mtx_pm[16];
-    float            last_pos_mtx_pm[16];
-    int last_pm_proj_valid = 0;
-    int last_pm_modelview_valid = 0;
-    int last_pm_textures_valid = 0;
-    int last_pm_fog_valid = 0;
-    GLuint last_pm_shader = 0;
+    // per-flag last-known state for dedup comparison
+    float            last_proj[16];
+    float            last_mv[16];
+    PCGXCmdTextures  last_tex;
+    PCGXCmdFog       last_fog;
+    float            last_tev_colors[4][4];
+    float            last_konst[4][4];
+    PCGXCmdLighting  last_lighting;
+    PCGXCmdGLState   last_glstate;
+    PCGXCmdAlpha     last_alpha;
+    PCGXCmdTexGen    last_texgen;
+    PCGXCmdTEV       last_tev;
+    PCGXCmdIndirect  last_indirect;
+
+    // validity bits packed into a single word
+    unsigned int valid = 0;
+    #define V_PROJ      (1u << 0)
+    #define V_MV        (1u << 1)
+    #define V_TEX       (1u << 2)
+    #define V_FOG       (1u << 3)
+    #define V_TEVCOL    (1u << 4)
+    #define V_KONST     (1u << 5)
+    #define V_LIGHTING  (1u << 6)
+    #define V_GLSTATE   (1u << 7)
+    #define V_ALPHA     (1u << 8)
+    #define V_TEXGEN    (1u << 9)
+    #define V_TEV       (1u << 10)
+    #define V_INDIRECT  (1u << 11)
+
+    GLuint last_shader = 0;
+
+    // mask for the 4 gl_state dirty flags that share one struct
+    #define GL_STATE_MASK (PC_GX_DIRTY_DEPTH | PC_GX_DIRTY_COLOR_MASK | \
+                           PC_GX_DIRTY_CULL  | PC_GX_DIRTY_BLEND)
 
     for (int i = 0; i < count; i++) {
         PCGXDrawCmd* c = &cmd_queue_db[wr][i];
         if (c->shader == 0) continue;
 
-        if (c->shader_changed || c->shader != last_pm_shader) {
-            last_pm_proj_valid = 0;
-            last_pm_modelview_valid = 0;
-            last_pm_textures_valid = 0;
-            last_pm_fog_valid = 0;
-            last_pm_shader = c->shader;
+        if (c->shader_changed || c->shader != last_shader) {
+            valid = 0;
+            last_shader = c->shader;
         }
 
-        unsigned int orig_dirty = c->dirty;
-        unsigned int new_dirty = orig_dirty;
+        unsigned int d = c->dirty;
+        unsigned int nd = d;
 
-        if ((orig_dirty & PC_GX_DIRTY_PROJECTION) && last_pm_proj_valid &&
-            __builtin_memcmp(c->transform.projection_mtx_t, last_proj_mtx_pm, 64) == 0)
-            new_dirty &= ~PC_GX_DIRTY_PROJECTION;
-        if ((orig_dirty & PC_GX_DIRTY_MODELVIEW) && last_pm_modelview_valid &&
-            __builtin_memcmp(c->transform.pos_mtx_t, last_pos_mtx_pm, 64) == 0)
-            new_dirty &= ~PC_GX_DIRTY_MODELVIEW;
-        if ((orig_dirty & PC_GX_DIRTY_TEXTURES) && last_pm_textures_valid &&
-            __builtin_memcmp(&c->textures, &last_textures_pm, sizeof(PCGXCmdTextures)) == 0)
-            new_dirty &= ~PC_GX_DIRTY_TEXTURES;
-        if ((orig_dirty & PC_GX_DIRTY_FOG) && last_pm_fog_valid &&
-            __builtin_memcmp(&c->fog, &last_fog_pm, sizeof(PCGXCmdFog)) == 0)
-            new_dirty &= ~PC_GX_DIRTY_FOG;
-        c->dirty = new_dirty;
+        // transforms
+        if ((d & PC_GX_DIRTY_PROJECTION) && (valid & V_PROJ) &&
+            __builtin_memcmp(c->transform.projection_mtx_t, last_proj, 64) == 0)
+            nd &= ~PC_GX_DIRTY_PROJECTION;
+        if ((d & PC_GX_DIRTY_MODELVIEW) && (valid & V_MV) &&
+            __builtin_memcmp(c->transform.pos_mtx_t, last_mv, 64) == 0)
+            nd &= ~PC_GX_DIRTY_MODELVIEW;
 
-        if (orig_dirty & PC_GX_DIRTY_PROJECTION) {
-            __builtin_memcpy(last_proj_mtx_pm, c->transform.projection_mtx_t, 64);
-            last_pm_proj_valid = 1;
+        // textures + fog (original 4)
+        if ((d & PC_GX_DIRTY_TEXTURES) && (valid & V_TEX) &&
+            __builtin_memcmp(&c->textures, &last_tex, sizeof(PCGXCmdTextures)) == 0)
+            nd &= ~PC_GX_DIRTY_TEXTURES;
+        if ((d & PC_GX_DIRTY_FOG) && (valid & V_FOG) &&
+            __builtin_memcmp(&c->fog, &last_fog, sizeof(PCGXCmdFog)) == 0)
+            nd &= ~PC_GX_DIRTY_FOG;
+
+        // tev colors + konst (64 bytes each)
+        if ((d & PC_GX_DIRTY_TEV_COLORS) && (valid & V_TEVCOL) &&
+            __builtin_memcmp(c->tev.colors, last_tev_colors, 64) == 0)
+            nd &= ~PC_GX_DIRTY_TEV_COLORS;
+        if ((d & PC_GX_DIRTY_KONST) && (valid & V_KONST) &&
+            __builtin_memcmp(c->tev.k_colors, last_konst, 64) == 0)
+            nd &= ~PC_GX_DIRTY_KONST;
+
+        // lighting (~300 bytes)
+        if ((d & PC_GX_DIRTY_LIGHTING) && (valid & V_LIGHTING) &&
+            __builtin_memcmp(&c->lighting, &last_lighting, sizeof(PCGXCmdLighting)) == 0)
+            nd &= ~PC_GX_DIRTY_LIGHTING;
+
+        // gl_state covers depth/color_mask/cull/blend (36 bytes)
+        if ((d & GL_STATE_MASK) && (valid & V_GLSTATE) &&
+            __builtin_memcmp(&c->gl_state, &last_glstate, sizeof(PCGXCmdGLState)) == 0)
+            nd &= ~(d & GL_STATE_MASK);
+
+        // alpha compare (8 bytes)
+        if ((d & PC_GX_DIRTY_ALPHA_CMP) && (valid & V_ALPHA) &&
+            __builtin_memcmp(&c->alpha, &last_alpha, sizeof(PCGXCmdAlpha)) == 0)
+            nd &= ~PC_GX_DIRTY_ALPHA_CMP;
+
+        // texgen (~80 bytes)
+        if ((d & PC_GX_DIRTY_TEXGEN) && (valid & V_TEXGEN) &&
+            __builtin_memcmp(&c->texgen, &last_texgen, sizeof(PCGXCmdTexGen)) == 0)
+            nd &= ~PC_GX_DIRTY_TEXGEN;
+
+        // tev stages + swap tables: compare only the stage config portion
+        // (num_stages + stages[]), not the full 750-byte struct. resolved
+        // values are deterministic from stages + tev_colors + k_colors,
+        // which have their own dirty flags already deduped above.
+        if ((d & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES)) && (valid & V_TEV) &&
+            c->tev.num_stages == last_tev.num_stages &&
+            __builtin_memcmp(c->tev.stages, last_tev.stages, sizeof(c->tev.stages)) == 0)
+            nd &= ~(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES);
+
+        // indirect (~200 bytes)
+        if ((d & PC_GX_DIRTY_INDIRECT) && (valid & V_INDIRECT) &&
+            __builtin_memcmp(&c->indirect, &last_indirect, sizeof(PCGXCmdIndirect)) == 0)
+            nd &= ~PC_GX_DIRTY_INDIRECT;
+
+        c->dirty = nd;
+
+        // update last-known state for any flags that were originally set
+        if (d & PC_GX_DIRTY_PROJECTION) {
+            __builtin_memcpy(last_proj, c->transform.projection_mtx_t, 64);
+            valid |= V_PROJ;
         }
-        if (orig_dirty & PC_GX_DIRTY_MODELVIEW) {
-            __builtin_memcpy(last_pos_mtx_pm, c->transform.pos_mtx_t, 64);
-            last_pm_modelview_valid = 1;
+        if (d & PC_GX_DIRTY_MODELVIEW) {
+            __builtin_memcpy(last_mv, c->transform.pos_mtx_t, 64);
+            valid |= V_MV;
         }
-        if (orig_dirty & PC_GX_DIRTY_TEXTURES) {
-            last_textures_pm = c->textures;
-            last_pm_textures_valid = 1;
+        if (d & PC_GX_DIRTY_TEXTURES) {
+            last_tex = c->textures;
+            valid |= V_TEX;
         }
-        if (orig_dirty & PC_GX_DIRTY_FOG) {
-            last_fog_pm = c->fog;
-            last_pm_fog_valid = 1;
+        if (d & PC_GX_DIRTY_FOG) {
+            last_fog = c->fog;
+            valid |= V_FOG;
+        }
+        if (d & PC_GX_DIRTY_TEV_COLORS) {
+            __builtin_memcpy(last_tev_colors, c->tev.colors, 64);
+            valid |= V_TEVCOL;
+        }
+        if (d & PC_GX_DIRTY_KONST) {
+            __builtin_memcpy(last_konst, c->tev.k_colors, 64);
+            valid |= V_KONST;
+        }
+        if (d & PC_GX_DIRTY_LIGHTING) {
+            last_lighting = c->lighting;
+            valid |= V_LIGHTING;
+        }
+        if (d & GL_STATE_MASK) {
+            last_glstate = c->gl_state;
+            valid |= V_GLSTATE;
+        }
+        if (d & PC_GX_DIRTY_ALPHA_CMP) {
+            last_alpha = c->alpha;
+            valid |= V_ALPHA;
+        }
+        if (d & PC_GX_DIRTY_TEXGEN) {
+            last_texgen = c->texgen;
+            valid |= V_TEXGEN;
+        }
+        if (d & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES)) {
+            // only store the stage config portion we compare against
+            last_tev.num_stages = c->tev.num_stages;
+            __builtin_memcpy(last_tev.stages, c->tev.stages, sizeof(c->tev.stages));
+            valid |= V_TEV;
+        }
+        if (d & PC_GX_DIRTY_INDIRECT) {
+            last_indirect = c->indirect;
+            valid |= V_INDIRECT;
         }
     }
+
+    #undef V_PROJ
+    #undef V_MV
+    #undef V_TEX
+    #undef V_FOG
+    #undef V_TEVCOL
+    #undef V_KONST
+    #undef V_LIGHTING
+    #undef V_GLSTATE
+    #undef V_ALPHA
+    #undef V_TEXGEN
+    #undef V_TEV
+    #undef V_INDIRECT
+    #undef GL_STATE_MASK
 }
 #include <dolphin/gx/GXEnum.h>
 
@@ -235,6 +352,10 @@ static int       frame_idx_count_db[2] = {0, 0};
 #define frame_indices      frame_indices_db[cmd_write]
 #define frame_idx_count    frame_idx_count_db[cmd_write]
 
+// opaque draw sort scratch. allocated once at init.
+static GLushort* sort_temp_indices = NULL;
+static int sort_order[CMD_QUEUE_MAX];
+
 
 
 
@@ -256,6 +377,7 @@ void vita_cmdbuf_init(void) {
         cmd_last_shader_db[i] = 0;
         frame_idx_count_db[i] = 0;
     }
+    sort_temp_indices = (GLushort*)malloc(FRAME_IDX_MAX * sizeof(GLushort));
     cmd_write = 0;
 }
 
@@ -508,19 +630,16 @@ void pc_gx_submit_frame(void) {
                      frame_indices_db[rd], GL_STREAM_DRAW);
     }
 
-    // pre-dedup pass. clears PROJ/MODELVIEW/TEXTURES/FOG dirty bits on
-    // consecutive draws with identical state so replay skips the bind
-    // calls. runs on main as a safety net for any draws the worker-side
-    // pre-dedup didn't cover (e.g. captures injected between draws).
-    {
+    // main-thread pre-dedup safety net. only needed when deferred texture
+    // uploads modified cmd state after the worker's pass. on stable frames
+    // (no deferred uploads) the worker pre-dedup already cleared everything.
+    if (pc_gx_deferred_tex_uploads > 0) {
         PCGXCmdTextures  last_textures_pm;
-        PCGXCmdFog       last_fog_pm;
         float            last_proj_mtx_pm[16];
         float            last_pos_mtx_pm[16];
         int last_pm_proj_valid = 0;
         int last_pm_modelview_valid = 0;
         int last_pm_textures_valid = 0;
-        int last_pm_fog_valid = 0;
         GLuint last_pm_shader = 0;
 
         for (int i = 0; i < rd_count; i++) {
@@ -531,7 +650,6 @@ void pc_gx_submit_frame(void) {
                 last_pm_proj_valid = 0;
                 last_pm_modelview_valid = 0;
                 last_pm_textures_valid = 0;
-                last_pm_fog_valid = 0;
                 last_pm_shader = c->shader;
             }
 
@@ -547,9 +665,6 @@ void pc_gx_submit_frame(void) {
             if ((orig_dirty & PC_GX_DIRTY_TEXTURES) && last_pm_textures_valid &&
                 __builtin_memcmp(&c->textures, &last_textures_pm, sizeof(PCGXCmdTextures)) == 0)
                 new_dirty &= ~PC_GX_DIRTY_TEXTURES;
-            if ((orig_dirty & PC_GX_DIRTY_FOG) && last_pm_fog_valid &&
-                __builtin_memcmp(&c->fog, &last_fog_pm, sizeof(PCGXCmdFog)) == 0)
-                new_dirty &= ~PC_GX_DIRTY_FOG;
             c->dirty = new_dirty;
 
             if (orig_dirty & PC_GX_DIRTY_PROJECTION) {
@@ -564,19 +679,116 @@ void pc_gx_submit_frame(void) {
                 last_textures_pm = c->textures;
                 last_pm_textures_valid = 1;
             }
-            if (orig_dirty & PC_GX_DIRTY_FOG) {
-                last_fog_pm = c->fog;
-                last_pm_fog_valid = 1;
+        }
+    }
+
+    // opaque draw sorting. reorders opaque draws by (shader, texture0) so
+    // the merge pass sees maximal state coherence. blended draws keep their
+    // original relative order and execute after opaques. skipped when EFB
+    // captures are present (transitions are not perf-critical).
+    {
+        int did_sort = 0;
+        // default identity order
+        for (int i = 0; i < rd_count; i++) sort_order[i] = i;
+
+        if (0) { // sort disabled: AC depends on draw order even for opaque geometry
+            typedef struct { unsigned long long key; int idx; } SortEntry;
+            static SortEntry opaque_buf[CMD_QUEUE_MAX];
+            static int blended_buf[CMD_QUEUE_MAX];
+            int opaque_n = 0, blended_n = 0;
+
+            for (int i = 0; i < rd_count; i++) {
+                PCGXDrawCmd* c = &cmd_queue_db[rd][i];
+                if (c->shader == 0) {
+                    blended_buf[blended_n++] = i;
+                    continue;
+                }
+                int is_opaque = (c->gl_state.blend_mode == GX_BM_NONE) &&
+                                c->gl_state.z_update_enable;
+                if (is_opaque) {
+                    opaque_buf[opaque_n].key =
+                        ((unsigned long long)c->shader << 32) |
+                        (unsigned long long)c->textures.obj_stage[0];
+                    opaque_buf[opaque_n].idx = i;
+                    opaque_n++;
+                } else {
+                    blended_buf[blended_n++] = i;
+                }
             }
+
+            vita_stats.opaque_draws = opaque_n;
+            vita_stats.blended_draws = blended_n;
+
+            if (opaque_n > 1) {
+                // insertion sort on 8-byte keys, cache-friendly for ~300 elems
+                for (int i = 1; i < opaque_n; i++) {
+                    SortEntry tmp = opaque_buf[i];
+                    int j = i - 1;
+                    while (j >= 0 && opaque_buf[j].key > tmp.key) {
+                        opaque_buf[j + 1] = opaque_buf[j];
+                        j--;
+                    }
+                    opaque_buf[j + 1] = tmp;
+                }
+
+                // build final execution order: sorted opaques then blended
+                int n = 0;
+                for (int i = 0; i < opaque_n; i++) sort_order[n++] = opaque_buf[i].idx;
+                for (int i = 0; i < blended_n; i++) sort_order[n++] = blended_buf[i];
+
+                // rebuild index buffer in sorted order so consecutive draws
+                // have contiguous index ranges (enables merge)
+                int new_pos = 0;
+                for (int i = 0; i < rd_count; i++) {
+                    PCGXDrawCmd* c = &cmd_queue_db[rd][sort_order[i]];
+                    int cnt = c->idx_count;
+                    if (cnt > 0) {
+                        __builtin_memcpy(&sort_temp_indices[new_pos],
+                                         &frame_indices_db[rd][c->idx_offset],
+                                         cnt * sizeof(GLushort));
+                        c->idx_offset = new_pos;
+                        new_pos += cnt;
+                    }
+                }
+                __builtin_memcpy(frame_indices_db[rd], sort_temp_indices,
+                                 new_pos * sizeof(GLushort));
+
+                // re-upload the rebuilt index buffer
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, new_pos * sizeof(GLushort),
+                             frame_indices_db[rd], GL_STREAM_DRAW);
+
+                // safe approach: set dirty=ALL on every draw so the replay
+                // loop's inline caches (gl_cache, last_tev, etc.) handle all
+                // redundancy. only recalculate shader_changed for sorted order.
+                {
+                    GLuint prev_sh = 0;
+                    for (int i = 0; i < rd_count; i++) {
+                        PCGXDrawCmd* c = &cmd_queue_db[rd][sort_order[i]];
+                        if (c->shader == 0) continue;
+                        c->shader_changed = (c->shader != prev_sh);
+                        c->dirty = PC_GX_DIRTY_ALL;
+                        prev_sh = c->shader;
+                    }
+                }
+
+                did_sort = 1;
+            }
+        }
+
+        if (!did_sort) {
+            vita_stats.opaque_draws = 0;
+            vita_stats.blended_draws = 0;
         }
     }
 
     // draw merge. combines consecutive draws with matching state.
+    // uses sort_order[] so it works on both sorted and unsorted frames.
     {
         int merged = 0;
         for (int i = 0; i < rd_count - 1; i++) {
-            PCGXDrawCmd* c = &cmd_queue_db[rd][i];
-            PCGXDrawCmd* n = &cmd_queue_db[rd][i + 1];
+            PCGXDrawCmd* c = &cmd_queue_db[rd][sort_order[i]];
+            PCGXDrawCmd* n = &cmd_queue_db[rd][sort_order[i + 1]];
             if (c->shader == 0 || n->shader == 0) continue;
             unsigned int nd = n->dirty;
             if (nd != 0) {
@@ -591,6 +803,7 @@ void pc_gx_submit_frame(void) {
             merged++;
         }
         vita_stats.merged_draws = rd_count - merged;
+        vita_stats.sort_merged = merged;
     }
 
     // VitaGL uniform bypass macros
@@ -618,6 +831,7 @@ void pc_gx_submit_frame(void) {
     int last_tev_valid      = 0;
     int last_lighting_valid = 0;
     int last_konst_valid    = 0;
+    int last_num_ind_stages = -1;
 
     // consume the force-resync flag set by the PC_NOOP_FULL_STATE_INVALIDATE
     // tag. this also invalidates gl_cache so the first draw re-binds all
@@ -639,7 +853,7 @@ void pc_gx_submit_frame(void) {
     int   last_vp_input_valid = 0;
 
     for (int i = 0; i < rd_count; i++) {
-        PCGXDrawCmd* cmd = &cmd_queue_db[rd][i];
+        PCGXDrawCmd* cmd = &cmd_queue_db[rd][sort_order[i]];
         if (cmd->shader == 0) continue;
 
         // late EFB texture re-resolve safety net. the worker may have
@@ -695,6 +909,7 @@ void pc_gx_submit_frame(void) {
             last_lighting_valid = 0;
             last_konst_valid = 0;
             last_vp_input_valid = 0;
+            last_num_ind_stages = -1;
         }
 
         // Upload dirty uniforms: direct write to VitaGL u->data
@@ -857,7 +1072,12 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & (PC_GX_DIRTY_INDIRECT | PC_GX_DIRTY_TEXTURES)) {
-                loc = UL(num_ind_stages); if (loc >= 0) UNI1I(cmd->indirect.num_stages);
+                // cache num_ind_stages to avoid redundant upload every draw
+                // (triggered by DIRTY_TEXTURES even when count doesn't change)
+                if (cmd->indirect.num_stages != last_num_ind_stages) {
+                    loc = UL(num_ind_stages); if (loc >= 0) UNI1I(cmd->indirect.num_stages);
+                    last_num_ind_stages = cmd->indirect.num_stages;
+                }
                 if (cmd->indirect.num_stages > 0) {
                     for (int ii = 0; ii < cmd->indirect.num_stages && ii < 4; ii++) {
                         if (cmd->indirect.tex[ii])
@@ -886,12 +1106,21 @@ void pc_gx_submit_frame(void) {
                 loc = UL(fog_color); if (loc >= 0) DFVN(loc, cmd->fog.color, 16);
             }
 
-            dirty_vert_unifs = 1;
-            dirty_frag_unifs = 1;
+            // only flag VitaGL's uniform flush when we actually wrote data.
+            // draws with dirty==0 (cleared by pre-dedup) skip all writes
+            // above, so VitaGL can reuse the last uploaded values as-is.
+            if (dirty) {
+                dirty_vert_unifs = 1;
+                dirty_frag_unifs = 1;
+            }
             #undef DFVN
         }
 
-        // GL state from snapshot
+        // GL state from snapshot. outer check skips all 4 inner checks when
+        // no GL state is dirty (common case after expanded pre-dedup).
+        #define GL_STATE_ANY (PC_GX_DIRTY_DEPTH | PC_GX_DIRTY_COLOR_MASK | \
+                              PC_GX_DIRTY_CULL | PC_GX_DIRTY_BLEND)
+        if (cmd->dirty & GL_STATE_ANY) {
         if (cmd->dirty & PC_GX_DIRTY_DEPTH) {
             if (cmd->gl_state.z_compare_enable) {
                 if (gl_cache.depth_test != 1) { glEnable(GL_DEPTH_TEST); gl_cache.depth_test = 1; }
@@ -975,6 +1204,8 @@ void pc_gx_submit_frame(void) {
                     break;
             }
         }
+        } // end GL_STATE_ANY
+        #undef GL_STATE_ANY
 
         // viewport and scissor from snapshot. short-circuit the float math
         // when the raw inputs match the previous draw; viewport rarely
@@ -1176,7 +1407,9 @@ void pc_gx_submit_frame(void) {
 
 
 void vita_gx_flush_vertices_cmdbuf(int count) {
+#ifdef VITA_DEBUG
     unsigned int _flush_t0 = sceKernelGetProcessTimeLow();
+#endif
 
     vita_cpu_lit_active = 0;
     int saved_enable = g_gx.chan_ctrl_enable[0];
@@ -1191,9 +1424,13 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     }
 
     // Shader lookup (pure CPU, no GL calls)
+#ifdef VITA_DEBUG
     unsigned int _tev_t0 = sceKernelGetProcessTimeLow();
+#endif
     GLuint shader = pc_gx_tev_get_shader(&g_gx);
+#ifdef VITA_DEBUG
     vita_timing.tevmatch_us += sceKernelGetProcessTimeLow() - _tev_t0;
+#endif
     if (shader == 0) {
         if (vita_cpu_lit_active) {
             g_gx.chan_ctrl_enable[0] = saved_enable;
@@ -1533,14 +1770,18 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         memcpy(cmd->lighting.amb_color_0, g_gx.chan_amb_color[0], sizeof(cmd->lighting.amb_color_0));
         cmd->lighting.amb_src_0 = g_gx.chan_ctrl_amb_src[0];
         cmd->lighting.light_mask_0 = g_gx.chan_ctrl_light_mask[0];
-        for (int i = 0; i < 8; i++) {
-            if (g_gx.chan_ctrl_light_mask[0] & (1 << i)) {
-                memcpy(cmd->lighting.light_pos[i], vita_light_norm[i], 3 * sizeof(float));
-                memcpy(cmd->lighting.light_color[i], g_gx.lights[i].color, 4 * sizeof(float));
-            } else {
-                cmd->lighting.light_pos[i][0] = 0.0f; cmd->lighting.light_pos[i][1] = 0.0f; cmd->lighting.light_pos[i][2] = 1.0f;
-                cmd->lighting.light_color[i][0] = cmd->lighting.light_color[i][1] = cmd->lighting.light_color[i][2] = cmd->lighting.light_color[i][3] = 0.0f;
-            }
+        // bulk-zero all light data (NEON-vectorized memset), then overwrite
+        // only active lights. replaces the per-iteration scalar stores for
+        // the inactive case. color=0 means position doesn't matter for
+        // lighting contribution (0 * anything = 0), so zero pos is safe.
+        __builtin_memset(cmd->lighting.light_pos, 0, sizeof(cmd->lighting.light_pos));
+        __builtin_memset(cmd->lighting.light_color, 0, sizeof(cmd->lighting.light_color));
+        int mask = g_gx.chan_ctrl_light_mask[0];
+        while (mask) {
+            int i = __builtin_ctz(mask);  // index of lowest set bit
+            mask &= mask - 1;              // clear that bit
+            __builtin_memcpy(cmd->lighting.light_pos[i], vita_light_norm[i], 12);
+            __builtin_memcpy(cmd->lighting.light_color[i], g_gx.lights[i].color, 16);
         }
     }
 
@@ -1652,9 +1893,31 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         cmd->gl_state.blend_dst = g_gx.blend_dst;
     }
 
-    memcpy(cmd->viewport, g_gx.viewport, sizeof(cmd->viewport));
-    memcpy(cmd->scissor, g_gx.scissor, sizeof(cmd->scissor));
-    cmd->widescreen_stretch = g_pc_widescreen_stretch;
+    // viewport/scissor: copy unconditionally on shader change, otherwise
+    // compare against last snapshot and skip if unchanged. saves ~40 bytes
+    // memcpy per non-viewport-changing draw (~90% of draws).
+    {
+        static float last_vp[6];
+        static int last_sc[4];
+        static int last_ws = -1;
+        static int last_vpsc_valid = 0;
+        if (!shader_changed && last_vpsc_valid &&
+            __builtin_memcmp(g_gx.viewport, last_vp, 24) == 0 &&
+            __builtin_memcmp(g_gx.scissor, last_sc, 16) == 0 &&
+            g_pc_widescreen_stretch == last_ws) {
+            memcpy(cmd->viewport, last_vp, 24);
+            memcpy(cmd->scissor, last_sc, 16);
+            cmd->widescreen_stretch = last_ws;
+        } else {
+            memcpy(cmd->viewport, g_gx.viewport, 24);
+            memcpy(cmd->scissor, g_gx.scissor, 16);
+            cmd->widescreen_stretch = g_pc_widescreen_stretch;
+            __builtin_memcpy(last_vp, g_gx.viewport, 24);
+            __builtin_memcpy(last_sc, g_gx.scissor, 16);
+            last_ws = g_pc_widescreen_stretch;
+            last_vpsc_valid = 1;
+        }
+    }
 
     // PASSTHROUGH: simple shader does tex*ras, but pure-texture passthrough
     // TEV (D=TEXC, no B*C) must not multiply by ras. Force num_chans=0 so
@@ -1694,7 +1957,9 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         g_gx.dirty |= PC_GX_DIRTY_LIGHTING;
     }
 
+#ifdef VITA_DEBUG
     vita_timing.flush_us += sceKernelGetProcessTimeLow() - _flush_t0;
+#endif
 }
 
 #endif // TARGET_VITA

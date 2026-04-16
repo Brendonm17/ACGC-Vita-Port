@@ -284,9 +284,9 @@ static void vita_atexit_cleanup(void) {
 // to catch late created threads (SDL audio device, etc).
 //
 // final layout:
-//   core 0: main, SDL audio callback (SDLAudioP1)
+//   core 0: main (submit_frame), SDL audio callback (SDLAudioP1)
 //   core 1: emu64 worker, SceGxmDisplayQueue, SDLTimer, SceCommonDialogWorker
-//   core 2: AudioProducer, vtc_io, VitaGL Garbage Collector
+//   core 2: vtc_io, AudioProducer, VitaGL Garbage Collector
 void vita_pin_hidden_threads(void) {
     SceKernelThreadInfo info;
     int misses_in_row = 0;
@@ -304,17 +304,17 @@ void vita_pin_hidden_threads(void) {
         }
         misses_in_row = 0;
 
-        // skip threads already pinned at creation
+        // skip threads already pinned at creation or by pc_platform_init
         if (strcmp(info.name, "emu64_worker") == 0 ||
             strcmp(info.name, "vtc_io") == 0 ||
-            strcmp(info.name, "TexPackLoader") == 0) continue;
+            strcmp(info.name, "TexPackLoader") == 0 ||
+            strcmp(info.name, "ACGC00001") == 0) continue;
 
-        // core 0: vtc_io, SDL audio callback
-        // core 1: emu64 worker
-        // core 2: main thread (GL submit), GC, audio producer, misc
+        // core 0: SDLAudio callback (tiny)
+        // core 1: SceGxmDisplayQueue, SDLTimer, SceCommonDialogWorker
+        // core 2: GC, AudioProducer
         int target = 0;
-        if (strcmp(info.name, "ACGC00001") == 0 ||
-            strcmp(info.name, "Garbage Collector") == 0 ||
+        if (strcmp(info.name, "Garbage Collector") == 0 ||
             strcmp(info.name, "AudioProducer") == 0) {
             target = SCE_KERNEL_CPU_MASK_USER_2;
         } else if (strcmp(info.name, "SceGxmDisplayQueue") == 0 ||

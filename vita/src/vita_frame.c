@@ -41,17 +41,22 @@ static void vita_perf_log_frame(void) {
     perf_acc_swap += vita_timing.swap_us;
     perf_frame_count++;
     if (perf_frame_count >= 120) {
-        vita_log("[PERF] submit=%.1fms emu64=%.1fms swap=%.1fms draws=%d drop=%d shswitch=%d spec=%d uber=%d atest=%d texup=%d\n",
+        vita_log("[PERF] submit=%.1fms emu64=%.1fms swap=%.1fms flush=%.1fms tev=%.1fms draws=%d drop=%d shswitch=%d spec=%d uber=%d atest=%d texup=%d opq=%d bld=%d smerge=%d\n",
                 (float)perf_acc_submit / perf_frame_count / 1000.0f,
                 (float)perf_acc_emu64 / perf_frame_count / 1000.0f,
                 (float)perf_acc_swap / perf_frame_count / 1000.0f,
+                (float)vita_timing.flush_us / 1000.0f,
+                (float)vita_timing.tevmatch_us / 1000.0f,
                 vita_stats.merged_draws,
                 vita_stats.dropped_draws,
                 vita_stats.shader_switches,
                 vita_tev_specialized_draws,
                 vita_tev_complex_draws,
                 vita_tev_alpha_test_draws,
-                vita_stats.deferred_tex_uploads);
+                vita_stats.deferred_tex_uploads,
+                vita_stats.opaque_draws,
+                vita_stats.blended_draws,
+                vita_stats.sort_merged);
         if (vita_tev_complex_draws > 0) {
             vita_dump_tev_configs();
         }

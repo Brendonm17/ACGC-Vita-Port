@@ -2,6 +2,8 @@
 #include "pc_platform.h"
 #ifdef TARGET_VITA
 #include "vita_shared.h"
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #endif
 
 #define VI_TVMODE_NTSC_INT    0
@@ -167,6 +169,9 @@ void VIWaitForRetrace(void) {
         (pc_frame_counter % 600 == 0)) {
         extern void vita_pin_hidden_threads(void);
         vita_pin_hidden_threads();
+        // always re-pin main to core 0. something (SDL, VitaGL, OS) may
+        // have moved it since the last pin.
+        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_0);
     }
 #endif
 }

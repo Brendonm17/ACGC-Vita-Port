@@ -789,7 +789,10 @@ with open(OUT_FILE, "w") as f:
                        (43, "tex*ras+C2 + reg*TEXA + reg*KONST alpha"),
                        (44, "C2 color + RASA*TEXA accumulated alpha"),
                        (45, "1-stage god ray: reg*tex color + reg*TEXA alpha"),
-                       (46, "2-stage god ray: reg*tex+reg*reg color + TEXA chain alpha")]:
+                       (46, "2-stage god ray: reg*tex+reg*reg color + TEXA chain alpha"),
+                       (47, "(C2+C1*tex)*ras color + A2 alpha"),
+                       (48, "lerp(ras,C1,A0)*tex color + tex.a alpha"),
+                       (49, "C2*ras color + A2*tex.a alpha")]:
         cfg_exists = os.path.exists(os.path.join(SHADER_DIR, f"cfg{cfgn}_v0.gxp"))
         if cfg_exists:
             for i in range(8):

@@ -159,7 +159,7 @@ GLuint vita_get_simple_shader(void) { return vita_simple[0]; }
 
 // specialized shaders for top TEV configs
 #define VITA_SPEC_COUNT 8  // L/F/A = 3 bits = 8 variants each
-#define VITA_CFG_COUNT  47
+#define VITA_CFG_COUNT  50
 
 typedef struct {
     const char* name;
@@ -299,6 +299,15 @@ typedef struct {
 #ifndef VITA_HAS_CFG46
 #define VITA_HAS_CFG46 0
 #endif
+#ifndef VITA_HAS_CFG47
+#define VITA_HAS_CFG47 0
+#endif
+#ifndef VITA_HAS_CFG48
+#define VITA_HAS_CFG48 0
+#endif
+#ifndef VITA_HAS_CFG49
+#define VITA_HAS_CFG49 0
+#endif
 
 // dummy data for unavailable configs
 static const unsigned char* vita_gxp_dummy_variants[8] = {0};
@@ -369,6 +378,18 @@ static const unsigned int vita_gxp_dummy_sizes[8] = {0};
 #define gxp_cfg46_variants vita_gxp_dummy_variants
 #define gxp_cfg46_variant_sizes vita_gxp_dummy_sizes
 #endif
+#if !VITA_HAS_CFG47
+#define gxp_cfg47_variants vita_gxp_dummy_variants
+#define gxp_cfg47_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG48
+#define gxp_cfg48_variants vita_gxp_dummy_variants
+#define gxp_cfg48_variant_sizes vita_gxp_dummy_sizes
+#endif
+#if !VITA_HAS_CFG49
+#define gxp_cfg49_variants vita_gxp_dummy_variants
+#define gxp_cfg49_variant_sizes vita_gxp_dummy_sizes
+#endif
 
 #define CFG_ENTRY(n, avail) { "CFG" #n, {0}, \
     avail ? (const unsigned char**)gxp_cfg##n##_variants : vita_gxp_dummy_variants, \
@@ -422,6 +443,9 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
     CFG_ENTRY(44, VITA_HAS_CFG44),
     CFG_ENTRY(45, VITA_HAS_CFG45),
     CFG_ENTRY(46, VITA_HAS_CFG46),
+    CFG_ENTRY(47, VITA_HAS_CFG47),
+    CFG_ENTRY(48, VITA_HAS_CFG48),
+    CFG_ENTRY(49, VITA_HAS_CFG49),
 };
 
 // map old vita_cfgN[] names to table entries
@@ -471,6 +495,9 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg44 vita_cfgs[43].programs
 #define vita_cfg45 vita_cfgs[44].programs
 #define vita_cfg46 vita_cfgs[45].programs
+#define vita_cfg47 vita_cfgs[46].programs
+#define vita_cfg48 vita_cfgs[47].programs
+#define vita_cfg49 vita_cfgs[48].programs
 
 // hash-based fast lookup for fully-literal TEV configs. replaces the
 // linear if/else cascade for the worker-thread per-draw shader match,
@@ -936,7 +963,48 @@ static inline int is_texa_times_register(int b, int c) {
     return (b == 4 && is_reg_c) || (c == 4 && is_reg_b);
 }
 
+static GLuint pc_gx_tev_get_shader_inner(PCGXState* state);
+
 GLuint pc_gx_tev_get_shader(PCGXState* state) {
+#ifdef TARGET_VITA
+    // fast path: if no TEV-relevant state changed since last flush, reuse
+    // cached result. covers ~80% of flushes in steady-state rendering.
+    // mask excludes TEV_COLORS/KONST (affect uniforms, not shader selection)
+    // and LIGHTING (checked separately because cpu_lit always marks it dirty).
+    #define TEV_SHADER_DIRTY_MASK \
+        (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_ALPHA_CMP | \
+         PC_GX_DIRTY_FOG | PC_GX_DIRTY_BLEND | PC_GX_DIRTY_DEPTH)
+    static GLuint cached_shader = 0;
+    static int cached_ocean = 0, cached_remap = 0, cached_pass = 0;
+    static int cached_lit = -1;
+    static int cache_valid = 0;
+
+    // invalidated by PC_NOOP_FULL_STATE_INVALIDATE
+    extern int g_vita_force_state_resync;
+    if (g_vita_force_state_resync) cache_valid = 0;
+
+    int lit_now = state->chan_ctrl_enable[0];
+    if (cache_valid && !(state->dirty & TEV_SHADER_DIRTY_MASK) && lit_now == cached_lit) {
+        vita_tev_is_ocean = cached_ocean;
+        vita_tev_tex_remap = cached_remap;
+        vita_tev_passthrough = cached_pass;
+        return cached_shader;
+    }
+
+    GLuint result = pc_gx_tev_get_shader_inner(state);
+    cached_shader = result;
+    cached_ocean = vita_tev_is_ocean;
+    cached_remap = vita_tev_tex_remap;
+    cached_pass = vita_tev_passthrough;
+    cached_lit = lit_now;
+    cache_valid = 1;
+    return result;
+#else
+    return pc_gx_tev_get_shader_inner(state);
+#endif
+}
+
+static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
     vita_tev_is_ocean = 0;
     vita_tev_tex_remap = 0;
     vita_tev_passthrough = 0;
@@ -1609,6 +1677,35 @@ GLuint pc_gx_tev_get_shader(PCGXState* state) {
             vita_cfg32[fa] && !VITA_CFG_DISABLED(32)) {
             vita_tev_specialized_draws++;
             return vita_cfg32[fa];
+        }
+        // CFG47: (C2 + C1*tex)*ras color + A2 alpha
+        if (w0->color_a==15 && w0->color_b==8  && w0->color_c==4  && w0->color_d==6 &&
+            w0->alpha_a==7  && w0->alpha_b==7  && w0->alpha_c==7  && w0->alpha_d==3 &&
+            w1->color_a==15 && w1->color_b==0  && w1->color_c==10 && w1->color_d==15 &&
+            w1->alpha_a==7  && w1->alpha_b==7  && w1->alpha_c==7  && w1->alpha_d==0 &&
+            vita_cfg47[fa] && !VITA_CFG_DISABLED(47)) {
+            vita_tev_specialized_draws++;
+            return vita_cfg47[fa];
+        }
+
+        // CFG48: lerp(ras,C1,A0)*tex color + tex.a alpha
+        if (w0->color_a==10 && w0->color_b==4  && w0->color_c==3  && w0->color_d==15 &&
+            w0->alpha_a==7  && w0->alpha_b==7  && w0->alpha_c==7  && w0->alpha_d==7 &&
+            w1->color_a==15 && w1->color_b==0  && w1->color_c==8  && w1->color_d==15 &&
+            w1->alpha_a==7  && w1->alpha_b==7  && w1->alpha_c==7  && w1->alpha_d==4 &&
+            vita_cfg48[fa] && !VITA_CFG_DISABLED(48)) {
+            vita_tev_specialized_draws++;
+            return vita_cfg48[fa];
+        }
+
+        // CFG49: C2*ras color + A2*tex.a alpha
+        if (w0->color_a==15 && w0->color_b==15 && w0->color_c==15 && w0->color_d==6 &&
+            w0->alpha_a==7  && w0->alpha_b==4  && w0->alpha_c==3  && w0->alpha_d==7 &&
+            w1->color_a==15 && w1->color_b==0  && w1->color_c==10 && w1->color_d==15 &&
+            w1->alpha_a==7  && w1->alpha_b==7  && w1->alpha_c==7  && w1->alpha_d==0 &&
+            vita_cfg49[fa] && !VITA_CFG_DISABLED(49)) {
+            vita_tev_specialized_draws++;
+            return vita_cfg49[fa];
         }
     }
 

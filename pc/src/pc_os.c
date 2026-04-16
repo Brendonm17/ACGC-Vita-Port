@@ -336,17 +336,28 @@ void OSPanic(const char* file, int line, const char* msg, ...) {
 }
 
 void OSReport(const char* fmt, ...) {
-    if (!g_pc_verbose) return;
     va_list args;
     va_start(args, fmt);
-    vprintf(fmt, args);
+#ifdef TARGET_VITA
+    vfprintf(stderr, fmt, args);
+    fflush(stderr);
+#else
+    if (g_pc_verbose) {
+        vprintf(fmt, args);
+        fflush(stdout);
+    }
+#endif
     va_end(args);
-    fflush(stdout);
 }
 
 void OSVReport(const char* fmt, va_list list) {
+#ifdef TARGET_VITA
+    vfprintf(stderr, fmt, list);
+    fflush(stderr);
+#else
     if (!g_pc_verbose) return;
     vprintf(fmt, list);
+#endif
 }
 
 void OSReportDisable(void) {}

@@ -45,6 +45,7 @@ add_compile_definitions(
     SKIP_ERROR_CAPTURE
     NO_TEX_COMBINER
     VITA_PERF_LOG
+    VITA_DEBUG
 )
 
 add_compile_options(-fno-strict-aliasing -fwrapv -w)

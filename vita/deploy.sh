@@ -3,7 +3,7 @@
 # usage: ./deploy.sh [full|deploy|build|kill|launch]
 set -e
 
-VITA_IP="${VITA_IP:-192.168.0.148}"
+VITA_IP="${VITA_IP:-192.168.0.225}"
 VITA_FTP_PORT=1337
 VITA_CMD_PORT=1338
 TITLE_ID="ACGC00001"

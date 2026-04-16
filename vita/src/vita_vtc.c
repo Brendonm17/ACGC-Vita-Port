@@ -913,9 +913,8 @@ void vita_vtc_io_init(void) {
 
     // Start low-priority I/O thread for VTC reads.
     // Priority 0xA0 (160) = lower than main (0x40) and worker (0x60).
-    // pinned to core 2 so it never contends with main (core 0) or the
-    // emu64 worker (core 1). prevents prefetch spikes from stalling
-    // the worker and inflating wait_worker_us.
+    // core 2: off main (core 0) and emu64 worker (core 1).
+    // shares with GC + AudioProducer, all low-priority/bursty.
     g_vtc_io_sema = sceKernelCreateSema("vtc_io", 0, 0, 64, NULL);
     if (g_vtc_io_sema >= 0 && g_vtc_file_io) {
         g_vtc_io_shutdown = 0;
@@ -923,7 +922,7 @@ void vita_vtc_io_init(void) {
                                                  0xA0, // low priority
                                                  64 * 1024, // 64KB stack
                                                  0,
-                                                 SCE_KERNEL_CPU_MASK_USER_0,
+                                                 SCE_KERNEL_CPU_MASK_USER_2,
                                                  NULL);
         if (g_vtc_io_thread >= 0) {
             sceKernelStartThread(g_vtc_io_thread, 0, NULL);

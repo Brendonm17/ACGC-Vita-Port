@@ -1824,11 +1824,9 @@ void pc_texture_pack_start_async(void) {
     if (g_async_loader_thread) {
         printf("[TexturePack] Async loader started\n");
 #ifdef TARGET_VITA
-        // pin to core 0 with main at low priority so main preempts.
-        // CPU-heavy decompression here was saturating core 2 when it
-        // also hosted VTC io and audio.
+        // core 2: keep core 0 clear for main (submit_frame)
         SceUID tid = (SceUID)SDL_GetThreadID(g_async_loader_thread);
-        sceKernelChangeThreadCpuAffinityMask(tid, SCE_KERNEL_CPU_MASK_USER_0);
+        sceKernelChangeThreadCpuAffinityMask(tid, SCE_KERNEL_CPU_MASK_USER_2);
 #endif
     }
 }
