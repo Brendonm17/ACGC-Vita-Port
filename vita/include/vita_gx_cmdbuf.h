@@ -125,6 +125,8 @@ typedef struct {
     float viewport[6];
     int scissor[4];
     int widescreen_stretch;
+
+    u8 tev_tex_remap;
 } PCGXDrawCmd;
 
 typedef struct {
@@ -162,6 +164,11 @@ void vita_gx_flush_vertices_cmdbuf(int count);
 void vita_normalize_light(int i);
 void vita_set_vertex_attrib_pointers(void);
 void vita_efb_setup_texture(u32 dest_ptr, GLuint tex);
+
+void vita_cmdbuf_prededup(void);
+void vita_cmdbuf_frustum_cull(void);
+void vita_cmdbuf_presubmit(void);
+extern volatile int vita_presubmit_done;
 
 // vertex write target for a new batch. returns a pointer into cmd_verts
 // if the batch fits, otherwise falls back to g_gx.vertex_buffer and the

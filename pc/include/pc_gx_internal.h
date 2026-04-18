@@ -95,26 +95,23 @@ typedef struct {
 } PCGXTevSwapTable;
 
 typedef struct {
-    /* Primitive assembly */
+    /* hot path, packed at top. */
+    int current_vertex_idx;
+    int vertex_pending;
+    unsigned int dirty;
+#ifdef TARGET_VITA
+    PCGXVertex* vertex_write_ptr;
+    PCGXVertex* current_vtx;
+    int efb_v_flip;
+#endif
+
     int current_primitive;
     int current_vtxfmt;
     int vertex_count;
     int expected_vertex_count;
     int in_begin;
-    PCGXVertex vertex_buffer[PC_GX_MAX_VERTS];
-    int current_vertex_idx;
     PCGXVertex current_vertex;
-#ifdef TARGET_VITA
-    // per-batch vertex write target. GXBegin sets it to cmd_verts at the
-    // current write offset, or to vertex_buffer as a fallback if the
-    // batch would overflow. GXPosition/Normal/Color/TexCoord write
-    // directly through it so flush-time has no memcpy in the fast path.
-    PCGXVertex* vertex_write_ptr;
-    // pointer to the current in-progress vertex. GXPosition updates it
-    // so GXNormal/Color/TexCoord can skip the index arithmetic and
-    // global load they'd otherwise do per call.
-    PCGXVertex* current_vtx;
-#endif
+    PCGXVertex* vertex_buffer;
 
     /* Vertex descriptor */
     int vtx_desc[PC_GX_MAX_ATTR];
@@ -144,13 +141,12 @@ typedef struct {
     float tev_colors[4][4];    /* PREV, REG0, REG1, REG2 */
     float tev_k_colors[4][4];
 #ifdef TARGET_VITA
-    // cached pre-resolved TEV inputs
     float tev_resolved_ca[3][3], tev_resolved_cb[3][3], tev_resolved_cc[3][3], tev_resolved_cd[3][3];
     float tev_resolved_aval[3][4];
     float tev_resolved_csrc[3][4], tev_resolved_asrc[3][4];
     float tev_resolved_param[3][4], tev_resolved_aparam[3][2];
     int tev_resolved_tc_src[3];
-    int tev_resolve_valid; // 0=stale, 1=valid
+    int tev_resolve_valid;
 #endif
     PCGXTevSwapTable tev_swap_table[4];
 
@@ -230,8 +226,8 @@ typedef struct {
     float ind_mtx[3][2][3];
     int   ind_mtx_scale[3];
 
-    /* Deferred vertex commit: position starts vertex, commit on next position or GXEnd */
-    int vertex_pending;
+    /* vertex_pending moved to the HOT FIELDS block at the top of this
+     * struct for cache locality with other per-vertex-call hot fields. */
 
     /* GL objects */
     GLuint vao;
@@ -243,7 +239,7 @@ typedef struct {
 #endif
 
     /* Uniform locations (looked up once per shader change) */
-    struct {
+    struct pc_gx_uloc_s {
         GLint projection, modelview, normal_mtx;
         GLint tev_prev, tev_reg0, tev_reg1, tev_reg2;
         GLint num_tev_stages;
@@ -304,23 +300,24 @@ typedef struct {
     const void* array_base[PC_GX_MAX_ATTR];
     unsigned char array_stride[PC_GX_MAX_ATTR];
 
-    unsigned int dirty;
-
 #ifdef TARGET_VITA
-    int efb_v_flip;
     u32 tev_color_packed_cache[4];
     u32 tev_k_color_packed_cache[4];
     u32 chan_amb_packed_cache[2];
     u32 chan_mat_packed_cache[2];
-    // per-GL-slot EFB source dest_ptr. the worker copies this into
-    // cmd->textures.efb_src_ptr at flush time so replay can late-resolve
-    // the texture once a matching capture has been stored.
     u32 efb_src_ptr[8];
 #endif
 
 } PCGXState;
 
 extern PCGXState g_gx;
+
+#ifdef TARGET_VITA
+#define PC_GX_MAX_CACHED_SHADERS 256
+typedef struct pc_gx_uloc_s PCGXUloc;
+extern PCGXUloc pc_gx_shader_uloc_cache[PC_GX_MAX_CACHED_SHADERS];
+extern unsigned char pc_gx_shader_uloc_cached[PC_GX_MAX_CACHED_SHADERS];
+#endif
 
 typedef struct PCGXShaderCacheEntry {
     uint64_t key;

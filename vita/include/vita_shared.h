@@ -17,7 +17,35 @@ typedef struct {
     unsigned int flush_us;
     unsigned int texload_us;
     unsigned int tevmatch_us;
+    unsigned int flush_vtx_us;
+    unsigned int flush_tev_us;
+    unsigned int flush_state_us;
+    unsigned int flush_state_lighting_us;
+    unsigned int flush_state_textures_us;
     unsigned int submit_us;
+    unsigned int vgl_frag_tex_us;
+    unsigned int vgl_vert_tex_us;
+    unsigned int vgl_align_attrs_us;
+    unsigned int vgl_patch_vprog_us;
+    unsigned int vgl_upload_unif_us;
+    unsigned int vgl_vstreams_us;
+    unsigned int submit_state_us;
+    unsigned int submit_uniform_us;
+    unsigned int submit_texbind_us;
+    unsigned int submit_draw_us;
+    unsigned int submit_efb_us;
+    unsigned int submit_glstate_us;
+    unsigned int submit_waitpdd_us;
+    unsigned int submit_presub_us;
+    unsigned int submit_postsub_us;
+    unsigned int prededup_us;
+    unsigned int emu64_task_us;
+    unsigned int frustum_cull_us;
+    unsigned int beginframe_us;
+    unsigned int endframe_us;
+    unsigned int waitworker_us;
+    unsigned int gamemain_us;
+    unsigned int audio_us;
 } VitaFrameTiming;
 extern VitaFrameTiming vita_timing;
 
@@ -51,6 +79,7 @@ typedef struct {
     int opaque_draws;
     int blended_draws;
     int sort_merged;
+    int culled_draws;
 } VitaFrameStats;
 extern VitaFrameStats vita_stats;
 

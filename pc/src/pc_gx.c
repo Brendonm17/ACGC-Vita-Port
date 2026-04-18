@@ -14,7 +14,7 @@ static GLushort quad_index_buf[(PC_GX_MAX_VERTS / 4) * 6];
 #include <math.h>
 #include <dolphin/gx/GXEnum.h>
 
-/* Can't include GXTev.h — it uses enum types while we use u32 */
+/* Can't include GXTev.h here: it uses enum types while we use u32 */
 void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d);
 void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d);
 void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, GXBool clamp, u32 out_reg);
@@ -260,6 +260,13 @@ void pc_gx_init(void) {
     memset(&g_gx, 0, sizeof(g_gx));
     for (int i = 0; i < 8; i++) g_gx.gl_tex_deferred[i] = -1;
 
+    g_gx.vertex_buffer = (PCGXVertex*)malloc(PC_GX_MAX_VERTS * sizeof(PCGXVertex));
+    if (!g_gx.vertex_buffer) {
+        fprintf(stderr, "[GX] Failed to allocate vertex_buffer (%u bytes)\n",
+                (unsigned)(PC_GX_MAX_VERTS * sizeof(PCGXVertex)));
+        exit(1);
+    }
+
     // default to GC dimensions so first draw before GXSetViewport works
     g_gx.viewport[2] = 640.0f;
     g_gx.viewport[3] = 480.0f;
@@ -270,7 +277,7 @@ void pc_gx_init(void) {
 #ifdef TARGET_VITA
     // vertex_write_ptr starts at the fallback vertex_buffer. GXBegin
     // re-points it into cmd_verts when a batch actually starts.
-    g_gx.vertex_write_ptr = &g_gx.vertex_buffer[0];
+    g_gx.vertex_write_ptr = g_gx.vertex_buffer;
     g_gx.current_vtx = NULL;
     vita_cmdbuf_init();
 #endif
@@ -725,13 +732,17 @@ void GXPosition3f32(f32 x, f32 y, f32 z) {
     }
     PCGXVertex* v = &g_gx.vertex_write_ptr[g_gx.current_vertex_idx];
     g_gx.current_vtx = v;
-    static const PCGXVertex vtx_template = {
-        {0}, {0}, {255,255,255,255}, {{0}}
-    };
-    *v = vtx_template;
     v->position[0] = x;
     v->position[1] = y;
     v->position[2] = z;
+    v->normal[0] = 0.0f;
+    v->normal[1] = 0.0f;
+    v->normal[2] = 0.0f;
+    *(uint32_t*)v->color0 = 0xFFFFFFFFu;
+    v->texcoord[0][0] = 0.0f;
+    v->texcoord[0][1] = 0.0f;
+    v->texcoord[1][0] = 0.0f;
+    v->texcoord[1][1] = 0.0f;
     g_gx.vertex_pending = 1;
 #else
     /* Deferred commit: position call commits the previous vertex */
@@ -1045,7 +1056,18 @@ void pc_gx_cache_uniform_locations(GLuint shader) {
         uloc_cache[uloc_cache_count].locs = g_gx.uloc;
         uloc_cache_count++;
     }
+#ifdef TARGET_VITA
+    if (shader > 0 && shader < PC_GX_MAX_CACHED_SHADERS && !pc_gx_shader_uloc_cached[shader]) {
+        pc_gx_shader_uloc_cache[shader] = g_gx.uloc;
+        pc_gx_shader_uloc_cached[shader] = 1;
+    }
+#endif
 }
+
+#ifdef TARGET_VITA
+PCGXUloc pc_gx_shader_uloc_cache[PC_GX_MAX_CACHED_SHADERS];
+unsigned char pc_gx_shader_uloc_cached[PC_GX_MAX_CACHED_SHADERS];
+#endif
 
 /* --- Vertex Flush --- */
 #ifndef TARGET_VITA

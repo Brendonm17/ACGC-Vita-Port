@@ -30,6 +30,33 @@ static unsigned int perf_frame_count = 0;
 static unsigned int perf_acc_submit = 0;
 static unsigned int perf_acc_emu64 = 0;
 static unsigned int perf_acc_swap = 0;
+static unsigned int perf_acc_vgl_frag_tex = 0;
+static unsigned int perf_acc_vgl_vert_tex = 0;
+static unsigned int perf_acc_vgl_align = 0;
+static unsigned int perf_acc_vgl_patch = 0;
+static unsigned int perf_acc_vgl_unif = 0;
+static unsigned int perf_acc_vgl_vstreams = 0;
+static unsigned int perf_acc_submit_state = 0;
+static unsigned int perf_acc_submit_draw = 0;
+static unsigned int perf_acc_submit_efb = 0;
+static unsigned int perf_acc_submit_uniform = 0;
+static unsigned int perf_acc_submit_glstate = 0;
+static unsigned int perf_acc_submit_waitpdd = 0;
+static unsigned int perf_acc_submit_presub = 0;
+static unsigned int perf_acc_submit_postsub = 0;
+static unsigned int perf_acc_prededup = 0;
+static unsigned int perf_acc_emu64_task = 0;
+static unsigned int perf_acc_frustum_cull = 0;
+static unsigned int perf_acc_flush_vtx = 0;
+static unsigned int perf_acc_flush_tev = 0;
+static unsigned int perf_acc_flush_state = 0;
+static unsigned int perf_acc_flush_lighting = 0;
+static unsigned int perf_acc_flush_textures = 0;
+static unsigned int perf_acc_endframe = 0;
+static unsigned int perf_acc_waitworker = 0;
+static unsigned int perf_acc_gamemain = 0;
+static unsigned int perf_acc_beginframe = 0;
+static unsigned int perf_acc_audio = 0;
 
 static void vita_perf_log_frame(void) {
     if (!vita_perf_log_init_done) {
@@ -39,16 +66,45 @@ static void vita_perf_log_frame(void) {
     perf_acc_submit += vita_submit_us;
     perf_acc_emu64 += vita_timing.emu64_us;
     perf_acc_swap += vita_timing.swap_us;
+    perf_acc_vgl_frag_tex += vita_timing.vgl_frag_tex_us;
+    perf_acc_vgl_vert_tex += vita_timing.vgl_vert_tex_us;
+    perf_acc_vgl_align    += vita_timing.vgl_align_attrs_us;
+    perf_acc_vgl_patch    += vita_timing.vgl_patch_vprog_us;
+    perf_acc_vgl_unif     += vita_timing.vgl_upload_unif_us;
+    perf_acc_vgl_vstreams += vita_timing.vgl_vstreams_us;
+    perf_acc_submit_state += vita_timing.submit_state_us;
+    perf_acc_submit_draw  += vita_timing.submit_draw_us;
+    perf_acc_submit_efb   += vita_timing.submit_efb_us;
+    perf_acc_submit_uniform += vita_timing.submit_uniform_us;
+    perf_acc_submit_glstate += vita_timing.submit_glstate_us;
+    perf_acc_submit_waitpdd += vita_timing.submit_waitpdd_us;
+    perf_acc_submit_presub  += vita_timing.submit_presub_us;
+    perf_acc_submit_postsub += vita_timing.submit_postsub_us;
+    perf_acc_prededup       += vita_timing.prededup_us;
+    perf_acc_emu64_task     += vita_timing.emu64_task_us;
+    perf_acc_frustum_cull   += vita_timing.frustum_cull_us;
+    perf_acc_flush_vtx    += vita_timing.flush_vtx_us;
+    perf_acc_flush_tev    += vita_timing.flush_tev_us;
+    perf_acc_flush_state  += vita_timing.flush_state_us;
+    perf_acc_flush_lighting += vita_timing.flush_state_lighting_us;
+    perf_acc_flush_textures += vita_timing.flush_state_textures_us;
+    perf_acc_endframe     += vita_timing.endframe_us;
+    perf_acc_waitworker   += vita_timing.waitworker_us;
+    perf_acc_gamemain     += vita_timing.gamemain_us;
+    perf_acc_beginframe   += vita_timing.beginframe_us;
+    perf_acc_audio        += vita_timing.audio_us;
     perf_frame_count++;
     if (perf_frame_count >= 120) {
-        vita_log("[PERF] submit=%.1fms emu64=%.1fms swap=%.1fms flush=%.1fms tev=%.1fms draws=%d drop=%d shswitch=%d spec=%d uber=%d atest=%d texup=%d opq=%d bld=%d smerge=%d\n",
+        vita_log("[PERF] submit=%.1fms emu64=%.1fms swap=%.1fms begin=%.1fms flush=%.1fms tev=%.1fms draws=%d drop=%d cull=%d shswitch=%d spec=%d uber=%d atest=%d texup=%d opq=%d bld=%d smerge=%d\n",
                 (float)perf_acc_submit / perf_frame_count / 1000.0f,
                 (float)perf_acc_emu64 / perf_frame_count / 1000.0f,
                 (float)perf_acc_swap / perf_frame_count / 1000.0f,
+                (float)vita_timing.beginframe_us / 1000.0f,
                 (float)vita_timing.flush_us / 1000.0f,
                 (float)vita_timing.tevmatch_us / 1000.0f,
                 vita_stats.merged_draws,
                 vita_stats.dropped_draws,
+                vita_stats.culled_draws,
                 vita_stats.shader_switches,
                 vita_tev_specialized_draws,
                 vita_tev_complex_draws,
@@ -57,12 +113,91 @@ static void vita_perf_log_frame(void) {
                 vita_stats.opaque_draws,
                 vita_stats.blended_draws,
                 vita_stats.sort_merged);
+        vita_log("[PERF_VGL] ftex=%.2fms vtex=%.2fms align=%.2fms patch=%.2fms unif=%.2fms vstream=%.2fms\n",
+                (float)perf_acc_vgl_frag_tex / perf_frame_count / 1000.0f,
+                (float)perf_acc_vgl_vert_tex / perf_frame_count / 1000.0f,
+                (float)perf_acc_vgl_align    / perf_frame_count / 1000.0f,
+                (float)perf_acc_vgl_patch    / perf_frame_count / 1000.0f,
+                (float)perf_acc_vgl_unif     / perf_frame_count / 1000.0f,
+                (float)perf_acc_vgl_vstreams / perf_frame_count / 1000.0f);
+        vita_log("[PERF_SUB] state=%.2fms draw=%.2fms efb=%.2fms\n",
+                (float)perf_acc_submit_state / perf_frame_count / 1000.0f,
+                (float)perf_acc_submit_draw  / perf_frame_count / 1000.0f,
+                (float)perf_acc_submit_efb   / perf_frame_count / 1000.0f);
+        {
+            unsigned int swp = perf_acc_submit_waitpdd / perf_frame_count;
+            unsigned int spr = perf_acc_submit_presub / perf_frame_count;
+            unsigned int spo = perf_acc_submit_postsub / perf_frame_count;
+            unsigned int stot_out = swp + spr + spo;
+            unsigned int sub_tot = perf_acc_submit / perf_frame_count;
+            unsigned int sper_tot = (perf_acc_submit_state + perf_acc_submit_draw +
+                                     perf_acc_submit_efb) / perf_frame_count;
+            unsigned int gap = (sub_tot > stot_out + sper_tot) ? (sub_tot - stot_out - sper_tot) : 0;
+            unsigned int pddwork = perf_acc_prededup / perf_frame_count;
+            vita_log("[PERF_SUB_OUT] waitpdd=%.2fms presub=%.2fms postsub=%.2fms gap=%.2fms pddwork=%.2fms\n",
+                    (float)swp / 1000.0f, (float)spr / 1000.0f,
+                    (float)spo / 1000.0f, (float)gap / 1000.0f,
+                    (float)pddwork / 1000.0f);
+        }
+        {
+            unsigned int sun = perf_acc_submit_uniform / perf_frame_count;
+            unsigned int sgs = perf_acc_submit_glstate / perf_frame_count;
+            unsigned int stot = perf_acc_submit_state / perf_frame_count;
+            unsigned int sother = (stot > sun + sgs) ? (stot - sun - sgs) : 0;
+            vita_log("[PERF_STATE_SPLIT] unif=%.2fms glstate=%.2fms other=%.2fms\n",
+                    (float)sun / 1000.0f, (float)sgs / 1000.0f, (float)sother / 1000.0f);
+        }
+        vita_log("[PERF_FLUSH] vtx=%.2fms tev=%.2fms state=%.2fms\n",
+                (float)perf_acc_flush_vtx   / perf_frame_count / 1000.0f,
+                (float)perf_acc_flush_tev   / perf_frame_count / 1000.0f,
+                (float)perf_acc_flush_state / perf_frame_count / 1000.0f);
+        // Core 1 worker split. task = N64 DL interpreter + cmd buffer
+        // build. cull = frustum cull pass. emu64 = sum of both.
+        vita_log("[PERF_WORKER] emu64_task=%.2fms frustum_cull=%.2fms\n",
+                (float)perf_acc_emu64_task / perf_frame_count / 1000.0f,
+                (float)perf_acc_frustum_cull / perf_frame_count / 1000.0f);
+        // full main-thread timeline. sum these + swap + any other gap
+        // should equal frame time. anything unaccounted is stalled/idle.
+        vita_log("[PERF_MAIN] endF=%.2fms waitW=%.2fms game=%.2fms beginF=%.2fms submit=%.2fms audio=%.2fms\n",
+                (float)perf_acc_endframe   / perf_frame_count / 1000.0f,
+                (float)perf_acc_waitworker / perf_frame_count / 1000.0f,
+                (float)perf_acc_gamemain   / perf_frame_count / 1000.0f,
+                (float)perf_acc_beginframe / perf_frame_count / 1000.0f,
+                (float)perf_acc_submit     / perf_frame_count / 1000.0f,
+                (float)perf_acc_audio      / perf_frame_count / 1000.0f);
         if (vita_tev_complex_draws > 0) {
             vita_dump_tev_configs();
         }
         perf_acc_submit = 0;
         perf_acc_emu64 = 0;
         perf_acc_swap = 0;
+        perf_acc_vgl_frag_tex = 0;
+        perf_acc_vgl_vert_tex = 0;
+        perf_acc_vgl_align = 0;
+        perf_acc_vgl_patch = 0;
+        perf_acc_vgl_unif = 0;
+        perf_acc_vgl_vstreams = 0;
+        perf_acc_submit_state = 0;
+        perf_acc_submit_draw = 0;
+        perf_acc_submit_efb = 0;
+        perf_acc_submit_uniform = 0;
+        perf_acc_submit_glstate = 0;
+        perf_acc_submit_waitpdd = 0;
+        perf_acc_submit_presub = 0;
+        perf_acc_submit_postsub = 0;
+        perf_acc_prededup = 0;
+        perf_acc_emu64_task = 0;
+        perf_acc_frustum_cull = 0;
+        perf_acc_flush_vtx = 0;
+        perf_acc_flush_tev = 0;
+        perf_acc_flush_state = 0;
+        perf_acc_flush_lighting = 0;
+        perf_acc_flush_textures = 0;
+        perf_acc_endframe = 0;
+        perf_acc_waitworker = 0;
+        perf_acc_gamemain = 0;
+        perf_acc_beginframe = 0;
+        perf_acc_audio = 0;
         perf_frame_count = 0;
     }
 }
@@ -73,14 +208,28 @@ static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
         int skip_top_swap = vita_skip_next_top_swap;
         vita_skip_next_top_swap = 0;
         if (!vita_gpu_skip_draws && !skip_top_swap) {
+#ifdef VITA_DEBUG
+            unsigned int ef0 = sceKernelGetProcessTimeLow();
+#endif
             JW_EndFrame();
+#ifdef VITA_DEBUG
+            vita_timing.endframe_us = sceKernelGetProcessTimeLow() - ef0;
+#endif
         }
         vita_gpu_skip_draws = 0;
     }
 
     cmd_write = 1 - cmd_write;
 
-    JW_BeginFrame();
+    {
+#ifdef VITA_DEBUG
+        unsigned int bf0 = sceKernelGetProcessTimeLow();
+#endif
+        JW_BeginFrame();
+#ifdef VITA_DEBUG
+        vita_timing.beginframe_us = sceKernelGetProcessTimeLow() - bf0;
+#endif
+    }
 
     emu64_init();
     emu64_set_ucode_info(2, ucode);
@@ -90,15 +239,20 @@ static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     vita_worker_pending = 1;
 
     if (!vita_first_frame) {
-        unsigned int st0 = sceKernelGetProcessTimeLow();
-        pc_gx_submit_frame();
-        vita_timing.submit_us = sceKernelGetProcessTimeLow() - st0;
 #ifdef VITA_DEBUG
+        unsigned int st0 = sceKernelGetProcessTimeLow();
+#endif
+        pc_gx_submit_frame();
+#ifdef VITA_DEBUG
+        vita_timing.submit_us = sceKernelGetProcessTimeLow() - st0;
         vita_submit_us = vita_timing.submit_us;
 #endif
-    } else {
+    }
+#ifdef VITA_DEBUG
+    else {
         vita_timing.submit_us = 0;
     }
+#endif
 
 #ifdef VITA_DEBUG
     vita_perf_log_frame();
@@ -113,9 +267,19 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
     emu64_set_ucode_info(2, ucode);
     emu64_set_first_ucode(ucode[0].ucode_p);
     {
+#ifdef VITA_DEBUG
         unsigned int t0 = sceKernelGetProcessTimeLow();
+#endif
         emu64_taskstart(gfx_list);
+        // TEV resolve is inlined into prededup's per-cmd loop. Single-
+        // threaded fallback has to do all core 2 work inline here.
+        extern volatile int pdd_buffer_idx;
+        pdd_buffer_idx = cmd_write;
+        vita_cmdbuf_prededup();
+        vita_cmdbuf_frustum_cull();
+#ifdef VITA_DEBUG
         vita_timing.emu64_us = sceKernelGetProcessTimeLow() - t0;
+#endif
     }
     // swap so submit reads what we just wrote
     cmd_write = 1 - cmd_write;
@@ -162,13 +326,21 @@ void vita_frame_run(ucode_info* ucode, void* gfx_list) {
 
 void vita_frame_wait_worker(void) {
     if (vita_emu64_worker_active() && vita_worker_pending) {
+#ifdef VITA_DEBUG
+        unsigned int ww0 = sceKernelGetProcessTimeLow();
+#endif
         vita_emu64_wait_done();
+#ifdef VITA_DEBUG
+        vita_timing.waitworker_us = sceKernelGetProcessTimeLow() - ww0;
+#endif
         emu64_cleanup();
         vita_worker_pending = 0;
-        // prefetch runs on main so variable latency doesn't block the worker
-        // loop. queues slots to the VTC io thread, no file io itself.
         extern void vita_vtc_prefetch(void);
         vita_vtc_prefetch();
+    } else {
+#ifdef VITA_DEBUG
+        vita_timing.waitworker_us = 0;
+#endif
     }
 }
 

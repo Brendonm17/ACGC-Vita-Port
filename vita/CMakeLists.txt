@@ -24,7 +24,7 @@ set(VITA_APP_NAME "Animal Crossing")
 set(VITA_TITLEID  "ACGC00001")
 set(VITA_VERSION  "01.00")
 
-# decomp has pervasive UB — disable all GCC transforms that exploit it
+# decomp has pervasive UB; disable all GCC transforms that exploit it
 # -Os with UB-safe flags is the only level that doesn't crash
 set(COMMON_SAFETY_FLAGS "-fno-strict-aliasing -fwrapv -fno-math-errno -fno-signed-zeros -fno-trapping-math -freciprocal-math -fdata-sections -ffunction-sections")
 set(UB_SAFE_FLAGS "-fno-tree-vrp -fno-tree-ccp -fno-delete-null-pointer-checks -fno-aggressive-loop-optimizations -fno-strict-overflow -fno-isolate-erroneous-paths-dereference -fno-isolate-erroneous-paths-attribute")
@@ -44,8 +44,9 @@ add_compile_definitions(
     HAVE_GLSL
     SKIP_ERROR_CAPTURE
     NO_TEX_COMBINER
-    VITA_PERF_LOG
-    VITA_DEBUG
+    # uncomment for measurement builds.
+    #VITA_PERF_LOG
+    #VITA_DEBUG
 )
 
 add_compile_options(-fno-strict-aliasing -fwrapv -w)
@@ -168,6 +169,7 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_vtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_input.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_gx_cmdbuf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_presubmit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_frame.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_banner.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_texpack.c
@@ -222,20 +224,36 @@ set(DECOMP_CXX_FLAGS "-Og;-w;-fpermissive")
 set_source_files_properties(${CODE_C_SOURCES}
     PROPERTIES COMPILE_OPTIONS "${DECOMP_C_FLAGS}"
 )
+
+# pure-math decomp files: no game-state UB, safe at -O3.
+# matrix stack, 3D math, collision, skin matrices, graph DL alloc.
+set_source_files_properties(
+    "${DECOMP_ROOT}/src/system/sys_matrix.c"
+    "${DECOMP_ROOT}/src/system/sys_math3d.c"
+    "${DECOMP_ROOT}/src/system/sys_math.c"
+    "${DECOMP_ROOT}/src/system/sys_math_atan.c"
+    "${DECOMP_ROOT}/src/game/m_collision_bg.c"
+    "${DECOMP_ROOT}/src/game/m_collision_obj.c"
+    "${DECOMP_ROOT}/src/game/m_skin_matrix.c"
+    "${DECOMP_ROOT}/src/graph.c"
+    "${DECOMP_ROOT}/src/game/m_actor.c"
+    "${DECOMP_ROOT}/src/game/m_play.c"
+    PROPERTIES COMPILE_OPTIONS "-O3;-w;-fno-strict-aliasing;-fwrapv;-fno-tree-vrp;-funroll-loops;-ffast-math;-ftree-vectorize"
+)
 set_source_files_properties(${GAME_CXX_SOURCES}
     PROPERTIES COMPILE_OPTIONS "${DECOMP_CXX_FLAGS}"
 )
 
-# emu64: hottest file, ~92% of frame time — max optimization + LTO
+# emu64: hottest file, ~92% of frame time. max optimization + LTO.
 set_source_files_properties(
     "${DECOMP_ROOT}/src/static/libforest/emu64/emu64.c"
     PROPERTIES COMPILE_OPTIONS "-O3;-w;-flto;-funroll-loops;-ffast-math;-ftree-vectorize"
 )
 
-# port layer: our code, no UB, safe at -O2
+# port layer: our code, no UB, max optimization
 set_source_files_properties(
     ${VITA_SOURCES}
-    PROPERTIES COMPILE_OPTIONS "-O2;-w"
+    PROPERTIES COMPILE_OPTIONS "-O3;-w;-flto;-funroll-loops;-ffast-math;-ftree-vectorize"
 )
 # GX hot path: -O3 + LTO for cross-file inlining into emu64
 set_source_files_properties(

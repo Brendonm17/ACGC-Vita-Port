@@ -11,15 +11,21 @@ export PATH="$VITASDK/bin:$PATH"
 VITAGL_REPO=https://github.com/Brendonm17/vitaGL.git
 VITAGL_BRANCH=async-compressed-tex-prep
 VITAGL_DIR=/tmp/vitaGL-acvita
+# Local fork directory for in-progress edits (overrides git clone if present)
+VITAGL_LOCAL="/mnt/c/Users/Brendon Moncada/Desktop/vitaGL"
 
-# Always re-clone to get latest source from the fork
-if [ -d "$VITAGL_DIR" ]; then
-    echo "--- Removing old vitaGL source ---"
-    rm -rf "$VITAGL_DIR"
+if [ -d "$VITAGL_LOCAL" ]; then
+    echo "--- Using local vitaGL fork at $VITAGL_LOCAL ---"
+    if [ -d "$VITAGL_DIR" ]; then rm -rf "$VITAGL_DIR"; fi
+    rsync -a --exclude='.git' "$VITAGL_LOCAL/" "$VITAGL_DIR/"
+else
+    if [ -d "$VITAGL_DIR" ]; then
+        echo "--- Removing old vitaGL source ---"
+        rm -rf "$VITAGL_DIR"
+    fi
+    echo "--- Cloning vitaGL fork ($VITAGL_BRANCH) ---"
+    git clone --depth 1 --branch "$VITAGL_BRANCH" "$VITAGL_REPO" "$VITAGL_DIR"
 fi
-
-echo "--- Cloning vitaGL fork ($VITAGL_BRANCH) ---"
-git clone --depth 1 --branch "$VITAGL_BRANCH" "$VITAGL_REPO" "$VITAGL_DIR"
 
 cd "$VITAGL_DIR"
 
@@ -47,7 +53,15 @@ if [ -f "$HDR_FILE" ]; then
     fi
 fi
 
-VITAGL_FLAGS="HAVE_GLSL_SUPPORT=1 CIRCULAR_VERTEX_POOL=2 BUFFERS_SPEEDHACK=1 SHADER_COMPILER_SPEEDHACK=1 DRAW_SPEEDHACK=1 SAMPLERS_SPEEDHACK=1 PRIMITIVES_SPEEDHACK=1 USE_SCRATCH_MEMORY=1 HAVE_SHADER_CACHE=1 NO_DEBUG=1"
+# UNIFORM_VALUE_CACHE: TRIED AND REVERTED.
+# The idea: track last uploaded uniform values, skip sceGxmSetUniformDataF
+# when value unchanged, carry forward via bulk memcpy previous buffer into
+# new buffer. FATAL FLAW: the uniform circular pool is GPU-visible memory
+# (write-combined). CPU READS from WC memory are ~50 MB/s vs ~2 GB/s writes.
+# The bulk memcpy read stalled catastrophically: unif phase went 4.5ms ->
+# 10.3ms (-8 fps regression) in dense scenes. Do NOT re-enable without a
+# different approach (e.g., CPU-cached shadow buffer + tracked offsets).
+VITAGL_FLAGS="HAVE_GLSL_SUPPORT=1 CIRCULAR_VERTEX_POOL=2 BUFFERS_SPEEDHACK=1 SHADER_COMPILER_SPEEDHACK=1 DRAW_SPEEDHACK=1 SAMPLERS_SPEEDHACK=1 PRIMITIVES_SPEEDHACK=1 USE_SCRATCH_MEMORY=1 HAVE_SHADER_CACHE=1 NO_DEBUG=1 DRAW_PHASE_PROFILING=1 DRAW_STATE_CACHE=1"
 
 echo "--- Building vitaGL ($VITAGL_FLAGS) ---"
 make clean 2>/dev/null || true

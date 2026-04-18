@@ -1,6 +1,11 @@
 #include "graph.h"
 
 #include "audio.h"
+#ifdef TARGET_VITA
+#include "vita_frame.h"
+#include "vita_shared.h"
+#include <psp2/kernel/processmgr.h>
+#endif
 #include "dvderr.h"
 #include "famicom_emu.h"
 #include "first_game.h"
@@ -20,6 +25,7 @@
 #include "m_trademark.h"
 #include "m_vibctl.h"
 #include "player_select.h"
+#include "m_actor.h"
 #include "save_menu.h"
 #include "second_game.h"
 #include "sys_dynamic.h"
@@ -40,6 +46,7 @@ static int skip_frame; // TODO: this is actually declared in graph_main
 u8 SoftResetEnable;
 #endif
 static int frame; // TODO: this is actually declared in graph_task_set00
+
 
 #ifdef TARGET_PC
 #define CONSTRUCT_THA_GA(tha_ga, name, name2) (THA_GA_ct((tha_ga), sys_dynamic.name, name2 ## _SIZE * sizeof(Gfx)))
@@ -138,11 +145,13 @@ static void graph_task_set00(GRAPH* this) {
             ucode[1].type = UCODE_TYPE_SPRITE_TEXT;
             ucode[0].ucode_p = ucode_GetPolyTextStart();
             ucode[1].ucode_p = ucode_GetSpriteTextStart();
+#ifdef TARGET_VITA
+            vita_frame_run(ucode, this->Gfx_list05);
+#else
             JW_BeginFrame();
             emu64_init();
             emu64_set_ucode_info(2, ucode);
             emu64_set_first_ucode(ucode[0].ucode_p);
-            PC_DIAG(3, "graph_task_set00: emu64_taskstart(Gfx_list05=%p)\n", (void*)this->Gfx_list05);
             emu64_taskstart(this->Gfx_list05); /* work data */
 #ifdef TARGET_PC
             {
@@ -155,6 +164,7 @@ static void graph_task_set00(GRAPH* this) {
 #endif
             emu64_cleanup();
             JW_EndFrame();
+#endif
             frame++;
         }
     }
@@ -164,13 +174,37 @@ static int graph_draw_finish(GRAPH* this) {
     int err;
     OPEN_DISP(this);
 
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_WORK_DISP++, GFX_QUEUE_BG_OPA);
+#endif
     gSPBranchList(NOW_WORK_DISP++, this->Gfx_list10);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_BG_OPA_DISP++, GFX_QUEUE_SHADOW);
+#endif
     gSPBranchList(NOW_BG_OPA_DISP++, this->Gfx_list08);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_SHADOW_DISP++, GFX_QUEUE_BG_XLU);
+#endif
     gSPBranchList(NOW_SHADOW_DISP++, this->Gfx_list11);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_BG_XLU_DISP++, GFX_QUEUE_POLY_OPA);
+#endif
     gSPBranchList(NOW_BG_XLU_DISP++, this->Gfx_list00);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_POLY_OPA_DISP++, GFX_QUEUE_POLY_XLU);
+#endif
     gSPBranchList(NOW_POLY_OPA_DISP++, this->Gfx_list01);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_POLY_XLU_DISP++, GFX_QUEUE_LIGHT);
+#endif
     gSPBranchList(NOW_POLY_XLU_DISP++, this->Gfx_list09);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_LIGHT_DISP++, GFX_QUEUE_FONT);
+#endif
     gSPBranchList(NOW_LIGHT_DISP++, this->Gfx_list07);
+#ifdef TARGET_PC
+    gDPQueueHint(NOW_FONT_DISP++, GFX_QUEUE_OVERLAY);
+#endif
     gSPBranchList(NOW_FONT_DISP++, this->Gfx_list04);
     gDPPipeSync(NOW_OVERLAY_DISP++);
     gDPFullSync(NOW_OVERLAY_DISP++);
@@ -248,15 +282,33 @@ static void reset_check(GRAPH* this, GAME* game) {
     }
 }
 
+
+#ifdef TARGET_VITA
+extern void Actor_lit_cache_reset(void);
+#endif
+
 // Aus version removes debug frame skip logic
 #if VERSION >= VER_GAFU01_00
 static void graph_main(GRAPH* this, GAME* game) {
     game->disable_prenmi = FALSE;
+#ifdef TARGET_VITA
+    vita_frame_wait_worker();
+    Actor_lit_cache_reset();
+#endif
     graph_setup_double_buffer(this);
     game_get_controller(game);
     game->disable_display = FALSE;
     GRAPH_SET_DOING_POINT(this, GAME_MAIN);
+#if defined(TARGET_VITA) && defined(VITA_DEBUG)
+    {
+        extern VitaFrameTiming vita_timing;
+        unsigned int gm0 = sceKernelGetProcessTimeLow();
+        game_main(game);
+        vita_timing.gamemain_us = sceKernelGetProcessTimeLow() - gm0;
+    }
+#else
     game_main(game);
+#endif
     GRAPH_SET_DOING_POINT(this, GAME_MAIN_FINISHED);
     if (ResetStatus < IRQ_RESET_DELAY) {
         if (game->disable_display == FALSE) {
@@ -290,6 +342,10 @@ static void graph_main(GRAPH* this, GAME* game) {
 #else
 static void graph_main(GRAPH* this, GAME* game) {
     game->disable_prenmi = FALSE;
+#ifdef TARGET_VITA
+    vita_frame_wait_worker();
+    Actor_lit_cache_reset();
+#endif
     PC_DIAG(10, "graph_main: enter, frame_counter=%d game=%p exec=%p cleanup=%p doing=%d\n",
             this->frame_counter, (void*)game, (void*)game->exec, (void*)game->cleanup, game->doing);
     graph_setup_double_buffer(this);
@@ -297,7 +353,15 @@ static void graph_main(GRAPH* this, GAME* game) {
     game->disable_display = FALSE;
     GRAPH_SET_DOING_POINT(this, GAME_MAIN);
     PC_DIAG(10, "graph_main: calling game_main (exec=%p)\n", (void*)game->exec);
+#if defined(TARGET_VITA) && defined(VITA_DEBUG)
+    {
+        unsigned int gm0 = sceKernelGetProcessTimeLow();
+        game_main(game);
+        vita_timing.gamemain_us = sceKernelGetProcessTimeLow() - gm0 + 1;
+    }
+#else
     game_main(game);
+#endif
     PC_DIAG(10, "graph_main: game_main returned, frame_counter=%d\n", this->frame_counter);
     GRAPH_SET_DOING_POINT(this, GAME_MAIN_FINISHED);
     if (ResetStatus < IRQ_RESET_DELAY) {
@@ -335,6 +399,12 @@ static void graph_main(GRAPH* this, GAME* game) {
             }
             pc_crash_set_jmpbuf(NULL);
         }
+#elif defined(TARGET_VITA) && defined(VITA_DEBUG)
+        {
+            unsigned int a0 = sceKernelGetProcessTimeLow();
+            sAdo_GameFrame();
+            vita_timing.audio_us = sceKernelGetProcessTimeLow() - a0;
+        }
 #else
         sAdo_GameFrame();
 #endif
@@ -353,22 +423,29 @@ static void graph_main(GRAPH* this, GAME* game) {
 extern void graph_proc(void* arg) {
     GRAPH* __graph = &graph_class;
     DLFTBL_GAME* dlftbl = &game_dlftbls[0];
+    OSReport("[PC] graph_proc: entered\n");
 #ifdef TARGET_PC
     if (g_pc_model_viewer) {
         dlftbl = &game_dlftbls[10]; /* model viewer */
     }
 #endif
     graph_ct(&graph_class);
+    OSReport("[PC] graph_proc: graph_ct done\n");
 
     while (dlftbl != NULL) {
         size_t size = dlftbl->alloc_size;
+        OSReport("[PC] graph_proc: malloc(%u) for game\n", (unsigned)size);
         GAME* game = (GAME*)malloc(size);
+        OSReport("[PC] graph_proc: malloc returned %p\n", (void*)game);
         game_class_p = game;
         bzero(game, size);
         GRAPH_SET_DOING_POINT(__graph, GAME_CT);
+        OSReport("[PC] graph_proc: calling game_ct...\n");
         game_ct(game, dlftbl->init, __graph);
+        OSReport("[PC] graph_proc: game_ct done, calling emu64_refresh\n");
         emu64_refresh();
         GRAPH_SET_DOING_POINT(__graph, GAME_CT_FINISHED);
+        OSReport("[PC] graph_proc: entering main loop\n");
 
         while (game_is_doing(game)
 #ifdef TARGET_PC

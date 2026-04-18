@@ -151,6 +151,33 @@ extern void emu64_taskstart(void* dl);
 // skip GL calls on worker thread (VitaGL not thread-safe)
 volatile int vita_on_worker_thread = 0;
 
+// core 2 prededup thread state.
+static SceUID prededup_start_sema = -1;
+static SceUID prededup_done_sema = -1;
+static SceUID prededup_thread_tid = -1;
+static volatile int prededup_thread_running = 0;
+static volatile int prededup_pending = 0;
+// captured by the worker before signaling core 2; main may flip
+// cmd_write before core 2 wakes.
+volatile int pdd_buffer_idx = 0;
+
+static int prededup_thread_func(SceSize args, void* argp) {
+    (void)args; (void)argp;
+    while (prededup_thread_running) {
+        sceKernelWaitSema(prededup_start_sema, 1, NULL);
+        if (!prededup_thread_running) break;
+#ifdef VITA_DEBUG
+        unsigned int _pdd_t0 = sceKernelGetProcessTimeLow();
+#endif
+        vita_cmdbuf_prededup();
+#ifdef VITA_DEBUG
+        vita_timing.prededup_us = sceKernelGetProcessTimeLow() - _pdd_t0;
+#endif
+        sceKernelSignalSema(prededup_done_sema, 1);
+    }
+    return 0;
+}
+
 static int emu64_worker_func(SceSize args, void* argp) {
     (void)args; (void)argp;
 
@@ -161,9 +188,30 @@ static int emu64_worker_func(SceSize args, void* argp) {
         void* dl = (void*)emu64_work_dl;
         if (dl) {
             vita_on_worker_thread = 1;
+#ifdef VITA_DEBUG
             unsigned int t0 = sceKernelGetProcessTimeLow();
+#endif
             emu64_taskstart(dl);
-            vita_timing.emu64_us = sceKernelGetProcessTimeLow() - t0;
+#ifdef VITA_DEBUG
+            unsigned int t_after_emu64 = sceKernelGetProcessTimeLow();
+#endif
+            vita_cmdbuf_frustum_cull();
+            // cpu xform pass tried here: net loss, so skipped.
+#ifdef VITA_DEBUG
+            unsigned int t_end = sceKernelGetProcessTimeLow();
+            vita_timing.emu64_us = t_end - t0;
+            vita_timing.frustum_cull_us = t_end - t_after_emu64;
+            vita_timing.emu64_task_us = t_after_emu64 - t0;
+#endif
+            // dispatch prededup to core 2 (runs in parallel with
+            // game logic on core 0 while core 1 signals done).
+            if (prededup_thread_running) {
+                pdd_buffer_idx = cmd_write;
+                prededup_pending = 1;
+                sceKernelSignalSema(prededup_start_sema, 1);
+            } else {
+                vita_cmdbuf_prededup();
+            }
             vita_on_worker_thread = 0;
             {
                 extern unsigned int vita_texload_us;
@@ -240,6 +288,24 @@ void vita_emu64_worker_init(void) {
         }
     }
     printf("[VITA] emu64 worker thread started on core 1 (tid=0x%08X)\n", emu64_worker_tid);
+
+    // core 2 prededup thread: lightweight, runs prededup in parallel
+    // with game logic so it's off the emu64 critical path.
+    prededup_start_sema = sceKernelCreateSema("pdd_start", 0, 0, 1, NULL);
+    prededup_done_sema = sceKernelCreateSema("pdd_done", 0, 0, 1, NULL);
+    if (prededup_start_sema >= 0 && prededup_done_sema >= 0) {
+        prededup_thread_running = 1;
+        prededup_thread_tid = sceKernelCreateThread(
+            "prededup", prededup_thread_func,
+            0x10000100, 32 * 1024, 0,
+            SCE_KERNEL_CPU_MASK_USER_2, NULL);
+        if (prededup_thread_tid >= 0) {
+            sceKernelStartThread(prededup_thread_tid, 0, NULL);
+            printf("[VITA] prededup thread started on core 2 (tid=0x%08X)\n", prededup_thread_tid);
+        } else {
+            prededup_thread_running = 0;
+        }
+    }
 }
 
 void vita_emu64_worker_shutdown(void) {
@@ -257,12 +323,22 @@ void vita_emu64_worker_shutdown(void) {
 
 void vita_emu64_wait_done(void) {
     if (emu64_worker_tid < 0) return;
-    // spin briefly on PollSema before blocking. eliminates kernel
-    // scheduler wake latency when worker has already signaled
-    for (int i = 0; i < 2000; i++) {
-        if (sceKernelPollSema(emu64_work_done_sema, 1) == 0) return;
-    }
+    // The 2000-iteration spin-poll was wasting ~2ms every frame on hot
+    // path: PERF_MAIN measurements showed waitW=2.22ms where worker was
+    // not yet done when main arrived, so all 2000 PollSema syscalls
+    // fired (each costs ~1 microsecond) before we finally blocked.
+    // Just block directly - kernel wake latency (~20-50 microseconds)
+    // is tiny compared to 2000 polls.
     sceKernelWaitSema(emu64_work_done_sema, 1, NULL);
+}
+
+// wait for core 2 prededup to finish. called before submit reads
+// the cmd buffer. usually a no-op since prededup (~0.5ms) finishes
+// well before game_logic + swap (~4ms) completes.
+void vita_wait_prededup(void) {
+    if (!prededup_pending) return;
+    sceKernelWaitSema(prededup_done_sema, 1, NULL);
+    prededup_pending = 0;
 }
 
 void vita_emu64_signal_work(void* dl) {
@@ -401,9 +477,13 @@ void pc_platform_update_window_size(void) {
 }
 
 void pc_platform_swap_buffers(void) {
+#ifdef VITA_DEBUG
     unsigned int t0 = sceKernelGetProcessTimeLow();
+#endif
     vglSwapBuffers(GL_FALSE);
+#ifdef VITA_DEBUG
     vita_timing.swap_us = sceKernelGetProcessTimeLow() - t0;
+#endif
 }
 
 static void vita_force_save(void) {

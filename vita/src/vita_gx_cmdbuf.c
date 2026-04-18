@@ -9,36 +9,59 @@
 #include "vita_banner.h"
 #include "vita_gx_cmdbuf.h"
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
+#include <psp2/gxm.h>
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <arm_neon.h>
+#include <dolphin/gx/GXEnum.h>
 
-// pre-dedup pass. runs on the worker thread while cmd_queue data is still
-// hot in core 1's cache, clearing dirty bits when consecutive draws have
-// byte-identical state. covers all 16 dirty flag types so that the merge
-// pass and submit_frame replay see minimal redundant state. running this
-// on the worker is free (parallel with submit) and data is cache-hot.
+static inline float vita_color_src(int gx_input, int stage);
+static inline float vita_alpha_src(int gx_input, int stage);
+static inline void  vita_resolve_cc_cmd(int input, const PCGXTevStage* ts,
+                                        const float colors[4][4],
+                                        const float k_colors[4][4],
+                                        float out[3]);
+static inline float vita_resolve_ca_cmd(int input, const PCGXTevStage* ts,
+                                        const float colors[4][4],
+                                        const float k_colors[4][4]);
+
 void vita_cmdbuf_prededup(void) {
-    int wr = cmd_write;
+    extern volatile int pdd_buffer_idx;
+    int wr = pdd_buffer_idx;
     int count = cmd_queue_count_db[wr];
     if (count <= 0) return;
 
-    // per-flag last-known state for dedup comparison
+    static PCGXTevStage last_stages[PC_GX_MAX_TEV_STAGES];
+    static float        last_resolve_colors[4][4];
+    static float        last_resolve_k_colors[4][4];
+    static int          last_resolve_num = -1;
+    static int          last_resolve_valid = 0;
+    static float        last_resolved[360 / sizeof(float)];
+    static int          last_resolve_tc_src[PC_GX_MAX_TEV_STAGES];
+    static const float  r_bias_lut[]  = {0.0f, 0.5f, -0.5f};
+    static const float  r_scale_lut[] = {1.0f, 2.0f, 4.0f, 0.5f};
+
+    extern int g_vita_force_state_resync;
+    if (g_vita_force_state_resync) {
+        last_resolve_valid = 0;
+    }
+
     float            last_proj[16];
-    float            last_mv[16];
+    float            last_pos_mtx[16];
+    float            last_nrm_mtx[9];
     PCGXCmdTextures  last_tex;
     PCGXCmdFog       last_fog;
     float            last_tev_colors[4][4];
     float            last_konst[4][4];
-    PCGXCmdLighting  last_lighting;
     PCGXCmdGLState   last_glstate;
     PCGXCmdAlpha     last_alpha;
     PCGXCmdTexGen    last_texgen;
     PCGXCmdTEV       last_tev;
     PCGXCmdIndirect  last_indirect;
 
-    // validity bits packed into a single word
     unsigned int valid = 0;
     #define V_PROJ      (1u << 0)
     #define V_MV        (1u << 1)
@@ -46,7 +69,6 @@ void vita_cmdbuf_prededup(void) {
     #define V_FOG       (1u << 3)
     #define V_TEVCOL    (1u << 4)
     #define V_KONST     (1u << 5)
-    #define V_LIGHTING  (1u << 6)
     #define V_GLSTATE   (1u << 7)
     #define V_ALPHA     (1u << 8)
     #define V_TEXGEN    (1u << 9)
@@ -55,13 +77,78 @@ void vita_cmdbuf_prededup(void) {
 
     GLuint last_shader = 0;
 
-    // mask for the 4 gl_state dirty flags that share one struct
     #define GL_STATE_MASK (PC_GX_DIRTY_DEPTH | PC_GX_DIRTY_COLOR_MASK | \
                            PC_GX_DIRTY_CULL  | PC_GX_DIRTY_BLEND)
 
     for (int i = 0; i < count; i++) {
         PCGXDrawCmd* c = &cmd_queue_db[wr][i];
         if (c->shader == 0) continue;
+        if (i + 1 < count) {
+            PCGXDrawCmd* nc = &cmd_queue_db[wr][i + 1];
+            __builtin_prefetch(nc, 0, 0);
+            __builtin_prefetch((char*)nc + 64, 0, 0);
+            __builtin_prefetch((char*)nc + 128, 0, 0);
+        }
+
+        if (c->dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS)) {
+            int rn = c->tev.num_stages;
+            if (rn > PC_GX_MAX_TEV_STAGES) rn = PC_GX_MAX_TEV_STAGES;
+            int r_matches = last_resolve_valid && rn == last_resolve_num &&
+                (rn == 0 ||
+                 __builtin_memcmp(c->tev.stages, last_stages, rn * sizeof(PCGXTevStage)) == 0) &&
+                __builtin_memcmp(c->tev.colors, last_resolve_colors, sizeof(c->tev.colors)) == 0 &&
+                __builtin_memcmp(c->tev.k_colors, last_resolve_k_colors, sizeof(c->tev.k_colors)) == 0;
+            if (r_matches) {
+                __builtin_memcpy(&c->tev.ca[0][0], last_resolved, 360);
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) c->tev.tc_src[s] = last_resolve_tc_src[s];
+            } else {
+                for (int s = 0; s < rn; s++) {
+                    PCGXTevStage* ts = &c->tev.stages[s];
+                    vita_resolve_cc_cmd(ts->color_a, ts, c->tev.colors, c->tev.k_colors, c->tev.ca[s]);
+                    vita_resolve_cc_cmd(ts->color_b, ts, c->tev.colors, c->tev.k_colors, c->tev.cb[s]);
+                    vita_resolve_cc_cmd(ts->color_c, ts, c->tev.colors, c->tev.k_colors, c->tev.cc[s]);
+                    vita_resolve_cc_cmd(ts->color_d, ts, c->tev.colors, c->tev.k_colors, c->tev.cd[s]);
+                    c->tev.aval[s][0] = vita_resolve_ca_cmd(ts->alpha_a, ts, c->tev.colors, c->tev.k_colors);
+                    c->tev.aval[s][1] = vita_resolve_ca_cmd(ts->alpha_b, ts, c->tev.colors, c->tev.k_colors);
+                    c->tev.aval[s][2] = vita_resolve_ca_cmd(ts->alpha_c, ts, c->tev.colors, c->tev.k_colors);
+                    c->tev.aval[s][3] = vita_resolve_ca_cmd(ts->alpha_d, ts, c->tev.colors, c->tev.k_colors);
+                    c->tev.csrc[s][0] = vita_color_src(ts->color_a, s);
+                    c->tev.csrc[s][1] = vita_color_src(ts->color_b, s);
+                    c->tev.csrc[s][2] = vita_color_src(ts->color_c, s);
+                    c->tev.csrc[s][3] = vita_color_src(ts->color_d, s);
+                    c->tev.asrc[s][0] = vita_alpha_src(ts->alpha_a, s);
+                    c->tev.asrc[s][1] = vita_alpha_src(ts->alpha_b, s);
+                    c->tev.asrc[s][2] = vita_alpha_src(ts->alpha_c, s);
+                    c->tev.asrc[s][3] = vita_alpha_src(ts->alpha_d, s);
+                    c->tev.param[s][0] = r_bias_lut[ts->color_bias < 3 ? ts->color_bias : 0];
+                    c->tev.param[s][1] = r_bias_lut[ts->alpha_bias < 3 ? ts->alpha_bias : 0];
+                    c->tev.param[s][2] = r_scale_lut[ts->color_scale < 4 ? ts->color_scale : 0];
+                    c->tev.param[s][3] = ts->color_op ? -1.0f : 1.0f;
+                    c->tev.aparam[s][0] = r_scale_lut[ts->alpha_scale < 4 ? ts->alpha_scale : 0];
+                    c->tev.aparam[s][1] = ts->alpha_op ? -1.0f : 1.0f;
+                }
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                    int tc_src = 0;
+                    if (s < rn) {
+                        int tc = c->tev.stages[s].tex_coord;
+                        tc_src = (tc >= 0 && tc < 8) ? tc : s;
+                    }
+                    c->tev.tc_src[s] = tc_src;
+                }
+                last_resolve_num = rn;
+                if (rn > 0)
+                    __builtin_memcpy(last_stages, c->tev.stages, rn * sizeof(PCGXTevStage));
+                __builtin_memcpy(last_resolve_colors,   c->tev.colors,   sizeof(last_resolve_colors));
+                __builtin_memcpy(last_resolve_k_colors, c->tev.k_colors, sizeof(last_resolve_k_colors));
+                __builtin_memcpy(last_resolved, &c->tev.ca[0][0], 360);
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) last_resolve_tc_src[s] = c->tev.tc_src[s];
+                last_resolve_valid = 1;
+            }
+            // cfg20: stage 1 samples via unit 0; mirror tc_src[0].
+            if (c->tev_tex_remap) {
+                c->tev.tc_src[0] = c->tev.tc_src[1];
+            }
+        }
 
         if (c->shader_changed || c->shader != last_shader) {
             valid = 0;
@@ -71,117 +158,119 @@ void vita_cmdbuf_prededup(void) {
         unsigned int d = c->dirty;
         unsigned int nd = d;
 
-        // transforms
-        if ((d & PC_GX_DIRTY_PROJECTION) && (valid & V_PROJ) &&
-            __builtin_memcmp(c->transform.projection_mtx_t, last_proj, 64) == 0)
-            nd &= ~PC_GX_DIRTY_PROJECTION;
-        if ((d & PC_GX_DIRTY_MODELVIEW) && (valid & V_MV) &&
-            __builtin_memcmp(c->transform.pos_mtx_t, last_mv, 64) == 0)
-            nd &= ~PC_GX_DIRTY_MODELVIEW;
+        if (d & PC_GX_DIRTY_PROJECTION) {
+            if ((valid & V_PROJ) &&
+                __builtin_memcmp(c->transform.projection_mtx_t, last_proj, 64) == 0) {
+                nd &= ~PC_GX_DIRTY_PROJECTION;
+            } else {
+                __builtin_memcpy(last_proj, c->transform.projection_mtx_t, 64);
+                valid |= V_PROJ;
+            }
+        }
 
-        // textures + fog (original 4)
-        if ((d & PC_GX_DIRTY_TEXTURES) && (valid & V_TEX) &&
-            __builtin_memcmp(&c->textures, &last_tex, sizeof(PCGXCmdTextures)) == 0)
-            nd &= ~PC_GX_DIRTY_TEXTURES;
-        if ((d & PC_GX_DIRTY_FOG) && (valid & V_FOG) &&
-            __builtin_memcmp(&c->fog, &last_fog, sizeof(PCGXCmdFog)) == 0)
-            nd &= ~PC_GX_DIRTY_FOG;
+        if (d & PC_GX_DIRTY_MODELVIEW) {
+            if ((valid & V_MV) &&
+                __builtin_memcmp(c->transform.pos_mtx_t, last_pos_mtx, 64) == 0 &&
+                __builtin_memcmp(c->transform.nrm_mtx_t, last_nrm_mtx, 36) == 0) {
+                nd &= ~PC_GX_DIRTY_MODELVIEW;
+            } else {
+                __builtin_memcpy(last_pos_mtx, c->transform.pos_mtx_t, 64);
+                __builtin_memcpy(last_nrm_mtx, c->transform.nrm_mtx_t, 36);
+                valid |= V_MV;
+            }
+        }
 
-        // tev colors + konst (64 bytes each)
-        if ((d & PC_GX_DIRTY_TEV_COLORS) && (valid & V_TEVCOL) &&
-            __builtin_memcmp(c->tev.colors, last_tev_colors, 64) == 0)
-            nd &= ~PC_GX_DIRTY_TEV_COLORS;
-        if ((d & PC_GX_DIRTY_KONST) && (valid & V_KONST) &&
-            __builtin_memcmp(c->tev.k_colors, last_konst, 64) == 0)
-            nd &= ~PC_GX_DIRTY_KONST;
+        if (d & PC_GX_DIRTY_TEXTURES) {
+            if ((valid & V_TEX) &&
+                __builtin_memcmp(&c->textures, &last_tex, sizeof(PCGXCmdTextures)) == 0) {
+                nd &= ~PC_GX_DIRTY_TEXTURES;
+            } else {
+                last_tex = c->textures;
+                valid |= V_TEX;
+            }
+        }
 
-        // lighting (~300 bytes)
-        if ((d & PC_GX_DIRTY_LIGHTING) && (valid & V_LIGHTING) &&
-            __builtin_memcmp(&c->lighting, &last_lighting, sizeof(PCGXCmdLighting)) == 0)
-            nd &= ~PC_GX_DIRTY_LIGHTING;
+        if (d & PC_GX_DIRTY_FOG) {
+            if ((valid & V_FOG) &&
+                __builtin_memcmp(&c->fog, &last_fog, sizeof(PCGXCmdFog)) == 0) {
+                nd &= ~PC_GX_DIRTY_FOG;
+            } else {
+                last_fog = c->fog;
+                valid |= V_FOG;
+            }
+        }
 
-        // gl_state covers depth/color_mask/cull/blend (36 bytes)
-        if ((d & GL_STATE_MASK) && (valid & V_GLSTATE) &&
-            __builtin_memcmp(&c->gl_state, &last_glstate, sizeof(PCGXCmdGLState)) == 0)
-            nd &= ~(d & GL_STATE_MASK);
+        if (d & PC_GX_DIRTY_TEV_COLORS) {
+            if ((valid & V_TEVCOL) &&
+                __builtin_memcmp(c->tev.colors, last_tev_colors, 64) == 0) {
+                nd &= ~PC_GX_DIRTY_TEV_COLORS;
+            } else {
+                __builtin_memcpy(last_tev_colors, c->tev.colors, 64);
+                valid |= V_TEVCOL;
+            }
+        }
 
-        // alpha compare (8 bytes)
-        if ((d & PC_GX_DIRTY_ALPHA_CMP) && (valid & V_ALPHA) &&
-            __builtin_memcmp(&c->alpha, &last_alpha, sizeof(PCGXCmdAlpha)) == 0)
-            nd &= ~PC_GX_DIRTY_ALPHA_CMP;
+        if (d & PC_GX_DIRTY_KONST) {
+            if ((valid & V_KONST) &&
+                __builtin_memcmp(c->tev.k_colors, last_konst, 64) == 0) {
+                nd &= ~PC_GX_DIRTY_KONST;
+            } else {
+                __builtin_memcpy(last_konst, c->tev.k_colors, 64);
+                valid |= V_KONST;
+            }
+        }
 
-        // texgen (~80 bytes)
-        if ((d & PC_GX_DIRTY_TEXGEN) && (valid & V_TEXGEN) &&
-            __builtin_memcmp(&c->texgen, &last_texgen, sizeof(PCGXCmdTexGen)) == 0)
-            nd &= ~PC_GX_DIRTY_TEXGEN;
+        if (d & GL_STATE_MASK) {
+            if ((valid & V_GLSTATE) &&
+                __builtin_memcmp(&c->gl_state, &last_glstate, sizeof(PCGXCmdGLState)) == 0) {
+                nd &= ~(d & GL_STATE_MASK);
+            } else {
+                last_glstate = c->gl_state;
+                valid |= V_GLSTATE;
+            }
+        }
 
-        // tev stages + swap tables: compare only the stage config portion
-        // (num_stages + stages[]), not the full 750-byte struct. resolved
-        // values are deterministic from stages + tev_colors + k_colors,
-        // which have their own dirty flags already deduped above.
-        if ((d & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES)) && (valid & V_TEV) &&
-            c->tev.num_stages == last_tev.num_stages &&
-            __builtin_memcmp(c->tev.stages, last_tev.stages, sizeof(c->tev.stages)) == 0)
-            nd &= ~(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES);
+        if (d & PC_GX_DIRTY_ALPHA_CMP) {
+            if ((valid & V_ALPHA) &&
+                __builtin_memcmp(&c->alpha, &last_alpha, sizeof(PCGXCmdAlpha)) == 0) {
+                nd &= ~PC_GX_DIRTY_ALPHA_CMP;
+            } else {
+                last_alpha = c->alpha;
+                valid |= V_ALPHA;
+            }
+        }
 
-        // indirect (~200 bytes)
-        if ((d & PC_GX_DIRTY_INDIRECT) && (valid & V_INDIRECT) &&
-            __builtin_memcmp(&c->indirect, &last_indirect, sizeof(PCGXCmdIndirect)) == 0)
-            nd &= ~PC_GX_DIRTY_INDIRECT;
+        if (d & PC_GX_DIRTY_TEXGEN) {
+            if ((valid & V_TEXGEN) &&
+                __builtin_memcmp(&c->texgen, &last_texgen, sizeof(PCGXCmdTexGen)) == 0) {
+                nd &= ~PC_GX_DIRTY_TEXGEN;
+            } else {
+                last_texgen = c->texgen;
+                valid |= V_TEXGEN;
+            }
+        }
+
+        if (d & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES)) {
+            if ((valid & V_TEV) &&
+                __builtin_memcmp(&c->tev, &last_tev, offsetof(PCGXCmdTEV, colors)) == 0) {
+                nd &= ~(PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES);
+            } else {
+                __builtin_memcpy(&last_tev, &c->tev, offsetof(PCGXCmdTEV, colors));
+                valid |= V_TEV;
+            }
+        }
+
+        if (d & PC_GX_DIRTY_INDIRECT) {
+            if ((valid & V_INDIRECT) &&
+                __builtin_memcmp(&c->indirect, &last_indirect, sizeof(PCGXCmdIndirect)) == 0) {
+                nd &= ~PC_GX_DIRTY_INDIRECT;
+            } else {
+                last_indirect = c->indirect;
+                valid |= V_INDIRECT;
+            }
+        }
 
         c->dirty = nd;
-
-        // update last-known state for any flags that were originally set
-        if (d & PC_GX_DIRTY_PROJECTION) {
-            __builtin_memcpy(last_proj, c->transform.projection_mtx_t, 64);
-            valid |= V_PROJ;
-        }
-        if (d & PC_GX_DIRTY_MODELVIEW) {
-            __builtin_memcpy(last_mv, c->transform.pos_mtx_t, 64);
-            valid |= V_MV;
-        }
-        if (d & PC_GX_DIRTY_TEXTURES) {
-            last_tex = c->textures;
-            valid |= V_TEX;
-        }
-        if (d & PC_GX_DIRTY_FOG) {
-            last_fog = c->fog;
-            valid |= V_FOG;
-        }
-        if (d & PC_GX_DIRTY_TEV_COLORS) {
-            __builtin_memcpy(last_tev_colors, c->tev.colors, 64);
-            valid |= V_TEVCOL;
-        }
-        if (d & PC_GX_DIRTY_KONST) {
-            __builtin_memcpy(last_konst, c->tev.k_colors, 64);
-            valid |= V_KONST;
-        }
-        if (d & PC_GX_DIRTY_LIGHTING) {
-            last_lighting = c->lighting;
-            valid |= V_LIGHTING;
-        }
-        if (d & GL_STATE_MASK) {
-            last_glstate = c->gl_state;
-            valid |= V_GLSTATE;
-        }
-        if (d & PC_GX_DIRTY_ALPHA_CMP) {
-            last_alpha = c->alpha;
-            valid |= V_ALPHA;
-        }
-        if (d & PC_GX_DIRTY_TEXGEN) {
-            last_texgen = c->texgen;
-            valid |= V_TEXGEN;
-        }
-        if (d & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_SWAP_TABLES)) {
-            // only store the stage config portion we compare against
-            last_tev.num_stages = c->tev.num_stages;
-            __builtin_memcpy(last_tev.stages, c->tev.stages, sizeof(c->tev.stages));
-            valid |= V_TEV;
-        }
-        if (d & PC_GX_DIRTY_INDIRECT) {
-            last_indirect = c->indirect;
-            valid |= V_INDIRECT;
-        }
     }
 
     #undef V_PROJ
@@ -190,7 +279,6 @@ void vita_cmdbuf_prededup(void) {
     #undef V_FOG
     #undef V_TEVCOL
     #undef V_KONST
-    #undef V_LIGHTING
     #undef V_GLSTATE
     #undef V_ALPHA
     #undef V_TEXGEN
@@ -198,7 +286,11 @@ void vita_cmdbuf_prededup(void) {
     #undef V_INDIRECT
     #undef GL_STATE_MASK
 }
-#include <dolphin/gx/GXEnum.h>
+
+// stub; prior cull attempts produced false positives.
+void vita_cmdbuf_frustum_cull(void) {
+    vita_stats.culled_draws = 0;
+}
 
 // GL state cache
 
@@ -332,6 +424,8 @@ int vita_fog_disable = 0;
 int vita_debug_notex = 0;
 #endif
 
+int vita_disable_merge = 0;
+
 
 PCGXDrawCmd* cmd_queue_db[2] = {NULL, NULL};
 int cmd_queue_count_db[2] = {0, 0};
@@ -343,31 +437,21 @@ int cmd_write = 0;
 PCGXEfbCapture efb_capture_db[2][EFB_CAPTURE_MAX];
 int efb_capture_count_db[2] = {0, 0};
 
-// per-frame index buffer, double-buffered. built on the worker thread
-// inline as each draw flushes, consumed on main during submit_frame as
-// a single glBufferData. moves index assembly off main.
 #define FRAME_IDX_MAX (PC_GX_MAX_VERTS * 3)
 static GLushort* frame_indices_db[2] = {NULL, NULL};
 static int       frame_idx_count_db[2] = {0, 0};
 #define frame_indices      frame_indices_db[cmd_write]
 #define frame_idx_count    frame_idx_count_db[cmd_write]
 
-// opaque draw sort scratch. allocated once at init.
-static GLushort* sort_temp_indices = NULL;
-static int sort_order[CMD_QUEUE_MAX];
-
-
-
-
 
 void vita_cmdbuf_init(void) {
     for (int i = 0; i < 2; i++) {
-        cmd_queue_db[i] = (PCGXDrawCmd*)malloc(CMD_QUEUE_MAX * sizeof(PCGXDrawCmd));
-        // +2048 vertex guard for the direct-write path. GXBegin's nverts hint
-        // isn't always exact, so allow some slop before flush_vertices_cmdbuf
-        // detects the overflow and drops the batch.
-        cmd_verts_db[i] = (PCGXVertex*)malloc((PC_GX_MAX_VERTS + 2048) * sizeof(PCGXVertex));
-        frame_indices_db[i] = (GLushort*)malloc(FRAME_IDX_MAX * sizeof(GLushort));
+        cmd_queue_db[i] = (PCGXDrawCmd*)calloc(CMD_QUEUE_MAX, sizeof(PCGXDrawCmd));
+        // vglMalloc gives GPU-mapped memory so submit can use vglBufferData.
+        // +2048 vertex guard for GXBegin's nverts hint underestimating.
+        extern void *vglMalloc(uint32_t size);
+        cmd_verts_db[i] = (PCGXVertex*)vglMalloc((PC_GX_MAX_VERTS + 2048) * sizeof(PCGXVertex));
+        frame_indices_db[i] = (GLushort*)vglMalloc(FRAME_IDX_MAX * sizeof(GLushort));
         if (!cmd_queue_db[i] || !cmd_verts_db[i] || !frame_indices_db[i]) {
             fprintf(stderr, "[GX] Failed to allocate double-buffer command queue %d\n", i);
             exit(1);
@@ -377,15 +461,15 @@ void vita_cmdbuf_init(void) {
         cmd_last_shader_db[i] = 0;
         frame_idx_count_db[i] = 0;
     }
-    sort_temp_indices = (GLushort*)malloc(FRAME_IDX_MAX * sizeof(GLushort));
     cmd_write = 0;
 }
 
 void vita_cmdbuf_shutdown(void) {
+    extern void vglFree(void *ptr);
     for (int i = 0; i < 2; i++) {
-        free(cmd_queue_db[i]);     cmd_queue_db[i] = NULL;
-        free(cmd_verts_db[i]);     cmd_verts_db[i] = NULL;
-        free(frame_indices_db[i]); frame_indices_db[i] = NULL;
+        free(cmd_queue_db[i]);         cmd_queue_db[i] = NULL;
+        if (cmd_verts_db[i])    { vglFree(cmd_verts_db[i]);    cmd_verts_db[i] = NULL; }
+        if (frame_indices_db[i]){ vglFree(frame_indices_db[i]); frame_indices_db[i] = NULL; }
     }
 }
 
@@ -405,6 +489,15 @@ void vita_cmdbuf_begin_frame(void) {
     vita_timing.flush_us = 0;
     vita_timing.texload_us = 0;
     vita_timing.tevmatch_us = 0;
+    vita_timing.flush_vtx_us = 0;
+    vita_timing.flush_tev_us = 0;
+    vita_timing.flush_state_us = 0;
+    vita_timing.flush_state_lighting_us = 0;
+    vita_timing.flush_state_textures_us = 0;
+    // DO NOT reset endframe_us, waitworker_us, gamemain_us, beginframe_us
+    // here: these are set by main thread and read at end of frame; this
+    // function runs on Core 1 worker during emu64 and would clobber them
+    // BEFORE main thread's perf_log_frame reads them.
 
     pc_gx_current_queue = GFX_QUEUE_WORK;
     cmd_queue_count = 0;
@@ -525,6 +618,76 @@ static float vita_resolve_ca(int input, const PCGXTevStage* ts) {
     }
 }
 
+// Resolve helpers that read from EXPLICIT color arrays instead of g_gx.
+// Used by the core 2 resolve pass so it can work on snapshotted cmd->tev
+// inputs without touching g_gx (which core 1 may be mutating).
+static inline void vita_resolve_cc_cmd(int input, const PCGXTevStage* ts,
+                                       const float tev_colors[4][4],
+                                       const float tev_k_colors[4][4],
+                                       float out[3]) {
+    switch (input) {
+    case GX_CC_CPREV: out[0]=tev_colors[0][0]; out[1]=tev_colors[0][1]; out[2]=tev_colors[0][2]; return;
+    case GX_CC_APREV: { float a=tev_colors[0][3]; out[0]=out[1]=out[2]=a; return; }
+    case GX_CC_C0:    out[0]=tev_colors[1][0]; out[1]=tev_colors[1][1]; out[2]=tev_colors[1][2]; return;
+    case GX_CC_A0:    { float a=tev_colors[1][3]; out[0]=out[1]=out[2]=a; return; }
+    case GX_CC_C1:    out[0]=tev_colors[2][0]; out[1]=tev_colors[2][1]; out[2]=tev_colors[2][2]; return;
+    case GX_CC_A1:    { float a=tev_colors[2][3]; out[0]=out[1]=out[2]=a; return; }
+    case GX_CC_C2:    out[0]=tev_colors[3][0]; out[1]=tev_colors[3][1]; out[2]=tev_colors[3][2]; return;
+    case GX_CC_A2:    { float a=tev_colors[3][3]; out[0]=out[1]=out[2]=a; return; }
+    case GX_CC_TEXC:  out[0]=out[1]=out[2]=0.0f; return;
+    case GX_CC_TEXA:  out[0]=out[1]=out[2]=0.0f; return;
+    case GX_CC_RASC:  out[0]=out[1]=out[2]=0.0f; return;
+    case GX_CC_RASA:  out[0]=out[1]=out[2]=0.0f; return;
+    case GX_CC_ONE:   out[0]=out[1]=out[2]=1.0f; return;
+    case GX_CC_HALF:  out[0]=out[1]=out[2]=0.5f; return;
+    case GX_CC_KONST: {
+        int ksel = ts->k_color_sel;
+        if (ksel <= 7) {
+            static const float kc[] = {1.0f, 0.875f, 0.75f, 0.625f, 0.5f, 0.375f, 0.25f, 0.125f};
+            out[0]=out[1]=out[2]=kc[ksel]; return;
+        }
+        if (ksel >= 0x0C && ksel <= 0x0F) {
+            int ki = ksel - 0x0C;
+            out[0]=tev_k_colors[ki][0]; out[1]=tev_k_colors[ki][1]; out[2]=tev_k_colors[ki][2]; return;
+        }
+        if (ksel >= 0x10 && ksel <= 0x1F) {
+            int ki = (ksel - 0x10) & 3;
+            int ch = (ksel - 0x10) >> 2;
+            out[0]=out[1]=out[2]=tev_k_colors[ki][ch]; return;
+        }
+        out[0]=out[1]=out[2]=1.0f; return;
+    }
+    default: out[0]=out[1]=out[2]=0.0f; return;
+    }
+}
+
+static inline float vita_resolve_ca_cmd(int input, const PCGXTevStage* ts,
+                                        const float tev_colors[4][4],
+                                        const float tev_k_colors[4][4]) {
+    switch (input) {
+    case GX_CA_APREV: return tev_colors[0][3];
+    case GX_CA_A0:    return tev_colors[1][3];
+    case GX_CA_A1:    return tev_colors[2][3];
+    case GX_CA_A2:    return tev_colors[3][3];
+    case GX_CA_TEXA:  return 0.0f;
+    case GX_CA_RASA:  return 0.0f;
+    case GX_CA_KONST: {
+        int ksel = ts->k_alpha_sel;
+        if (ksel <= 7) {
+            static const float kc[] = {1.0f, 0.875f, 0.75f, 0.625f, 0.5f, 0.375f, 0.25f, 0.125f};
+            return kc[ksel];
+        }
+        if (ksel >= 0x10 && ksel <= 0x1F) {
+            int ki = (ksel - 0x10) & 3;
+            int ch = (ksel - 0x10) >> 2;
+            return tev_k_colors[ki][ch];
+        }
+        return 1.0f;
+    }
+    default: return 0.0f;
+    }
+}
+
 // Map tex matrix ID to slot (from pc_gx.c)
 static int pc_tex_mtx_id_to_slot(int id) {
     if (id == GX_IDENTITY) return -1;
@@ -535,15 +698,54 @@ static int pc_tex_mtx_id_to_slot(int id) {
 
 
 void pc_gx_submit_frame(void) {
+#ifdef VITA_DEBUG
+    uint32_t t_submit_entry = sceKernelGetProcessTimeLow();
+    // reset vitaGL per-phase counters for this frame's draws. read-back
+    // happens at the end of this function. no-op when vitaGL built without
+    // DRAW_PHASE_PROFILING.
+    extern void vgl_reset_draw_phases(void);
+    vgl_reset_draw_phases();
+    // our-side submit phase accumulators (us). setup covers all per-cmd
+    // prep up to and including viewport/scissor. draw covers the
+    // glDrawElements call stack. efb covers post-draw capture work.
+    uint32_t submit_setup_acc = 0;
+    uint32_t submit_draw_acc = 0;
+    uint32_t submit_efb_acc = 0;
+    // Zero all sub-phase fields up front so early-return paths don't
+    // leave stale values from the previous frame.
+    vita_timing.submit_uniform_us = 0;
+    vita_timing.submit_glstate_us = 0;
+    vita_timing.submit_state_us   = 0;
+    vita_timing.submit_draw_us    = 0;
+    vita_timing.submit_efb_us     = 0;
+    vita_timing.submit_presub_us  = 0;
+    vita_timing.submit_postsub_us = 0;
+    vita_timing.submit_waitpdd_us = 0;
+#endif
+
+    // Texture cache work: doesn't touch cmd buffer, so runs in parallel
+    // with core 2 prededup. moves ~0.3-0.5ms off the critical path before
+    // we block on wait_prededup.
     pc_gx_texture_process_deferred_uploads();
     pc_gx_texture_process_deferred_params();
 
     if (vita_stats.deferred_tex_uploads > 0)
         gl_cache_reset_textures();
 
-    // late texture re-resolve after deferred uploads completed. gated on
-    // pc_gx_deferred_tex_uploads (vita_stats.deferred_tex_uploads is never
-    // set) so stable scenes don't walk cmd x stage pairs for nothing.
+    // Now block on core 2 prededup (the cmd buffer reads below need it
+    // complete). timing this here captures the REAL wait, not the
+    // fraction overlapping with the texture work above.
+#ifdef VITA_DEBUG
+    uint32_t t_waitpdd_start = sceKernelGetProcessTimeLow();
+#endif
+    extern void vita_wait_prededup(void);
+    vita_wait_prededup();
+#ifdef VITA_DEBUG
+    uint32_t t_after_waitpdd = sceKernelGetProcessTimeLow();
+    vita_timing.submit_waitpdd_us = t_after_waitpdd - t_waitpdd_start;
+#endif
+
+    // late texture re-resolve after deferred uploads completed.
     extern int pc_gx_deferred_tex_uploads;
     if (pc_gx_deferred_tex_uploads > 0) {
         int rd_tmp = 1 - cmd_write;
@@ -560,7 +762,10 @@ void pc_gx_submit_frame(void) {
                         if (tex) {
                             c->textures.obj_stage[s] = tex;
                             c->textures.use_stage[s] = 1;
-                            c->dirty |= (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES);
+                            // only set DIRTY_TEXTURES here; setting
+                            // DIRTY_TEV_STAGES as well caused a black
+                            // flash on first-time texture loads.
+                            c->dirty |= PC_GX_DIRTY_TEXTURES;
                             rr_patched++;
                         } else {
                             rr_failed++;
@@ -613,21 +818,27 @@ void pc_gx_submit_frame(void) {
         cmd_last_shader_db[rd] = 0;
         efb_capture_count_db[rd] = 0;
         vita_gpu_skip_draws = 1;
+#ifdef VITA_DEBUG
+        // empty-frame path: total elapsed minus the waitpdd block.
+        vita_timing.submit_presub_us =
+            (sceKernelGetProcessTimeLow() - t_submit_entry) - vita_timing.submit_waitpdd_us;
+#endif
         return;
     }
 
-    // single vertex upload for the entire frame
-    glBufferData(GL_ARRAY_BUFFER, rd_verts * sizeof(PCGXVertex),
-                 cmd_verts_db[rd], GL_STREAM_DRAW);
+    // zero-copy vertex upload: cmd_verts_db lives in GPU-mapped memory
+    // (vglMalloc at init), so vglBufferData just points GL at our buffer.
+    // 2 buffers is enough because cmd_write flips once per frame and
+    // VitaGL's display queue is never more than one frame behind here.
+    extern void vglBufferData(GLenum target, const GLvoid *data);
+    vglBufferData(GL_ARRAY_BUFFER, cmd_verts_db[rd]);
 
     vita_set_vertex_attrib_pointers();
 
     // index buffer is built inline by the worker as it flushes each draw
     {
-        int total_indices = frame_idx_count_db[rd];
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, total_indices * sizeof(GLushort),
-                     frame_indices_db[rd], GL_STREAM_DRAW);
+        vglBufferData(GL_ELEMENT_ARRAY_BUFFER, frame_indices_db[rd]);
     }
 
     // main-thread pre-dedup safety net. only needed when deferred texture
@@ -660,8 +871,9 @@ void pc_gx_submit_frame(void) {
                 __builtin_memcmp(c->transform.projection_mtx_t, last_proj_mtx_pm, 64) == 0)
                 new_dirty &= ~PC_GX_DIRTY_PROJECTION;
             if ((orig_dirty & PC_GX_DIRTY_MODELVIEW) && last_pm_modelview_valid &&
-                __builtin_memcmp(c->transform.pos_mtx_t, last_pos_mtx_pm, 64) == 0)
+                __builtin_memcmp(c->transform.pos_mtx_t, last_pos_mtx_pm, 64) == 0) {
                 new_dirty &= ~PC_GX_DIRTY_MODELVIEW;
+            }
             if ((orig_dirty & PC_GX_DIRTY_TEXTURES) && last_pm_textures_valid &&
                 __builtin_memcmp(&c->textures, &last_textures_pm, sizeof(PCGXCmdTextures)) == 0)
                 new_dirty &= ~PC_GX_DIRTY_TEXTURES;
@@ -682,131 +894,12 @@ void pc_gx_submit_frame(void) {
         }
     }
 
-    // opaque draw sorting. reorders opaque draws by (shader, texture0) so
-    // the merge pass sees maximal state coherence. blended draws keep their
-    // original relative order and execute after opaques. skipped when EFB
-    // captures are present (transitions are not perf-critical).
-    {
-        int did_sort = 0;
-        // default identity order
-        for (int i = 0; i < rd_count; i++) sort_order[i] = i;
+    vita_stats.opaque_draws = 0;
+    vita_stats.blended_draws = 0;
+    vita_stats.merged_draws = rd_count;
+    vita_stats.sort_merged = 0;
 
-        if (0) { // sort disabled: AC depends on draw order even for opaque geometry
-            typedef struct { unsigned long long key; int idx; } SortEntry;
-            static SortEntry opaque_buf[CMD_QUEUE_MAX];
-            static int blended_buf[CMD_QUEUE_MAX];
-            int opaque_n = 0, blended_n = 0;
-
-            for (int i = 0; i < rd_count; i++) {
-                PCGXDrawCmd* c = &cmd_queue_db[rd][i];
-                if (c->shader == 0) {
-                    blended_buf[blended_n++] = i;
-                    continue;
-                }
-                int is_opaque = (c->gl_state.blend_mode == GX_BM_NONE) &&
-                                c->gl_state.z_update_enable;
-                if (is_opaque) {
-                    opaque_buf[opaque_n].key =
-                        ((unsigned long long)c->shader << 32) |
-                        (unsigned long long)c->textures.obj_stage[0];
-                    opaque_buf[opaque_n].idx = i;
-                    opaque_n++;
-                } else {
-                    blended_buf[blended_n++] = i;
-                }
-            }
-
-            vita_stats.opaque_draws = opaque_n;
-            vita_stats.blended_draws = blended_n;
-
-            if (opaque_n > 1) {
-                // insertion sort on 8-byte keys, cache-friendly for ~300 elems
-                for (int i = 1; i < opaque_n; i++) {
-                    SortEntry tmp = opaque_buf[i];
-                    int j = i - 1;
-                    while (j >= 0 && opaque_buf[j].key > tmp.key) {
-                        opaque_buf[j + 1] = opaque_buf[j];
-                        j--;
-                    }
-                    opaque_buf[j + 1] = tmp;
-                }
-
-                // build final execution order: sorted opaques then blended
-                int n = 0;
-                for (int i = 0; i < opaque_n; i++) sort_order[n++] = opaque_buf[i].idx;
-                for (int i = 0; i < blended_n; i++) sort_order[n++] = blended_buf[i];
-
-                // rebuild index buffer in sorted order so consecutive draws
-                // have contiguous index ranges (enables merge)
-                int new_pos = 0;
-                for (int i = 0; i < rd_count; i++) {
-                    PCGXDrawCmd* c = &cmd_queue_db[rd][sort_order[i]];
-                    int cnt = c->idx_count;
-                    if (cnt > 0) {
-                        __builtin_memcpy(&sort_temp_indices[new_pos],
-                                         &frame_indices_db[rd][c->idx_offset],
-                                         cnt * sizeof(GLushort));
-                        c->idx_offset = new_pos;
-                        new_pos += cnt;
-                    }
-                }
-                __builtin_memcpy(frame_indices_db[rd], sort_temp_indices,
-                                 new_pos * sizeof(GLushort));
-
-                // re-upload the rebuilt index buffer
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
-                glBufferData(GL_ELEMENT_ARRAY_BUFFER, new_pos * sizeof(GLushort),
-                             frame_indices_db[rd], GL_STREAM_DRAW);
-
-                // safe approach: set dirty=ALL on every draw so the replay
-                // loop's inline caches (gl_cache, last_tev, etc.) handle all
-                // redundancy. only recalculate shader_changed for sorted order.
-                {
-                    GLuint prev_sh = 0;
-                    for (int i = 0; i < rd_count; i++) {
-                        PCGXDrawCmd* c = &cmd_queue_db[rd][sort_order[i]];
-                        if (c->shader == 0) continue;
-                        c->shader_changed = (c->shader != prev_sh);
-                        c->dirty = PC_GX_DIRTY_ALL;
-                        prev_sh = c->shader;
-                    }
-                }
-
-                did_sort = 1;
-            }
-        }
-
-        if (!did_sort) {
-            vita_stats.opaque_draws = 0;
-            vita_stats.blended_draws = 0;
-        }
-    }
-
-    // draw merge. combines consecutive draws with matching state.
-    // uses sort_order[] so it works on both sorted and unsorted frames.
-    {
-        int merged = 0;
-        for (int i = 0; i < rd_count - 1; i++) {
-            PCGXDrawCmd* c = &cmd_queue_db[rd][sort_order[i]];
-            PCGXDrawCmd* n = &cmd_queue_db[rd][sort_order[i + 1]];
-            if (c->shader == 0 || n->shader == 0) continue;
-            unsigned int nd = n->dirty;
-            if (nd != 0) {
-                if (nd != PC_GX_DIRTY_LIGHTING) continue;
-                if (__builtin_memcmp(&c->lighting, &n->lighting, sizeof(PCGXCmdLighting)) != 0) continue;
-            }
-            if (n->shader != c->shader) continue;
-            if (n->primitive != c->primitive) continue;
-            if (n->idx_offset != c->idx_offset + c->idx_count) continue;
-            c->idx_count += n->idx_count;
-            n->shader = 0;
-            merged++;
-        }
-        vita_stats.merged_draws = rd_count - merged;
-        vita_stats.sort_merged = merged;
-    }
-
-    // VitaGL uniform bypass macros
+    // vitaGL uniform bypass
     typedef struct { const void* ptr; float* data; unsigned int size; unsigned char is_frag; unsigned char is_vert; } vgl_uni_t;
     #define VU(loc)  ((vgl_uni_t*)((intptr_t)(-(loc))))
     #define UL(field) g_gx.uloc.field
@@ -820,23 +913,14 @@ void pc_gx_submit_frame(void) {
     int actual_draws = 0;
     vita_stats.merged_draws = rd_count;
 
-    // per-frame uniform upload dedup. consecutive draws often have
-    // byte-identical TEV/lighting/konst state, and a memcmp is far
-    // cheaper than the ~50-uniform upload block that would otherwise
-    // run. trackers are static so the ~1KB state doesn't live on the
-    // stack. reset on shader switch because uniform locations remap.
-    static PCGXCmdTEV      last_tev;
-    static PCGXCmdLighting last_lighting;
-    static float           last_konst[16];
-    int last_tev_valid      = 0;
-    int last_lighting_valid = 0;
-    int last_konst_valid    = 0;
     int last_num_ind_stages = -1;
+    static float last_lpos[8][3];
+    static float last_lcol[8][4];
+    int last_lights_valid = 0;
+    static unsigned char last_light_scalars[76];
+    int last_light_scalars_valid = 0;
+    const size_t LIGHT_SCALAR_BYTES = offsetof(PCGXCmdLighting, light_pos);
 
-    // consume the force-resync flag set by the PC_NOOP_FULL_STATE_INVALIDATE
-    // tag. this also invalidates gl_cache so the first draw re-binds all
-    // textures and re-applies wrap/filter state that the prerender rect's
-    // sampler parameters may have left in the driver.
     extern int g_vita_force_state_resync;
     if (g_vita_force_state_resync) {
         gl_cache_reset();
@@ -844,34 +928,77 @@ void pc_gx_submit_frame(void) {
         g_vita_force_state_resync = 0;
     }
 
-    // viewport/scissor input cache. skips the per-draw scale/4:3/widescreen
-    // math when the raw inputs match the previous draw. the GL calls are
-    // already cached downstream but the math still runs every draw.
     float last_vp_input[6] = { -9999, -9999, -9999, -9999, -9999, -9999 };
     int   last_sc_input[4] = { -9999, -9999, -9999, -9999 };
     int   last_vp_ws = -1;
     int   last_vp_input_valid = 0;
 
-    for (int i = 0; i < rd_count; i++) {
-        PCGXDrawCmd* cmd = &cmd_queue_db[rd][sort_order[i]];
-        if (cmd->shader == 0) continue;
+    // vgl_fast_draw_mode: we set textures directly via sceGxm, so
+    // VitaGL's per-draw texture loops can be skipped.
+    extern int vgl_fast_draw_mode;
+    extern SceGxmContext* vglGetGxmContext(void);
+    extern const SceGxmTexture* vglGetGxmTextureById(GLuint id);
+    SceGxmContext* gxm_ctx = vglGetGxmContext();
+    vgl_fast_draw_mode = 1;
+    GLuint gxm_frag_tex[8] = {0};
 
-        // late EFB texture re-resolve safety net. the worker may have
-        // snapshotted obj_stage=0 or a stale value before the capture
-        // was processed; by this point earlier captures have been
-        // handled so look up by dest_ptr and force DIRTY_TEXTURES.
-        for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-            if (cmd->textures.efb_src_ptr[s] != 0) {
-                GLuint fresh = pc_gx_efb_capture_find(cmd->textures.efb_src_ptr[s]);
-                if (fresh && fresh != cmd->textures.obj_stage[s]) {
-                    cmd->textures.obj_stage[s] = fresh;
-                    cmd->textures.use_stage[s] = 1;
-                    cmd->dirty |= PC_GX_DIRTY_TEXTURES;
+    static int dbg_ctr = 0;
+    if ((dbg_ctr++ & 0xFF) == 0) {
+        int dbg_dirty0 = 0, dbg_only_lighting = 0, dbg_has_mv = 0, dbg_has_proj = 0, dbg_has_other = 0;
+        for (int i = 0; i < rd_count; i++) {
+            PCGXDrawCmd* cmd = &cmd_queue_db[rd][i];
+            if (cmd->shader == 0) continue;
+            if (cmd->dirty == 0) dbg_dirty0++;
+            else if ((cmd->dirty & ~(unsigned int)PC_GX_DIRTY_LIGHTING) == 0) dbg_only_lighting++;
+            if (cmd->dirty & PC_GX_DIRTY_MODELVIEW) dbg_has_mv++;
+            if (cmd->dirty & PC_GX_DIRTY_PROJECTION) dbg_has_proj++;
+            if (cmd->dirty & ~(unsigned int)(PC_GX_DIRTY_LIGHTING|PC_GX_DIRTY_MODELVIEW|PC_GX_DIRTY_PROJECTION)) dbg_has_other++;
+        }
+        vita_log("[DIRTYBITS] cmds=%d dirty0=%d only_light=%d has_mv=%d has_proj=%d has_other=%d\n",
+                 rd_count, dbg_dirty0, dbg_only_lighting, dbg_has_mv, dbg_has_proj, dbg_has_other);
+    }
+
+#ifdef VITA_DEBUG
+    uint32_t t_loop_start = sceKernelGetProcessTimeLow();
+    // presub = all pre-loop work except the waitpdd block. this now
+    // spans two segments (texture-cache work before waitpdd, then the
+    // rest after waitpdd) because we moved waitpdd lower to overlap with
+    // texture processing.
+    vita_timing.submit_presub_us = (t_loop_start - t_submit_entry) - vita_timing.submit_waitpdd_us;
+#endif
+
+    for (int i = 0; i < rd_count; i++) {
+        PCGXDrawCmd* cmd = &cmd_queue_db[rd][i];
+        if (cmd->shader == 0) continue;
+        // Prefetch next cmd's hot fields while we process this one. Each
+        // PCGXDrawCmd is ~1.5KB spanning ~48 cache lines; the uniform+
+        // state block below touches many of those lines. Prefetching the
+        // next cmd 2-3 cache lines ahead warms the cache before we need
+        // it, hiding some of the L2 latency.
+        if (i + 1 < rd_count) {
+            PCGXDrawCmd* next_cmd = &cmd_queue_db[rd][i + 1];
+            __builtin_prefetch(next_cmd, 0, 0);
+            __builtin_prefetch((char*)next_cmd + 64, 0, 0);
+            __builtin_prefetch((char*)next_cmd + 128, 0, 0);
+        }
+#ifdef VITA_DEBUG
+        uint32_t ts_setup_start = sceKernelGetProcessTimeLow();
+#endif
+
+        // late EFB texture re-resolve for stages that reference one.
+        if (cmd->textures.efb_src_ptr[0] | cmd->textures.efb_src_ptr[1] | cmd->textures.efb_src_ptr[2]) {
+            for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                if (cmd->textures.efb_src_ptr[s] != 0) {
+                    GLuint fresh = pc_gx_efb_capture_find(cmd->textures.efb_src_ptr[s]);
+                    if (fresh && fresh != cmd->textures.obj_stage[s]) {
+                        cmd->textures.obj_stage[s] = fresh;
+                        cmd->textures.use_stage[s] = 1;
+                        cmd->dirty |= PC_GX_DIRTY_TEXTURES;
+                    }
                 }
             }
         }
 
-        // Skip draws with missing textures
         {
             int tex_missing = 0;
             for (int s = 0; s < cmd->tev.num_stages; s++) {
@@ -892,7 +1019,6 @@ void pc_gx_submit_frame(void) {
             }
         }
 
-        // Shader switch
         if (cmd->shader_changed) {
             vita_stats.shader_switches++;
             glUseProgram(cmd->shader);
@@ -902,17 +1028,23 @@ void pc_gx_submit_frame(void) {
             sloc = UL(texture0); if (sloc >= 0) glUniform1i(sloc, 0);
             sloc = UL(texture1); if (sloc >= 0) glUniform1i(sloc, 1);
             sloc = UL(texture2); if (sloc >= 0) glUniform1i(sloc, 2);
+            // scissor stays enabled in GXM across glUseProgram. keeping
+            // our cache flag avoids ~41 redundant glEnable(GL_SCISSOR_TEST)
+            // per frame (each triggers VitaGL's update_scissor_test).
+            int preserved_scissor = gl_cache.scissor_test_enabled;
             gl_cache_reset();
-            // uniform locations remap on shader switch; previous skip-decisions
-            // are no longer valid
-            last_tev_valid = 0;
-            last_lighting_valid = 0;
-            last_konst_valid = 0;
+            if (preserved_scissor == 1) gl_cache.scissor_test_enabled = 1;
+            last_lights_valid = 0;
+            last_light_scalars_valid = 0;
             last_vp_input_valid = 0;
             last_num_ind_stages = -1;
         }
 
-        // Upload dirty uniforms: direct write to VitaGL u->data
+#ifdef VITA_DEBUG
+        uint32_t ts_unif_start = sceKernelGetProcessTimeLow();
+#endif
+        // direct writes to VitaGL's uniform shadow.
+        if (cmd->dirty != 0)
         {
             GLint loc;
             unsigned int dirty = cmd->dirty;
@@ -938,9 +1070,7 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & PC_GX_DIRTY_TEV_STAGES) {
-                int tev_unchanged = last_tev_valid &&
-                    __builtin_memcmp(&cmd->tev, &last_tev, sizeof(PCGXCmdTEV)) == 0;
-                if (!tev_unchanged) {
+                {
                     loc = UL(num_tev_stages); if (loc >= 0) UNI1I(cmd->tev.num_stages);
                     for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
                         PCGXTevStage* ts = &cmd->tev.stages[s];
@@ -966,19 +1096,11 @@ void pc_gx_submit_frame(void) {
                         loc = UL(tev_param[s]); if (loc >= 0) DFVN(loc, cmd->tev.param[s], 16);
                         loc = UL(tev_aparam[s]); if (loc >= 0) DFVN(loc, cmd->tev.aparam[s], 8);
                     }
-                    last_tev = cmd->tev;
-                    last_tev_valid = 1;
                 }
             }
 
             if (dirty & PC_GX_DIRTY_KONST) {
-                int konst_unchanged = last_konst_valid &&
-                    __builtin_memcmp(cmd->tev.k_colors, last_konst, 64) == 0;
-                if (!konst_unchanged) {
-                    loc = UL(kcolor); if (loc >= 0) DFVN(loc, cmd->tev.k_colors, 64);
-                    __builtin_memcpy(last_konst, cmd->tev.k_colors, 64);
-                    last_konst_valid = 1;
-                }
+                loc = UL(kcolor); if (loc >= 0) DFVN(loc, cmd->tev.k_colors, 64);
             }
 
             if (dirty & PC_GX_DIRTY_ALPHA_CMP) {
@@ -987,11 +1109,10 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & PC_GX_DIRTY_LIGHTING) {
-                int lighting_unchanged = last_lighting_valid &&
-                    __builtin_memcmp(&cmd->lighting, &last_lighting, sizeof(PCGXCmdLighting)) == 0;
-                if (!lighting_unchanged) {
-                    last_lighting = cmd->lighting;
-                    last_lighting_valid = 1;
+                int scalars_changed = !last_light_scalars_valid ||
+                    __builtin_memcmp(&cmd->lighting, last_light_scalars,
+                                     LIGHT_SCALAR_BYTES) != 0;
+                if (scalars_changed) {
                     loc = UL(lighting_enabled); if (loc >= 0) UNI1I(cmd->lighting.chan_ctrl_enable_0);
                     loc = UL(mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
                     loc = UL(chan_mat_src); if (loc >= 0) UNI1I(cmd->lighting.mat_src_0);
@@ -1001,34 +1122,56 @@ void pc_gx_submit_frame(void) {
                     loc = UL(amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
                     loc = UL(chan_amb_src); if (loc >= 0) UNI1I(cmd->lighting.amb_src_0);
                     loc = UL(light_mask); if (loc >= 0) UNI1I(cmd->lighting.light_mask_0);
-                    loc = UL(light_pos[0]);   if (loc >= 0) DFVN(loc, &cmd->lighting.light_pos[0][0], 96);
-                    loc = UL(light_color[0]); if (loc >= 0) DFVN(loc, &cmd->lighting.light_color[0][0], 128);
+                    __builtin_memcpy(last_light_scalars, &cmd->lighting, LIGHT_SCALAR_BYTES);
+                    last_light_scalars_valid = 1;
+                }
+                {
+                    {
+                        int lights_changed = !last_lights_valid ||
+                            __builtin_memcmp(cmd->lighting.light_pos, last_lpos, 96) != 0 ||
+                            __builtin_memcmp(cmd->lighting.light_color, last_lcol, 128) != 0;
+                        if (lights_changed) {
+                            loc = UL(light_pos[0]);   if (loc >= 0) DFVN(loc, &cmd->lighting.light_pos[0][0], 96);
+                            loc = UL(light_color[0]); if (loc >= 0) DFVN(loc, &cmd->lighting.light_color[0][0], 128);
+                            __builtin_memcpy(last_lpos, cmd->lighting.light_pos, 96);
+                            __builtin_memcpy(last_lcol, cmd->lighting.light_color, 128);
+                            last_lights_valid = 1;
+                        }
                     if (cmd->lighting.vs_lit_enable) {
-                        loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
-                        loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
-                        loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_mat_src; }
-                        loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.amb_src_0; }
-                        loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_alpha_mat_src; }
-                        loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.chan_ctrl_enable_1; }
-                        for (int li = 0; li < 8; li++) {
-                            loc = UL(vs_ldir[li]);
-                            if (loc >= 0) { VU(loc)->data[0] = cmd->lighting.light_pos[li][0]; VU(loc)->data[1] = cmd->lighting.light_pos[li][1]; VU(loc)->data[2] = cmd->lighting.light_pos[li][2]; }
-                            loc = UL(vs_lcol[li]);
-                            if (loc >= 0) DFVN(loc, cmd->lighting.light_color[li], 16);
+                        if (scalars_changed) {
+                            loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, cmd->lighting.mat_color_0, 16);
+                            loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, cmd->lighting.amb_color_0, 16);
+                            loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_mat_src; }
+                            loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.amb_src_0; }
+                            loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.vs_alpha_mat_src; }
+                            loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = (float)cmd->lighting.chan_ctrl_enable_1; }
+                        }
+                        if (lights_changed) {
+                            for (int li = 0; li < 8; li++) {
+                                loc = UL(vs_ldir[li]);
+                                if (loc >= 0) { VU(loc)->data[0] = cmd->lighting.light_pos[li][0]; VU(loc)->data[1] = cmd->lighting.light_pos[li][1]; VU(loc)->data[2] = cmd->lighting.light_pos[li][2]; }
+                                loc = UL(vs_lcol[li]);
+                                if (loc >= 0) DFVN(loc, cmd->lighting.light_color[li], 16);
+                            }
                         }
                     } else {
                         static const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
                         static const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                        loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, white, 16);
-                        loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, white, 16);
-                        loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
-                        loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
-                        loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
-                        loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = 0.0f; }
-                        for (int li = 0; li < 8; li++) {
-                            loc = UL(vs_ldir[li]); if (loc >= 0) { VU(loc)->data[0] = 0; VU(loc)->data[1] = 0; VU(loc)->data[2] = 1; }
-                            loc = UL(vs_lcol[li]); if (loc >= 0) DFVN(loc, zero4, 16);
+                        if (scalars_changed) {
+                            loc = UL(vs_mat_color);  if (loc >= 0) DFVN(loc, white, 16);
+                            loc = UL(vs_amb_color);  if (loc >= 0) DFVN(loc, white, 16);
+                            loc = UL(vs_chan_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
+                            loc = UL(vs_chan_amb_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
+                            loc = UL(vs_alpha_mat_src); if (loc >= 0) { VU(loc)->data[0] = 1.0f; }
+                            loc = UL(vs_alpha_lit); if (loc >= 0) { VU(loc)->data[0] = 0.0f; }
                         }
+                        if (lights_changed) {
+                            for (int li = 0; li < 8; li++) {
+                                loc = UL(vs_ldir[li]); if (loc >= 0) { VU(loc)->data[0] = 0; VU(loc)->data[1] = 0; VU(loc)->data[2] = 1; }
+                                loc = UL(vs_lcol[li]); if (loc >= 0) DFVN(loc, zero4, 16);
+                            }
+                        }
+                    }
                     }
                 }
             }
@@ -1045,13 +1188,38 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES)) {
-                // unified bind + wrap loop. walks only the stages the
-                // cmd actually uses (num_stages is usually 1 or 2).
+                // direct GXM texture path: bypasses glBindTexture,
+                // glActiveTexture, glTexParameteri entirely. sets wrap
+                // modes directly on the SceGxmTexture struct.
+                // use glBindTexture + glTexParameteri for wrap (proven
+                // working) + direct sceGxm push for the fast-path bypass.
                 int ns = cmd->tev.num_stages;
                 if (ns > PC_GX_MAX_TEV_STAGES) ns = PC_GX_MAX_TEV_STAGES;
                 for (int s = 0; s < ns; s++) {
                     if (!cmd->textures.use_stage[s]) continue;
-                    gl_cache_bind_texture(GL_TEXTURE0 + s, cmd->textures.obj_stage[s]);
+                    GLuint tid = cmd->textures.obj_stage[s];
+                    // skip texture binding entirely when unchanged for this
+                    // GXM unit. consecutive draws of same material/texture
+                    // (very common for batched geometry) hit this fast path.
+                    if (gxm_frag_tex[s] == tid) {
+                        // still need wrap mode refresh if game changed it
+                        if (cmd->textures.wrap_s[s] != 0xFF &&
+                            (gl_cache_wrap_s[s] != cmd->textures.wrap_s[s] ||
+                             gl_cache_wrap_t[s] != cmd->textures.wrap_t[s])) {
+                            gl_cache_bind_texture(GL_TEXTURE0 + s, tid);
+                            gl_cache_active_texture(GL_TEXTURE0 + s);
+                            GLenum ws = (cmd->textures.wrap_s[s] == 2) ? GL_MIRRORED_REPEAT :
+                                        (cmd->textures.wrap_s[s] == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                            GLenum wt = (cmd->textures.wrap_t[s] == 2) ? GL_MIRRORED_REPEAT :
+                                        (cmd->textures.wrap_t[s] == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ws);
+                            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wt);
+                            gl_cache_wrap_s[s] = cmd->textures.wrap_s[s];
+                            gl_cache_wrap_t[s] = cmd->textures.wrap_t[s];
+                        }
+                        continue;
+                    }
+                    gl_cache_bind_texture(GL_TEXTURE0 + s, tid);
                     if (cmd->textures.wrap_s[s] != 0xFF &&
                         (gl_cache_wrap_s[s] != cmd->textures.wrap_s[s] ||
                          gl_cache_wrap_t[s] != cmd->textures.wrap_t[s])) {
@@ -1065,6 +1233,10 @@ void pc_gx_submit_frame(void) {
                         gl_cache_wrap_s[s] = cmd->textures.wrap_s[s];
                         gl_cache_wrap_t[s] = cmd->textures.wrap_t[s];
                     }
+                    // direct GXM push (bypasses VitaGL texture loop)
+                    const SceGxmTexture* gt = vglGetGxmTextureById(tid);
+                    if (gt) sceGxmSetFragmentTexture(gxm_ctx, s, gt);
+                    gxm_frag_tex[s] = tid;
                 }
                 loc = UL(use_texture0); if (loc >= 0) UNI1I(cmd->textures.use_stage[0]);
                 loc = UL(use_texture1); if (loc >= 0) UNI1I(cmd->textures.use_stage[1]);
@@ -1080,8 +1252,15 @@ void pc_gx_submit_frame(void) {
                 }
                 if (cmd->indirect.num_stages > 0) {
                     for (int ii = 0; ii < cmd->indirect.num_stages && ii < 4; ii++) {
-                        if (cmd->indirect.tex[ii])
-                            gl_cache_bind_texture(GL_TEXTURE3 + ii, cmd->indirect.tex[ii]);
+                        if (cmd->indirect.tex[ii]) {
+                            // direct GXM for indirect textures (no glBindTexture)
+                            int gu = 3 + ii;
+                            if (gxm_frag_tex[gu] != cmd->indirect.tex[ii]) {
+                                const SceGxmTexture* gt = vglGetGxmTextureById(cmd->indirect.tex[ii]);
+                                if (gt) sceGxmSetFragmentTexture(gxm_ctx, gu, gt);
+                                gxm_frag_tex[gu] = cmd->indirect.tex[ii];
+                            }
+                        }
                         loc = UL(ind_tex[ii]); if (loc >= 0) { VU(loc)->data[0] = (float)(3 + ii); }
                         loc = UL(ind_scale[ii]); if (loc >= 0) DFVN(loc, cmd->indirect.scale[ii], 8);
                     }
@@ -1106,18 +1285,22 @@ void pc_gx_submit_frame(void) {
                 loc = UL(fog_color); if (loc >= 0) DFVN(loc, cmd->fog.color, 16);
             }
 
-            // only flag VitaGL's uniform flush when we actually wrote data.
-            // draws with dirty==0 (cleared by pre-dedup) skip all writes
-            // above, so VitaGL can reuse the last uploaded values as-is.
-            if (dirty) {
-                dirty_vert_unifs = 1;
-                dirty_frag_unifs = 1;
-            }
+            // flag VitaGL's uniform flush only for the side that changed.
+            #define VERT_DIRTY_MASK (PC_GX_DIRTY_PROJECTION | PC_GX_DIRTY_MODELVIEW | \
+                                    PC_GX_DIRTY_TEXGEN | PC_GX_DIRTY_LIGHTING)
+            #define FRAG_DIRTY_MASK (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | \
+                                    PC_GX_DIRTY_KONST | PC_GX_DIRTY_ALPHA_CMP | \
+                                    PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_INDIRECT | \
+                                    PC_GX_DIRTY_FOG | PC_GX_DIRTY_LIGHTING)
+            if (dirty & VERT_DIRTY_MASK) dirty_vert_unifs = 1;
+            if (dirty & FRAG_DIRTY_MASK) dirty_frag_unifs = 1;
             #undef DFVN
         }
+#ifdef VITA_DEBUG
+        uint32_t ts_glstate_start = sceKernelGetProcessTimeLow();
+        vita_timing.submit_uniform_us += ts_glstate_start - ts_unif_start;
+#endif
 
-        // GL state from snapshot. outer check skips all 4 inner checks when
-        // no GL state is dirty (common case after expanded pre-dedup).
         #define GL_STATE_ANY (PC_GX_DIRTY_DEPTH | PC_GX_DIRTY_COLOR_MASK | \
                               PC_GX_DIRTY_CULL | PC_GX_DIRTY_BLEND)
         if (cmd->dirty & GL_STATE_ANY) {
@@ -1207,15 +1390,11 @@ void pc_gx_submit_frame(void) {
         } // end GL_STATE_ANY
         #undef GL_STATE_ANY
 
-        // viewport and scissor from snapshot. short-circuit the float math
-        // when the raw inputs match the previous draw; viewport rarely
-        // changes mid-frame. the inner gl_cache check is still the final
-        // line of defense after a gl_cache_reset or shader switch.
+        // viewport/scissor short-circuit when raw inputs are unchanged.
         if (last_vp_input_valid &&
             __builtin_memcmp(cmd->viewport, last_vp_input, 24) == 0 &&
             __builtin_memcmp(cmd->scissor, last_sc_input, 16) == 0 &&
             cmd->widescreen_stretch == last_vp_ws) {
-            // ensure scissor test is on and skip the rest
             if (gl_cache.scissor_test_enabled != 1) {
                 glEnable(GL_SCISSOR_TEST);
                 gl_cache.scissor_test_enabled = 1;
@@ -1308,25 +1487,77 @@ void pc_gx_submit_frame(void) {
                 case GX_POINTS:        gl_prim = GL_POINTS; break;
                 default:               gl_prim = GL_TRIANGLES; break;
             }
-            if (cmd->idx_count > 0) {
-                glDrawElements(gl_prim, cmd->idx_count, GL_UNSIGNED_SHORT,
+
+            // fold consecutive cmds with the same state into one
+            // glDrawElements. needs same shader, same primitive,
+            // contiguous indices, no EFB refs or captures between them,
+            // and either no dirty bits or only DIRTY_LIGHTING where the
+            // lighting bytes actually match. prededup skips the lighting
+            // dedup frame-wide (hit rate too low), but adjacent same-
+            // material draws do share lighting, so verify here.
+            int merged_count = cmd->idx_count;
+            int merged_until = i;
+            extern int vita_disable_merge;
+            if (!vita_disable_merge && cmd->idx_count > 0 && gl_prim == GL_TRIANGLES) {
+                while (merged_until + 1 < rd_count) {
+                    int next_idx_pos = merged_until + 1;
+                    PCGXDrawCmd* next = &cmd_queue_db[rd][next_idx_pos];
+                    if (next->shader == 0) break;
+                    if (next->shader != cmd->shader) break;
+                    if (next->shader_changed) break;
+                    if (next->dirty & ~(unsigned int)PC_GX_DIRTY_LIGHTING) break;
+                    if (next->dirty & PC_GX_DIRTY_LIGHTING) {
+                        if (__builtin_memcmp(&next->lighting, &cmd->lighting,
+                                             sizeof(PCGXCmdLighting)) != 0) break;
+                    }
+                    if (next->idx_count <= 0) break;
+                    if (next->idx_offset != cmd->idx_offset + merged_count) break;
+                    GLenum nprim;
+                    switch (next->primitive) {
+                        case GX_QUADS:
+                        case GX_TRIANGLES:
+                        case GX_TRIANGLESTRIP:
+                        case GX_TRIANGLEFAN: nprim = GL_TRIANGLES; break;
+                        default: nprim = GL_POINTS; break;
+                    }
+                    if (nprim != GL_TRIANGLES) break;
+                    if (next->textures.efb_src_ptr[0] | next->textures.efb_src_ptr[1] | next->textures.efb_src_ptr[2]) break;
+                    if (rd_efb_next < rd_efb_count &&
+                        efb_capture_db[rd][rd_efb_next].after_draw_idx <= merged_until) break;
+                    merged_count += next->idx_count;
+                    merged_until++;
+                }
+            }
+
+#ifdef VITA_DEBUG
+            uint32_t ts_draw_start = sceKernelGetProcessTimeLow();
+            submit_setup_acc += ts_draw_start - ts_setup_start;
+            vita_timing.submit_glstate_us += ts_draw_start - ts_glstate_start;
+#endif
+            if (merged_count > 0) {
+                glDrawElements(gl_prim, merged_count, GL_UNSIGNED_SHORT,
                                (void*)(uintptr_t)(cmd->idx_offset * sizeof(GLushort)));
                 actual_draws++;
             }
+#ifdef VITA_DEBUG
+            ts_setup_start = sceKernelGetProcessTimeLow();
+            submit_draw_acc += ts_setup_start - ts_draw_start;
+#endif
+
+            if (merged_until > i) {
+                vita_stats.sort_merged += (merged_until - i);
+                i = merged_until;
+            }
         }
 
-        // Post-draw blend reset
         if (cmd->gl_state.blend_mode == GX_BM_SUBTRACT) {
             glBlendEquation(GL_FUNC_ADD);
             gl_cache.blend_eq = GL_FUNC_ADD;
         }
 
-        // EFB captures queued to fire after this draw. the capture uses
-        // a persistent GL texture per dest_ptr so repeated captures to
-        // the same dest reuse the same GL id. previously snapshotted
-        // obj_stages stay valid because glCopyTexImage2D overwrites the
-        // texture content in place. pause menus that skip GXCopyTex for
-        // several frames preserve the last capture automatically.
+        // EFB captures queued to fire after this draw. one persistent GL
+        // texture per dest_ptr; glCopyTexImage2D overwrites it in place
+        // so previously snapshotted obj_stages stay valid.
         while (rd_efb_next < rd_efb_count &&
                efb_capture_db[rd][rd_efb_next].after_draw_idx <= i) {
             PCGXEfbCapture* cap = &efb_capture_db[rd][rd_efb_next];
@@ -1356,6 +1587,9 @@ void pc_gx_submit_frame(void) {
             }
             rd_efb_next++;
         }
+#ifdef VITA_DEBUG
+        submit_efb_acc += sceKernelGetProcessTimeLow() - ts_setup_start;
+#endif
     }
 
     #undef UNI4I
@@ -1364,10 +1598,12 @@ void pc_gx_submit_frame(void) {
     #undef UNI1I
     #undef UL
 
-    // flush any EFB captures that didn't fire inside the draw loop. this
-    // catches the rare menu-transition case where a capture's
-    // after_draw_idx overshoots rd_count due to worker/main cmd accounting
-    // drift; without this fallthrough the game would sample a stale EFB.
+#ifdef VITA_DEBUG
+    uint32_t t_loop_end = sceKernelGetProcessTimeLow();
+#endif
+
+    // fallback for captures whose after_draw_idx overshoots rd_count;
+    // without this the game would sample a stale EFB on menu transitions.
     while (rd_efb_next < rd_efb_count) {
         PCGXEfbCapture* cap = &efb_capture_db[rd][rd_efb_next];
         int gl_y = g_pc_window_h - (cap->src_top + cap->src_h);
@@ -1389,6 +1625,9 @@ void pc_gx_submit_frame(void) {
     }
 
     vita_stats.merged_draws = actual_draws;
+    vgl_fast_draw_mode = 0;
+    // clear presubmit flag - next frame's core 2 pass will set it
+    vita_presubmit_done = 0;
 
     cmd_queue_count_db[rd] = 0;
     cmd_vert_count_db[rd] = 0;
@@ -1403,6 +1642,28 @@ void pc_gx_submit_frame(void) {
     gl_cache.blend = -1;
 
     pc_gx_texture_flush_deferred_deletes();
+
+#ifdef VITA_DEBUG
+    // readback vitaGL per-phase counters accumulated across this frame's
+    // draws. no-op returns zeros when vitaGL built without
+    // DRAW_PHASE_PROFILING.
+    extern void vgl_get_draw_phases(unsigned int out[6]);
+    unsigned int ph[6];
+    vgl_get_draw_phases(ph);
+    vita_timing.vgl_frag_tex_us    = ph[0];
+    vita_timing.vgl_vert_tex_us    = ph[1];
+    vita_timing.vgl_align_attrs_us = ph[2];
+    vita_timing.vgl_patch_vprog_us = ph[3];
+    vita_timing.vgl_upload_unif_us = ph[4];
+    vita_timing.vgl_vstreams_us    = ph[5];
+    // our-side per-cmd phase accumulators.
+    vita_timing.submit_state_us    = submit_setup_acc;   // all prep before glDrawElements
+    vita_timing.submit_draw_us     = submit_draw_acc;    // the glDrawElements call stack
+    vita_timing.submit_efb_us      = submit_efb_acc;     // post-draw + EFB capture
+    vita_timing.submit_texbind_us  = 0;
+    // submit_uniform_us + submit_glstate_us are accumulated inline in the cmd loop
+    vita_timing.submit_postsub_us  = sceKernelGetProcessTimeLow() - t_loop_end;
+#endif
 }
 
 
@@ -1467,6 +1728,10 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     if (g_gx.vertex_write_ptr == &g_gx.vertex_buffer[0]) {
         memcpy(cmd_verts + cmd_vert_count, g_gx.vertex_buffer, count * sizeof(PCGXVertex));
     }
+
+#ifdef VITA_DEBUG
+    unsigned int _vtx_t0 = sceKernelGetProcessTimeLow();
+#endif
 
     PCGXDrawCmd* cmd = &cmd_queue[cmd_queue_count];
     cmd->vert_offset = cmd_vert_count;
@@ -1598,6 +1863,11 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         frame_idx_count = total + emitted;
     }
 
+#ifdef VITA_DEBUG
+    unsigned int _tev_phase_t0 = sceKernelGetProcessTimeLow();
+    vita_timing.flush_vtx_us += _tev_phase_t0 - _vtx_t0;
+#endif
+
     if (dirty & PC_GX_DIRTY_PROJECTION)
         memcpy(cmd->transform.projection_mtx_t, g_gx.projection_mtx_t, 16 * sizeof(float));
 
@@ -1607,128 +1877,53 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         memcpy(cmd->transform.nrm_mtx_t, g_gx.nrm_mtx_t[g_gx.current_mtx], 9 * sizeof(float));
     }
 
-    if (dirty & PC_GX_DIRTY_TEV_COLORS)
-        memcpy(cmd->tev.colors, g_gx.tev_colors, sizeof(cmd->tev.colors));
-
+    // TEV input snapshot only. resolution (ca/cb/cc/cd/aval/csrc/asrc/
+    // param/aparam + tc_src) now runs inline at the top of prededup on
+    // core 2, which reads cmd->tev.stages + colors + k_colors; those
+    // must all be valid here, so we snapshot them inside the same gate.
     if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_COLORS)) {
-        cmd->tev.num_stages = g_gx.num_tev_stages;
-        memcpy(cmd->tev.stages, g_gx.tev_stages,
-               PC_GX_MAX_TEV_STAGES * sizeof(PCGXTevStage));
+        int ns = g_gx.num_tev_stages;
+        if (ns > PC_GX_MAX_TEV_STAGES) ns = PC_GX_MAX_TEV_STAGES;
+        if (ns < 0) ns = 0;
+        // Store the clamped count so downstream loops stay in-bounds.
+        cmd->tev.num_stages = ns;
+        // Narrow: only copy active stages. Submit + resolve both loop
+        // up to cmd->tev.num_stages, so stages[ns..] can stay stale.
+        // Dense scenes often have num_stages=1 or 2, saving 136-272B.
+        if (ns > 0) {
+            memcpy(cmd->tev.stages, g_gx.tev_stages, ns * sizeof(PCGXTevStage));
+        }
 
         if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS)) {
-            // skip the resolve loop when TEV state matches the previous
-            // draw. consecutive draws share TEV state often, and the
-            // resolve itself is dozens of small function calls per draw.
-            // g_gx.tev_resolved_* persists across calls so the prior
-            // result is still present and can be reused on a cache hit.
-            // the cache key must include every input the resolve reads:
-            // stages, tev_colors, AND tev_k_colors (via GX_CC_KONST /
-            // GX_CA_KONST paths). missing k_colors here caused a one-
-            // frame wrong-color flash on non-player house roofs every
-            // time a menu closed.
-            static PCGXTevStage last_resolved_stages[PC_GX_MAX_TEV_STAGES];
-            static float last_resolved_colors[4][4];
-            static float last_resolved_k_colors[4][4];
-            static int last_resolved_num = -1;
-            static int last_resolved_valid = 0;
-
-            // PC_NOOP_FULL_STATE_INVALIDATE tag invalidates this cache
-            // by clearing last_resolved_valid so the next draw re-runs
-            // resolve from fresh state.
-            extern int g_vita_force_state_resync;
-            if (g_vita_force_state_resync) {
-                last_resolved_valid = 0;
-            }
-
-            int n = g_gx.num_tev_stages;
-            if (n > PC_GX_MAX_TEV_STAGES) n = PC_GX_MAX_TEV_STAGES;
-
-            int matches = last_resolved_valid &&
-                n == last_resolved_num &&
-                (n == 0 ||
-                 __builtin_memcmp(g_gx.tev_stages, last_resolved_stages,
-                                  n * sizeof(PCGXTevStage)) == 0) &&
-                __builtin_memcmp(g_gx.tev_colors, last_resolved_colors,
-                                 sizeof(g_gx.tev_colors)) == 0 &&
-                __builtin_memcmp(g_gx.tev_k_colors, last_resolved_k_colors,
-                                 sizeof(g_gx.tev_k_colors)) == 0;
-
-            if (!matches) {
-                for (int s = 0; s < n; s++) {
-                    PCGXTevStage* ts = &g_gx.tev_stages[s];
-                    vita_resolve_cc(ts->color_a, ts, g_gx.tev_resolved_ca[s]);
-                    vita_resolve_cc(ts->color_b, ts, g_gx.tev_resolved_cb[s]);
-                    vita_resolve_cc(ts->color_c, ts, g_gx.tev_resolved_cc[s]);
-                    vita_resolve_cc(ts->color_d, ts, g_gx.tev_resolved_cd[s]);
-                    g_gx.tev_resolved_aval[s][0] = vita_resolve_ca(ts->alpha_a, ts);
-                    g_gx.tev_resolved_aval[s][1] = vita_resolve_ca(ts->alpha_b, ts);
-                    g_gx.tev_resolved_aval[s][2] = vita_resolve_ca(ts->alpha_c, ts);
-                    g_gx.tev_resolved_aval[s][3] = vita_resolve_ca(ts->alpha_d, ts);
-                    g_gx.tev_resolved_csrc[s][0] = vita_color_src(ts->color_a, s);
-                    g_gx.tev_resolved_csrc[s][1] = vita_color_src(ts->color_b, s);
-                    g_gx.tev_resolved_csrc[s][2] = vita_color_src(ts->color_c, s);
-                    g_gx.tev_resolved_csrc[s][3] = vita_color_src(ts->color_d, s);
-                    g_gx.tev_resolved_asrc[s][0] = vita_alpha_src(ts->alpha_a, s);
-                    g_gx.tev_resolved_asrc[s][1] = vita_alpha_src(ts->alpha_b, s);
-                    g_gx.tev_resolved_asrc[s][2] = vita_alpha_src(ts->alpha_c, s);
-                    g_gx.tev_resolved_asrc[s][3] = vita_alpha_src(ts->alpha_d, s);
-                    {
-                        static const float bias_lut[]  = {0.0f, 0.5f, -0.5f};
-                        static const float scale_lut[] = {1.0f, 2.0f, 4.0f, 0.5f};
-                        g_gx.tev_resolved_param[s][0] = bias_lut[ts->color_bias < 3 ? ts->color_bias : 0];
-                        g_gx.tev_resolved_param[s][1] = bias_lut[ts->alpha_bias < 3 ? ts->alpha_bias : 0];
-                        g_gx.tev_resolved_param[s][2] = scale_lut[ts->color_scale < 4 ? ts->color_scale : 0];
-                        g_gx.tev_resolved_param[s][3] = ts->color_op ? -1.0f : 1.0f;
-                        g_gx.tev_resolved_aparam[s][0] = scale_lut[ts->alpha_scale < 4 ? ts->alpha_scale : 0];
-                        g_gx.tev_resolved_aparam[s][1] = ts->alpha_op ? -1.0f : 1.0f;
-                    }
-                }
-                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                    int tc_src = 0;
-                    if (s < g_gx.num_tev_stages) {
-                        int tc = g_gx.tev_stages[s].tex_coord;
-                        tc_src = (tc >= 0 && tc < 8) ? tc : s;
-                    }
-                    g_gx.tev_resolved_tc_src[s] = tc_src;
-                }
-                g_gx.tev_resolve_valid = 1;
-
-                // update cache for next draw
-                last_resolved_num = n;
-                if (n > 0) {
-                    __builtin_memcpy(last_resolved_stages, g_gx.tev_stages,
-                                     n * sizeof(PCGXTevStage));
-                }
-                __builtin_memcpy(last_resolved_colors, g_gx.tev_colors,
-                                 sizeof(g_gx.tev_colors));
-                __builtin_memcpy(last_resolved_k_colors, g_gx.tev_k_colors,
-                                 sizeof(g_gx.tev_k_colors));
-                last_resolved_valid = 1;
-            }
+            // Snapshot colors + k_colors UNCONDITIONALLY inside this gate.
+            // Needed even when DIRTY_TEV_COLORS isn't set: core 2 resolve
+            // reads cmd->tev.colors/k_colors, and cmd slot may have stale
+            // values from a different frame's cmd that reused this slot.
+            memcpy(cmd->tev.colors, g_gx.tev_colors, sizeof(cmd->tev.colors));
+            memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
+            // cfg20 tex remap bit handed to core 2. vita_tev_tex_remap is
+            // a per-draw flag set during shader selection in flush.
+            cmd->tev_tex_remap = vita_tev_tex_remap ? 1 : 0;
+        } else {
+            cmd->tev_tex_remap = 0;
         }
-
-        if (g_gx.tev_resolve_valid) {
-            // one memcpy for all 9 TEV resolved arrays. PCGXCmdTEV and
-            // PCGXState lay ca..aparam out contiguously in the same order,
-            // so this is byte-identical to the per-stage loop but with
-            // far less call overhead. replay only reads up to
-            // cmd->tev.num_stages so any stale data beyond that is fine.
-            // size: ca(36)+cb(36)+cc(36)+cd(36)+aval(48)+csrc(48)+asrc(48)
-            //     + param(48)+aparam(24) = 360 bytes.
-            memcpy(&cmd->tev.ca[0][0], &g_gx.tev_resolved_ca[0][0], 360);
-            for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                cmd->tev.tc_src[s] = g_gx.tev_resolved_tc_src[s];
-            }
-        }
-
-        // cfg20 tex remap
-        if (vita_tev_tex_remap) {
-            cmd->tev.tc_src[0] = cmd->tev.tc_src[1];
-        }
+    } else {
+        cmd->tev_tex_remap = 0;
     }
 
-    if (dirty & PC_GX_DIRTY_KONST)
+#ifdef VITA_DEBUG
+    unsigned int _state_phase_t0 = sceKernelGetProcessTimeLow();
+    vita_timing.flush_tev_us += _state_phase_t0 - _tev_phase_t0;
+#endif
+
+    // KONST dirty: submit's KONST branch uploads cmd->tev.k_colors.
+    // Skip redundant memcpy when the TEV gate above already copied it
+    // (happens when DIRTY_KONST fires with DIRTY_TEV_STAGES/COLORS,
+    // which is common on Vita since GXSetTevKColor sets both bits).
+    if ((dirty & PC_GX_DIRTY_KONST) &&
+        !(dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS))) {
         memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
+    }
 
     if (dirty & PC_GX_DIRTY_ALPHA_CMP) {
         float ref0 = (float)g_gx.alpha_ref0 / 255.0f;
@@ -1770,10 +1965,9 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         memcpy(cmd->lighting.amb_color_0, g_gx.chan_amb_color[0], sizeof(cmd->lighting.amb_color_0));
         cmd->lighting.amb_src_0 = g_gx.chan_ctrl_amb_src[0];
         cmd->lighting.light_mask_0 = g_gx.chan_ctrl_light_mask[0];
-        // bulk-zero all light data (NEON-vectorized memset), then overwrite
-        // only active lights. replaces the per-iteration scalar stores for
-        // the inactive case. color=0 means position doesn't matter for
-        // lighting contribution (0 * anything = 0), so zero pos is safe.
+        // bulk-zero both arrays (compiles to NEON memset), then write
+        // only active lights. inactive slots keep color=0 so position
+        // doesn't matter (0 * anything = 0).
         __builtin_memset(cmd->lighting.light_pos, 0, sizeof(cmd->lighting.light_pos));
         __builtin_memset(cmd->lighting.light_color, 0, sizeof(cmd->lighting.light_color));
         int mask = g_gx.chan_ctrl_light_mask[0];
@@ -1802,31 +1996,33 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         }
     }
 
-    // TEXTURES
-    // resolve GL texture IDs and wrap modes at snapshot time
+    // snapshot GL texture ids and wrap modes for each active stage.
     if (dirty & (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES)) {
+        // bulk-zero first (one NEON memset instead of per-field scalar
+        // stores), then set the "unset" defaults (-1, 0xFF) + active stages.
+        __builtin_memset(&cmd->textures, 0, sizeof(cmd->textures));
+        int ns = g_gx.num_tev_stages;
+        if (ns > PC_GX_MAX_TEV_STAGES) ns = PC_GX_MAX_TEV_STAGES;
         for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-            cmd->textures.obj_stage[s] = 0;
-            cmd->textures.use_stage[s] = 0;
             cmd->textures.map_stage[s] = -1;
             cmd->textures.deferred_idx[s] = -1;
-            cmd->textures.wrap_s[s] = 0xFF; // unset
+            cmd->textures.wrap_s[s] = 0xFF;
             cmd->textures.wrap_t[s] = 0xFF;
-            cmd->textures.efb_src_ptr[s] = 0;
-            if (s < g_gx.num_tev_stages) {
+            if (s < ns) {
                 int tex_map = g_gx.tev_stages[s].tex_map;
                 if (tex_map >= 0 && tex_map < 8) {
-                    cmd->textures.obj_stage[s] = g_gx.gl_textures[tex_map];
+                    GLuint tid = g_gx.gl_textures[tex_map];
+                    cmd->textures.obj_stage[s] = tid;
                     cmd->textures.map_stage[s] = tex_map;
-                    if (cmd->textures.obj_stage[s] == 0 && g_gx.gl_tex_deferred[tex_map] >= 0)
+                    if (tid == 0 && g_gx.gl_tex_deferred[tex_map] >= 0)
                         cmd->textures.deferred_idx[s] = g_gx.gl_tex_deferred[tex_map];
                     cmd->textures.wrap_s[s] = g_gx.tex_obj_wrap_s[tex_map];
                     cmd->textures.wrap_t[s] = g_gx.tex_obj_wrap_t[tex_map];
                     cmd->textures.efb_src_ptr[s] = g_gx.efb_src_ptr[tex_map];
+                    if (vita_debug_notex) cmd->textures.obj_stage[s] = 0;
+                    if (cmd->textures.obj_stage[s] != 0) cmd->textures.use_stage[s] = 1;
                 }
             }
-            if (vita_debug_notex) cmd->textures.obj_stage[s] = 0;
-            if (cmd->textures.obj_stage[s] != 0) cmd->textures.use_stage[s] = 1;
         }
         // cfg20 tex remap
         if (vita_tev_tex_remap) {
@@ -1958,7 +2154,9 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     }
 
 #ifdef VITA_DEBUG
-    vita_timing.flush_us += sceKernelGetProcessTimeLow() - _flush_t0;
+    unsigned int _flush_t_end = sceKernelGetProcessTimeLow();
+    vita_timing.flush_state_us += _flush_t_end - _state_phase_t0;
+    vita_timing.flush_us += _flush_t_end - _flush_t0;
 #endif
 }
 
