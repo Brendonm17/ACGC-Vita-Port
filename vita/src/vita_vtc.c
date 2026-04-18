@@ -66,6 +66,7 @@ typedef struct {
     int vram_bytes;      // vRAM consumed by this texture
     unsigned int last_used; // frame counter for LRU
     int occupied;
+    int tombstone;       // set when evicted. find() must keep probing past tombstones or entries later in the chain become unreachable, which leaks ref_count forever and corrupts HD texture lifetime across scene transitions.
     int ref_count;       // number of tex_cache entries holding this texture. eviction skips ref_count > 0. decremented on tex_cache_invalidate walk.
 } VtcLoadedEntry;
 
@@ -261,8 +262,11 @@ static VtcLoadedEntry* vtc_loaded_find(unsigned long long key) {
     unsigned int slot = (unsigned int)(key & VTC_LOADED_CACHE_MASK);
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
         unsigned int idx = (slot + i) & VTC_LOADED_CACHE_MASK;
-        if (!g_vtc_loaded[idx].occupied) return NULL;
-        if (g_vtc_loaded[idx].key == key) {
+        // stop only at a truly free slot. tombstones are skipped because
+        // an entry matching key may have been inserted past a slot that
+        // was later evicted. terminating at the tombstone would miss it.
+        if (!g_vtc_loaded[idx].occupied && !g_vtc_loaded[idx].tombstone) return NULL;
+        if (g_vtc_loaded[idx].occupied && g_vtc_loaded[idx].key == key) {
             g_vtc_loaded[idx].last_used = g_vtc_frame; // touch for LRU
             return &g_vtc_loaded[idx];
         }
@@ -294,6 +298,7 @@ static void vtc_loaded_evict_oldest(void) {
     g_vtc_evictions++;
 
     victim->occupied = 0;
+    victim->tombstone = 1; // keep the probe chain intact for find()
     victim->ref_count = 0;
     victim->gl_tex = 0;
     victim->key = 0;
@@ -307,23 +312,44 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
         if (g_vtc_vram_used == before) break; // nothing evictable (all referenced)
     }
 
+    // two-pass insert. first pass scans the probe chain for a live
+    // duplicate of this key (another insert path already landed it here)
+    // and picks the earliest reusable slot along the way. reusable means
+    // empty or tombstoned. if a duplicate is found, release the new
+    // texture and bump the existing entry's last_used.
     unsigned int slot = (unsigned int)(key & VTC_LOADED_CACHE_MASK);
+    int reuse_idx = -1;
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
         unsigned int idx = (slot + i) & VTC_LOADED_CACHE_MASK;
-        if (!g_vtc_loaded[idx].occupied) {
-            g_vtc_loaded[idx].key = key;
-            g_vtc_loaded[idx].gl_tex = tex;
-            g_vtc_loaded[idx].tex_w = w;
-            g_vtc_loaded[idx].tex_h = h;
-            g_vtc_loaded[idx].vram_bytes = vram_bytes;
-            g_vtc_loaded[idx].last_used = g_vtc_frame;
-            g_vtc_loaded[idx].ref_count = 0;
-            g_vtc_loaded[idx].occupied = 1;
-            g_vtc_vram_used += vram_bytes;
-            return;
+        if (!g_vtc_loaded[idx].occupied && !g_vtc_loaded[idx].tombstone) {
+            if (reuse_idx < 0) reuse_idx = (int)idx;
+            break; // chain ends here
+        }
+        if (g_vtc_loaded[idx].occupied) {
+            if (g_vtc_loaded[idx].key == key) {
+                // duplicate. keep the existing entry, drop the new one.
+                g_vtc_loaded[idx].last_used = g_vtc_frame;
+                vita_defer_tex_delete(tex);
+                return;
+            }
+        } else if (reuse_idx < 0) {
+            reuse_idx = (int)idx; // first tombstone is the earliest reusable slot
         }
     }
-    // Cache completely full with no free slots. Evict one more and retry.
+    if (reuse_idx >= 0) {
+        g_vtc_loaded[reuse_idx].key = key;
+        g_vtc_loaded[reuse_idx].gl_tex = tex;
+        g_vtc_loaded[reuse_idx].tex_w = w;
+        g_vtc_loaded[reuse_idx].tex_h = h;
+        g_vtc_loaded[reuse_idx].vram_bytes = vram_bytes;
+        g_vtc_loaded[reuse_idx].last_used = g_vtc_frame;
+        g_vtc_loaded[reuse_idx].ref_count = 0;
+        g_vtc_loaded[reuse_idx].occupied = 1;
+        g_vtc_loaded[reuse_idx].tombstone = 0;
+        g_vtc_vram_used += vram_bytes;
+        return;
+    }
+    // probe chain is full of live entries. force an eviction and retry.
     vtc_loaded_evict_oldest();
     slot = (unsigned int)(key & VTC_LOADED_CACHE_MASK);
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
@@ -337,11 +363,12 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
             g_vtc_loaded[idx].last_used = g_vtc_frame;
             g_vtc_loaded[idx].ref_count = 0;
             g_vtc_loaded[idx].occupied = 1;
+            g_vtc_loaded[idx].tombstone = 0;
             g_vtc_vram_used += vram_bytes;
             return;
         }
     }
-    // no free slot and nothing evictable - HD texture leaked
+    // still no room and nothing evictable. drop this texture.
     vita_defer_tex_delete(tex);
 }
 
