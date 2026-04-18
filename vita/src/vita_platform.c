@@ -411,7 +411,7 @@ void vita_pin_hidden_threads(void) {
 
 void pc_platform_init(void) {
     vglSetupShaderPatcher(4 * 1024 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024);
-    vglSetVertexPoolSize(32 * 1024 * 1024);
+    vglSetCircularPoolSize(32 * 1024 * 1024);
     {
         SceGxmMultisampleMode msaa_mode = SCE_GXM_MULTISAMPLE_NONE;
         if (g_pc_settings.msaa == 4) msaa_mode = SCE_GXM_MULTISAMPLE_4X;
