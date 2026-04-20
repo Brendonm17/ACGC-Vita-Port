@@ -24,6 +24,10 @@
 #include "m_name_table.h"
 #include "m_actor.h"
 #include "m_notice.h"
+#include "m_player.h"
+#include "m_player_lib.h"
+#include "m_all_grow_ovl.h"
+#include "m_home.h"
 #include "sys_math3d.h"
 #include "sys_math.h"
 #include "zurumode.h"
@@ -850,23 +854,84 @@ void mCD_LoadLand(void) {
     (void)pc_save_loaded;
 }
 
+// match GC mCD_get_land_copyProtect (static in m_card.c so we replicate).
+static u16 pc_land_copy_protect(void) {
+    u16 code = (u16)RANDOM(0xFFF0);
+    return code + 1;
+}
+
+// lightweight prep that's safe to run on every save (including the 1-min
+// auto-save tick). just updates timers and flags that the game expects
+// to be current; doesn't touch any player-visible state.
+static void pc_save_prep_incremental(void) {
+    mCkRh_SavePlayTime(Common_Get(player_no));
+    if (Now_Private != NULL) Now_Private->reset_code = 0;
+    Save_Set(save_exist, TRUE);
+}
+
+// full prep used when the PLAYER explicitly chose to save (gyroid, porter,
+// train travel). runs the incremental prep plus the GC-intended side
+// effects of a committed save:
+//   - harden money rocks + clear shine spots (prevents save-scumming the
+//     rock + scumming buried money across loads)
+//   - wipe Wisp spirits from inventory (they're not supposed to persist
+//     past the save point where the quest was active)
+//   - refresh travel_hard_time (travel cooldown anchor)
+//   - refresh copy_protect (per-save random tag)
+//
+// DO NOT call this from the auto-save tick. running it every minute
+// would clobber money rocks mid-hit, make shine spots disappear, and
+// wipe Wisp items the player is actively using in a quest.
+static void pc_save_prep_explicit(void) {
+    pc_save_prep_incremental();
+
+    if (Now_Private != NULL) {
+        mActor_name_t* pockets = Now_Private->inventory.pockets;
+        for (int i = 0; i < mPr_POCKETS_SLOT_COUNT; i++) {
+            if (ITEM_IS_WISP(pockets[i])) {
+                mPr_SetPossessionItem(Now_Private, i, EMPTY_NO, mPr_ITEM_COND_NORMAL);
+            }
+        }
+    }
+
+    mAGrw_ClearMoneyStoneShineGround();
+
+    Save_Set(travel_hard_time, lbRTC_HardTime());
+    {
+        u16 cp = pc_land_copy_protect();
+        Common_Set(copy_protect, cp);
+        Save_Set(copy_protect, cp);
+    }
+}
+
+// re-arm reset code after a successful save so a crash before the next
+// save is detectable as "quit without saving" on the following load.
+static void pc_save_rearm_reset_code(void) {
+    if (Now_Private != NULL) {
+        Now_Private->reset_code = (u32)RANDOM_F(USHT_MAX_S);
+        Now_Private->reset_code++;
+    }
+}
+
+// set by auto-save before calling mCD_SaveHome_bg so the function runs
+// only the incremental prep (skips Wisp clear, money-rock harden, etc).
+// the game's own save paths (gyroid, porter) leave this 0 and get the
+// full explicit-save prep.
+static int s_pc_save_is_incremental = 0;
+
 int mCD_SaveHome_bg(int param_1, int* chan) {
     int slot = mCD_GetThisLandSlotNo();
     int result;
+    (void)param_1;
 
-    /* Update cockroach "last visited" timestamp before saving.
-     * On GC this was done in mCD_SaveHome_bg_set_data (m_card.c).
-     * Without it, the day gap never resets and cockroaches respawn
-     * every load even after being killed. */
-    mCkRh_SavePlayTime(Common_Get(player_no));
-
-    /* Clear reset code before saving — marks this as a proper shutdown */
-    if (Now_Private != NULL) {
-        Now_Private->reset_code = 0;
+    if (s_pc_save_is_incremental) {
+        pc_save_prep_incremental();
+    } else {
+        pc_save_prep_explicit();
     }
 
     if (slot == mCD_SLOT_B && l_card_b_gci_path[0] != '\0') {
-        /* Visiting Card B's town — save to Card B GCI */
+        // visiting another town; save back to Card B
         char tmp_path[300];
         snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
         result = pc_save_write_gci_to(l_card_b_gci_path, tmp_path);
@@ -881,13 +946,7 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
         return mCD_TRANS_ERR_IOERROR;
     }
 
-    /* Re-arm reset code after successful save — if player quits without
-     * saving again, we'll detect it next load */
-    if (Now_Private != NULL) {
-        Now_Private->reset_code = (u32)RANDOM_F(USHT_MAX_S);
-        Now_Private->reset_code++;
-    }
-
+    pc_save_rearm_reset_code();
     return mCD_TRANS_ERR_NONE;
 }
 
@@ -918,6 +977,28 @@ static void pc_auto_save_flush_world_state(void) {
     mNtc_set_auto_nwrite_data();
 }
 
+// only allow auto-save when the player is unambiguously in free control
+// (walk / run / wait). anything else means they're in a menu, an NPC
+// conversation, an item pickup animation, a demo cutscene, or a save
+// dialog where the game is managing Save_t itself. auto-saving through
+// any of those can stall porter's state machine (the bug that hung the
+// "saving town data" dialogue) or write a torn Save_t.
+static int pc_auto_save_player_busy(void) {
+    GAME_PLAY* play = (GAME_PLAY*)gamePT;
+    if (play == NULL) return 1; // no play context, don't risk it
+    int idx = mPlib_get_player_actor_main_index((GAME*)play);
+    switch (idx) {
+        case mPlayer_INDEX_WAIT:
+        case mPlayer_INDEX_WALK:
+        case mPlayer_INDEX_RUN:
+        case mPlayer_INDEX_DASH:
+        case mPlayer_INDEX_TURN_DASH:
+            return 0; // safe to save
+        default:
+            return 1; // every other state is hands-off
+    }
+}
+
 void pc_auto_save_tick(void) {
     time_t now;
 
@@ -929,6 +1010,7 @@ void pc_auto_save_tick(void) {
     if (!pc_save_loaded || !pc_save_ready) return;
     if (Now_Private == NULL) return;
     if (Save_Get(scene_no) != SCENE_FG) return;
+    if (pc_auto_save_player_busy()) return;
 
     now = time(NULL);
     if (s_pc_auto_save_last == 0) {
@@ -941,7 +1023,9 @@ void pc_auto_save_tick(void) {
         int chan = 0;
         int result;
         pc_auto_save_flush_world_state();
+        s_pc_save_is_incremental = 1;
         result = mCD_SaveHome_bg(0, &chan);
+        s_pc_save_is_incremental = 0;
         if (result == mCD_TRANS_ERR_NONE) {
             OSReport("[PC] Auto-save complete (chan=%d)\n", chan);
             s_pc_auto_save_last = now;
@@ -968,9 +1052,17 @@ int pc_auto_save_force(void) {
                  (int)Save_Get(scene_no));
         return 0;
     }
+    if (pc_auto_save_player_busy()) {
+        // the game is handling its own save (porter, gyroid, etc) so
+        // let it finish, we'll catch the next suspend or tick
+        OSReport("[PC] Forced save skipped: player busy in dialogue/demo\n");
+        return 0;
+    }
 
     pc_auto_save_flush_world_state();
+    s_pc_save_is_incremental = 1;
     result = mCD_SaveHome_bg(0, &chan);
+    s_pc_save_is_incremental = 0;
     if (result == mCD_TRANS_ERR_NONE) {
         OSReport("[PC] Forced save complete (chan=%d)\n", chan);
         s_pc_auto_save_last = time(NULL);
@@ -1009,84 +1101,133 @@ static int pc_read_gci_land_info(const char* path, Save_t* out) {
     return ok;
 }
 
-/* Scan the "other" card for a travel-eligible town.
- *  - Resident: scan Card B for a different town.
- *  - Foreigner: scan Card A for the home town. */
+// scan the "other" slot for a travel-eligible town.
+//  - resident: check card B for a different town
+//  - foreigner: check card A for the home town
+//
+// return value drives porter's dialogue in aSTM_cardproc:
+//   NONE_NEXTLAND    - travel is possible, porter offers "visit" flow
+//   NO_TOWN_DATA     - the other slot has nothing (or nothing valid);
+//                      porter shows "no travel data" and closes the dialog
+//                      instead of dragging the player through a pointless
+//                      save flow
+//   CORRUPT          - other slot has a GCI but its land_info is broken
+//   NONE             - other slot exists but holds our own town, fall
+//                      through so porter handles whatever the train is
+//                      doing today
 int mCD_CheckStation_bg(s32* chan) {
     int is_foreigner = mLd_PlayerManKindCheck();
 
     if (is_foreigner) {
+        // visitor looking to go home: read card A
         Save_t temp_save;
         if (chan) *chan = mCD_SLOT_B;
-        if (pc_read_gci_land_info(PC_GCI_PATH, &temp_save)) {
-            if (mLd_CheckId(temp_save.land_info.id) &&
-                !mLd_CheckThisLand(temp_save.land_info.name, temp_save.land_info.id)) {
-                OSReport("[PC] CheckStation: Card A has home town '%.*s' (id=0x%04X) — return available\n",
-                         8, temp_save.land_info.name, temp_save.land_info.id);
-                if (chan) *chan = mCD_SLOT_A;
-                return mCD_TRANS_ERR_NONE_NEXTLAND;
-            }
-            OSReport("[PC] CheckStation: Card A has same town as current (unexpected)\n");
-        } else {
-            OSReport("[PC] CheckStation: could not read Card A save\n");
+        if (!pc_read_gci_land_info(PC_GCI_PATH, &temp_save)) {
+            OSReport("[PC] CheckStation: card A unreadable, no home to return to\n");
+            return mCD_TRANS_ERR_NO_TOWN_DATA;
         }
-        return mCD_TRANS_ERR_NONE;
+        if (!mLd_CheckId(temp_save.land_info.id)) {
+            OSReport("[PC] CheckStation: card A has invalid land_info\n");
+            return mCD_TRANS_ERR_CORRUPT;
+        }
+        if (mLd_CheckThisLand(temp_save.land_info.name, temp_save.land_info.id)) {
+            // Card A holds the same town we're currently in — shouldn't
+            // happen unless something got mis-copied; let porter play a
+            // normal non-travel flow instead of erroring out
+            OSReport("[PC] CheckStation: card A is the same town we're in\n");
+            return mCD_TRANS_ERR_NONE;
+        }
+        OSReport("[PC] CheckStation: card A has '%.*s' (id=0x%04X), return available\n",
+                 8, temp_save.land_info.name, temp_save.land_info.id);
+        if (chan) *chan = mCD_SLOT_A;
+        return mCD_TRANS_ERR_NONE_NEXTLAND;
     }
 
+    // resident looking to visit: read card B
     if (chan) *chan = mCD_SLOT_A;
-    if (pc_card_b_find_town()) {
-        Save_t temp_save;
-        if (pc_read_gci_land_info(l_card_b_gci_path, &temp_save)) {
-            if (mLd_CheckId(temp_save.land_info.id)) {
-                if (!mLd_CheckThisLand(temp_save.land_info.name, temp_save.land_info.id)) {
-                    OSReport("[PC] CheckStation: Card B has town '%.*s' (id=0x%04X) — travel available\n",
-                             8, temp_save.land_info.name, temp_save.land_info.id);
-                    if (chan) *chan = mCD_SLOT_B;
-                    return mCD_TRANS_ERR_NONE_NEXTLAND;
-                }
-                OSReport("[PC] CheckStation: Card B has same town as Card A\n");
-            } else {
-                OSReport("[PC] CheckStation: Card B has invalid land_info\n");
-            }
-        }
+    if (!pc_card_b_find_town()) {
+        OSReport("[PC] CheckStation: card B is empty, nothing to visit\n");
+        return mCD_TRANS_ERR_NO_TOWN_DATA;
     }
-
-    return mCD_TRANS_ERR_NONE;
+    {
+        Save_t temp_save;
+        if (!pc_read_gci_land_info(l_card_b_gci_path, &temp_save)) {
+            OSReport("[PC] CheckStation: card B GCI unreadable\n");
+            return mCD_TRANS_ERR_CORRUPT;
+        }
+        if (!mLd_CheckId(temp_save.land_info.id)) {
+            OSReport("[PC] CheckStation: card B has invalid land_info\n");
+            return mCD_TRANS_ERR_CORRUPT;
+        }
+        if (mLd_CheckThisLand(temp_save.land_info.name, temp_save.land_info.id)) {
+            OSReport("[PC] CheckStation: card B is the same town as card A\n");
+            return mCD_TRANS_ERR_NONE;
+        }
+        OSReport("[PC] CheckStation: card B has '%.*s' (id=0x%04X), travel available\n",
+                 8, temp_save.land_info.name, temp_save.land_info.id);
+        if (chan) *chan = mCD_SLOT_B;
+        return mCD_TRANS_ERR_NONE_NEXTLAND;
+    }
 }
 
-/* Persist current town and load the "other" town into l_keepSave.
- *  - Resident: save home (Card A, marked away) + load Card B → l_keepSave.
- *  - Foreigner: save visited town (Card B) + load Card A → l_keepSave. */
+// record the departure town in travel_persistent_data so rover's dialogue
+// on the return trip has the right town name / player IDs.
+static void pc_save_record_departure(void) {
+    mCD_persistent_data_c* persistant = Common_GetPointer(travel_persistent_data);
+    memcpy(&persistant->land, Save_GetPointer(land_info), sizeof(mLd_land_info_c));
+    for (int i = 0; i < PLAYER_NUM; i++) {
+        mPr_CopyPersonalID(&persistant->pid[i], &Save_Get(private_data[i]).player_ID);
+    }
+}
+
+// build the foreigner file (passport) from Now_Private plus the pending
+// moveout animal (if any). matches GC mCD_SetForeignerFile semantics.
+static void pc_build_foreigner_file(void) {
+    memset(&l_mcd_foreigner_file, 0, sizeof(l_mcd_foreigner_file));
+    if (Now_Private != NULL) {
+        mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, Now_Private);
+    }
+    // mNpc_GetRemoveAnimal moves a pending-moveout villager (if any) into
+    // the passed Animal_c so the visit carries them along. it's a no-op
+    // when no villager is scheduled to leave.
+    {
+        Animal_c* in_animal = mNpc_GetInAnimalP();
+        mNpc_GetRemoveAnimal(in_animal, TRUE);
+        memcpy(&l_mcd_foreigner_file.file.remove_animal, in_animal, sizeof(Animal_c));
+    }
+    l_mcd_foreigner_file.file.copy_protect = (u16)Common_Get(copy_protect);
+    l_mcd_foreigner_file.file.checksum = 0;
+    l_mcd_foreigner_file.file.checksum =
+        mFRm_GetFlatCheckSum((u16*)&l_mcd_foreigner_file.file,
+                             sizeof(mCD_foreigner_c),
+                             l_mcd_foreigner_file.file.checksum);
+}
+
+// persist current town and swap in the other town via l_keepSave.
+//  - resident: save card A (home) with player flagged "away", load card B
+//  - foreigner: refresh passport, save card B (visit state), load card A
 int mCD_SaveStation_NextLand_bg(s32* chan) {
     int is_foreigner = mLd_PlayerManKindCheck();
+    OSReport("[PC] SaveStation_NextLand_bg: enter (is_foreigner=%d)\n", is_foreigner);
 
     if (is_foreigner) {
-        /* Record departure info (visited town) for Rover. */
-        {
-            mCD_persistent_data_c* persistant = Common_GetPointer(travel_persistent_data);
-            int i;
-            memcpy(&persistant->land, Save_GetPointer(land_info), sizeof(mLd_land_info_c));
-            for (i = 0; i < PLAYER_NUM; i++) {
-                mPr_CopyPersonalID(&persistant->pid[i], &Save_Get(private_data[i]).player_ID);
-            }
+        // returning visitor -> refresh passport from current state so
+        // inventory / item changes during the visit carry home, then save
+        // the visited town with player state intact.
+        pc_save_prep_explicit();
+        pc_save_record_departure();
+
+        if (Now_Private != NULL) {
+            mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, Now_Private);
+            l_mcd_foreigner_file.file.checksum = 0;
+            l_mcd_foreigner_file.file.checksum =
+                mFRm_GetFlatCheckSum((u16*)&l_mcd_foreigner_file.file,
+                                     sizeof(mCD_foreigner_c),
+                                     l_mcd_foreigner_file.file.checksum);
+            OSReport("[PC] SaveStation_NextLand(return): refreshed passport for '%.*s'\n",
+                     PLAYER_NAME_LEN, l_mcd_foreigner_file.file.priv.player_ID.player_name);
         }
 
-        /* Refresh passport from Now_Private so visit-time changes carry home. */
-        {
-            Private_c* current_priv = Now_Private;
-            if (current_priv) {
-                mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, current_priv);
-                l_mcd_foreigner_file.file.checksum = 0;
-                l_mcd_foreigner_file.file.checksum =
-                    mFRm_GetFlatCheckSum((u16*)&l_mcd_foreigner_file.file,
-                                         sizeof(mCD_foreigner_c),
-                                         l_mcd_foreigner_file.file.checksum);
-                OSReport("[PC] SaveStation_NextLand(return): refreshed passport for '%.*s'\n",
-                         PLAYER_NAME_LEN, l_mcd_foreigner_file.file.priv.player_ID.player_name);
-            }
-        }
-
-        /* Persist visited-town state to its Card B GCI. */
         if (l_card_b_gci_path[0] != '\0') {
             char tmp_path[320];
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
@@ -1106,85 +1247,88 @@ int mCD_SaveStation_NextLand_bg(s32* chan) {
         }
 
         l_mcd_keep_startCond = mCD_START_COND_OUTGOING_FOREIGNER;
-
+        pc_save_rearm_reset_code();
         if (chan) *chan = mCD_SLOT_A;
         return mCD_TRANS_ERR_NONE;
     }
 
+    // resident departing to visit another town
     if (chan) *chan = mCD_SLOT_A;
-
-    /* Must have a Card B town path from prior CheckStation */
     if (l_card_b_gci_path[0] == '\0') {
         OSReport("[PC] SaveStation_NextLand: no Card B path\n");
         return mCD_TRANS_ERR_NO_TOWN_DATA;
     }
 
-    /* 0. Record home town info for Rover's dialogue (departure town name) */
-    {
-        mCD_persistent_data_c* persistant = Common_GetPointer(travel_persistent_data);
-        int i;
-        memcpy(&persistant->land, Save_GetPointer(land_info), sizeof(mLd_land_info_c));
-        for (i = 0; i < PLAYER_NUM; i++) {
-            mPr_CopyPersonalID(&persistant->pid[i], &Save_Get(private_data[i]).player_ID);
-        }
-    }
+    // run the common prep (cockroach, Wisps, money stones, copy_protect,
+    // travel_hard_time) BEFORE marking the player as away so the passport
+    // captures the cleaned-up state.
+    pc_save_prep_explicit();
+    pc_save_record_departure();
 
-    /* 1. Build passport BEFORE marking player as away (need full player data) */
-    {
-        Private_c* current_priv = Now_Private;
-        memset(&l_mcd_foreigner_file, 0, sizeof(l_mcd_foreigner_file));
-        if (current_priv) {
-            mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, current_priv);
-        }
-        memset(&l_mcd_foreigner_file.file.remove_animal, 0, sizeof(Animal_c));
-        l_mcd_foreigner_file.file.copy_protect = (u16)Common_Get(copy_protect);
-        l_mcd_foreigner_file.file.checksum = 0;
-        l_mcd_foreigner_file.file.checksum =
-            mFRm_GetFlatCheckSum((u16*)&l_mcd_foreigner_file.file,
-                                 sizeof(mCD_foreigner_c),
-                                 l_mcd_foreigner_file.file.checksum);
-        OSReport("[PC] SaveStation_NextLand: built passport for '%.*s'\n",
-                 PLAYER_NAME_LEN, l_mcd_foreigner_file.file.priv.player_ID.player_name);
-    }
+    // save current house size into Save_t.keep_house_size so the visiting
+    // town's world knows what size to build when we return
+    mHm_KeepHouseSize(Common_Get(player_no));
 
-    /* 2. Mark player as "away" and clear reset code before saving Card A.
-     * If the player quits during the visit, next load sees exists==FALSE
-     * → gyroid face + inventory cleared as punishment (m_start_data_init.c:426) */
+    // build the passport (carries player private data + any scheduled-
+    // moveout villager into the visit)
+    pc_build_foreigner_file();
+    OSReport("[PC] SaveStation_NextLand: built passport for '%.*s'\n",
+             PLAYER_NAME_LEN, l_mcd_foreigner_file.file.priv.player_ID.player_name);
+
+    // flag the player as "away" on card A. if the player quits mid-visit,
+    // the next load sees exists==FALSE and gives them the gyroid face +
+    // wiped inventory (see m_start_data_init.c:426).
     if (Now_Private != NULL && mLd_PlayerManKindCheckNo(Common_Get(player_no)) == FALSE) {
         Now_Private->exists = FALSE;
-        Now_Private->reset_code = 0;
         OSReport("[PC] SaveStation_NextLand: marked player as away (exists=FALSE)\n");
     }
 
-    /* 3. Save home town to Card A (with player marked as away) */
     if (!pc_save_write_gci()) {
-        /* Restore player state on failure */
         if (Now_Private != NULL) Now_Private->exists = TRUE;
         OSReport("[PC] SaveStation_NextLand: failed to save home town\n");
         return mCD_TRANS_ERR_IOERROR;
     }
 
-    /* 3. Load other town from Card B into l_keepSave + l_keep* ARAM blocks */
     if (!pc_save_read_gci_to_keep(l_card_b_gci_path)) {
         OSReport("[PC] SaveStation_NextLand: failed to load Card B town\n");
         return mCD_TRANS_ERR_CORRUPT;
     }
 
     l_mcd_keep_startCond = mCD_START_COND_INCOMING_FOREIGNER;
-
     if (chan) *chan = mCD_SLOT_B;
     return mCD_TRANS_ERR_NONE;
 }
 
-/* Save passport file on Card B (simplified for PC).
- * On GC this creates a separate GCI file; on PC the passport is just in memory. */
+// station save when CheckStation returned NONE (no valid travel target).
+// porter still offers this flow if a train is parked in the station. on GC
+// the passport-only save just writes a visitor file; on PC we want the
+// home town saved too so the player isn't stuck watching a never-ending
+// "saving..." dialogue when card_b is empty. for foreigners the passport
+// is already in memory (refreshed by SaveStation_NextLand_bg).
 int mCD_SaveStation_Passport_bg(s32* chan) {
+    int is_foreigner = mLd_PlayerManKindCheck();
     if (chan) *chan = mCD_SLOT_B;
 
-    /* The passport is already built in l_mcd_foreigner_file from SaveStation_NextLand_bg.
-     * On PC we don't need to write a separate passport GCI file — the foreigner data
-     * persists in memory through the town transition (mCD_toNextLand). */
-    OSReport("[PC] SaveStation_Passport: passport ready in memory\n");
+    OSReport("[PC] SaveStation_Passport_bg: enter (is_foreigner=%d)\n", is_foreigner);
+
+    if (is_foreigner) {
+        // foreigner at visited town's station without returning home (no
+        // Card A to travel back to). nothing to write; passport is already
+        // in memory.
+        OSReport("[PC] SaveStation_Passport: passport held in memory\n");
+        return mCD_TRANS_ERR_NONE;
+    }
+
+    // resident using porter to save at the station without travel. same
+    // on-disk result as a gyroid save. shares the full prep pipeline so
+    // Wisps, money stones, cockroach timer, etc. all get updated.
+    pc_save_prep_explicit();
+    if (!pc_save_write_gci()) {
+        OSReport("[PC] SaveStation_Passport: home save failed\n");
+        return mCD_TRANS_ERR_IOERROR;
+    }
+    pc_save_rearm_reset_code();
+    OSReport("[PC] SaveStation_Passport: home save complete\n");
     return mCD_TRANS_ERR_NONE;
 }
 
