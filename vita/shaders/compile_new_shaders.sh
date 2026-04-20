@@ -85,6 +85,7 @@ compile_lfa cfg46_f.cg cfg46 "CFG46: 2-stage god ray: reg*tex+reg*reg color + TE
 compile_lfa cfg47_f.cg cfg47 "CFG47: (C2+C1*tex)*ras color + A2 alpha"
 compile_lfa cfg48_f.cg cfg48 "CFG48: lerp(ras,C1,A0)*tex color + tex.a alpha"
 compile_lfa cfg49_f.cg cfg49 "CFG49: C2*ras color + A2*tex.a alpha"
+compile_lfa cfg50_f.cg cfg50 "CFG50: tex*C1*ras color + A_reg*tex.a alpha (UBER3+UBER4)"
 
 # Composite shader for depth-aware water FBO compositing (single variant each)
 echo "Compiling composite_v.gxp"

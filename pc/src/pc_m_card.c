@@ -904,6 +904,34 @@ static void pc_save_prep_explicit(void) {
     }
 }
 
+// Called at the top of the save-init paths (mSDI_StartInitFrom / New /
+// NewPlayer) BEFORE lbRTC_GetTime populates Common_Get(time.rtc_time).
+// no-op unless the user enabled time_sync.
+//
+// Two things need to be true for the game's "is the time correct?"
+// dialogue (guide NPC for new players, welcome greeting for load) to
+// show a time that matches real wall clock:
+//
+//   1. OSGetTime() returns current wall clock. pc_os_time_resync()
+//      re-anchors the SDL perf-counter-based OSTime to time(NULL). this
+//      already runs at OSInit and on suspend-resume; calling it here
+//      is belt-and-braces in case the app has been at the title screen
+//      for a long time.
+//
+//   2. Save_Get(time_delta) is zero. lbRTC_GetGameTime() returns
+//      OSGetTime() + time_delta, so any previous in-game time-adjust
+//      (via the GUIDE NPC set-time menu or via time travel events)
+//      persists across loads and would skew the rtc_time populated by
+//      lbRTC_GetTime(). zeroing time_delta makes game-time exactly
+//      match wall-clock — which is the contract of time_sync = 1.
+extern void pc_time_sync_on_save_load(void);
+void pc_time_sync_on_save_load(void) {
+    extern void pc_os_time_resync(void);
+    if (!g_pc_settings.time_sync) return;
+    pc_os_time_resync();
+    Save_Set(time_delta, 0);
+}
+
 // re-arm reset code after a successful save so a crash before the next
 // save is detectable as "quit without saving" on the following load.
 static void pc_save_rearm_reset_code(void) {
@@ -1119,9 +1147,11 @@ int mCD_CheckStation_bg(s32* chan) {
     int is_foreigner = mLd_PlayerManKindCheck();
 
     if (is_foreigner) {
-        // visitor looking to go home: read card A
+        // visitor looking to go home: read card A. porter's error dialogs
+        // are keyed off `chan`, so aim it at A before probing A so any
+        // "no card / no file" message names the right slot.
         Save_t temp_save;
-        if (chan) *chan = mCD_SLOT_B;
+        if (chan) *chan = mCD_SLOT_A;
         if (!pc_read_gci_land_info(PC_GCI_PATH, &temp_save)) {
             OSReport("[PC] CheckStation: card A unreadable, no home to return to\n");
             return mCD_TRANS_ERR_NO_TOWN_DATA;
@@ -1143,8 +1173,10 @@ int mCD_CheckStation_bg(s32* chan) {
         return mCD_TRANS_ERR_NONE_NEXTLAND;
     }
 
-    // resident looking to visit: read card B
-    if (chan) *chan = mCD_SLOT_A;
+    // resident looking to visit: read card B. the error messages porter
+    // shows are keyed by `chan`, so set it to B before checking B so any
+    // "no card / no file" dialog names the right slot.
+    if (chan) *chan = mCD_SLOT_B;
     if (!pc_card_b_find_town()) {
         OSReport("[PC] CheckStation: card B is empty, nothing to visit\n");
         return mCD_TRANS_ERR_NO_TOWN_DATA;

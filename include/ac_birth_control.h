@@ -22,6 +22,13 @@ struct birth_control_s {
 
 extern ACTOR_PROFILE Birth_Control_Profile;
 
+#ifdef TARGET_VITA
+// called from Actor_delete when an actor dies. flips the block's
+// "fully prespawned" bit off so the next prespawn pass will re-scan
+// it. no-op for out-of-range / unassigned block coords.
+extern void aBC_vita_clear_block_spawned(s8 bx, s8 bz);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

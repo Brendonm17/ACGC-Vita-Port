@@ -782,7 +782,7 @@ with open(OUT_FILE, "w") as f:
         f.write("};\n\n")
     f.write(f"#define VITA_HAS_CFG39 {1 if cfg39_exists else 0}\n\n")
 
-    # Specialized CFG40-44 fragment variants (uber shader elimination batch)
+    # Specialized CFG40-50 fragment variants (uber shader elimination batch)
     for cfgn, desc in [(40, "tex*ras*C1 + register alpha"),
                        (41, "RASC passthrough + register alpha"),
                        (42, "tex*ras + reg*TEXA + reg*KONST alpha"),
@@ -792,7 +792,8 @@ with open(OUT_FILE, "w") as f:
                        (46, "2-stage god ray: reg*tex+reg*reg color + TEXA chain alpha"),
                        (47, "(C2+C1*tex)*ras color + A2 alpha"),
                        (48, "lerp(ras,C1,A0)*tex color + tex.a alpha"),
-                       (49, "C2*ras color + A2*tex.a alpha")]:
+                       (49, "C2*ras color + A2*tex.a alpha"),
+                       (50, "tex*C1*ras color + A_reg*tex.a alpha (UBER3+UBER4)")]:
         cfg_exists = os.path.exists(os.path.join(SHADER_DIR, f"cfg{cfgn}_v0.gxp"))
         if cfg_exists:
             for i in range(8):

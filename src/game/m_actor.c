@@ -22,6 +22,9 @@
 #ifdef TARGET_PC
 #include "pc_platform.h"
 #endif
+#ifdef TARGET_VITA
+#include "ac_birth_control.h"
+#endif
 
 #ifdef MUST_MATCH
 /* @unused | necessary for proper float ordering*/
@@ -112,6 +115,13 @@ extern void Actor_delete(ACTOR* actor) {
     if (actor == NULL) {
         return;
     }
+
+#ifdef TARGET_VITA
+    // phase 1.1: something in this block is going away, so the
+    // "fully prespawned" bit no longer holds. cheap: it's a two-
+    // range-check bounds test + a byte store.
+    aBC_vita_clear_block_spawned(actor->block_x, actor->block_z);
+#endif
 
     actor->mv_proc = NULL;
     actor->dw_proc = NULL;
@@ -288,12 +298,24 @@ extern int Actor_draw_actor_no_culling_check2(ACTOR* actor, xyz_t* camera_pos, f
     f32 height = actor->cull_height;
 
 #ifdef TARGET_VITA
-    // free cam: widen cull bounds so widescreen adjacent-block actors don't pop
+    // free_cam: modest distance expansion so adjacent-block actors
+    // aren't culled when the player is near an acre edge (they're alive
+    // from the 2-block keep-alive rule and need to be drawable).
+    //
+    // previous code multiplied everything by 3x which effectively
+    // disabled culling — radius=1050 meant any actor within 1050 units
+    // BEHIND the camera passed the near-plane check, so every loaded
+    // actor in the 8-block widescreen ring rendered regardless of view
+    // direction. in dense acres that was 500+ draws per frame with
+    // most of them off-screen.
+    //
+    // widescreen horizontal FOV is already handled by x_edge below.
+    // vertical FOV is unchanged (hor+ mode). so only forward distance
+    // needs a bump, and only modestly — 1.5x = 1500 units = roughly
+    // 2.3 blocks, enough to cover the nearest edge of any adjacent
+    // block from where the camera sits behind the player.
     if (g_pc_settings.free_cam) {
-        dist *= 3.0f;
-        width *= 3.0f;
-        radius *= 3.0f;
-        height *= 2.0f;
+        dist *= 1.5f;
     }
 #endif
 

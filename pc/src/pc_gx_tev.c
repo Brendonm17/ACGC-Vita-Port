@@ -159,7 +159,7 @@ GLuint vita_get_simple_shader(void) { return vita_simple[0]; }
 
 // specialized shaders for top TEV configs
 #define VITA_SPEC_COUNT 8  // L/F/A = 3 bits = 8 variants each
-#define VITA_CFG_COUNT  50
+#define VITA_CFG_COUNT  51
 
 typedef struct {
     const char* name;
@@ -390,6 +390,10 @@ static const unsigned int vita_gxp_dummy_sizes[8] = {0};
 #define gxp_cfg49_variants vita_gxp_dummy_variants
 #define gxp_cfg49_variant_sizes vita_gxp_dummy_sizes
 #endif
+#if !VITA_HAS_CFG50
+#define gxp_cfg50_variants vita_gxp_dummy_variants
+#define gxp_cfg50_variant_sizes vita_gxp_dummy_sizes
+#endif
 
 #define CFG_ENTRY(n, avail) { "CFG" #n, {0}, \
     avail ? (const unsigned char**)gxp_cfg##n##_variants : vita_gxp_dummy_variants, \
@@ -446,6 +450,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
     CFG_ENTRY(47, VITA_HAS_CFG47),
     CFG_ENTRY(48, VITA_HAS_CFG48),
     CFG_ENTRY(49, VITA_HAS_CFG49),
+    CFG_ENTRY(50, VITA_HAS_CFG50),
 };
 
 // map old vita_cfgN[] names to table entries
@@ -498,6 +503,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg47 vita_cfgs[46].programs
 #define vita_cfg48 vita_cfgs[47].programs
 #define vita_cfg49 vita_cfgs[48].programs
+#define vita_cfg50 vita_cfgs[49].programs
 
 // hash-based fast lookup for fully-literal TEV configs. replaces the
 // linear if/else cascade for the worker-thread per-draw shader match,
@@ -618,6 +624,21 @@ static void tev_lit_build(void) {
     TEV_INS_2(8,15,15,4,  7,4,1,7,    15,0,10,8, 7,0,4,7,  vita_cfg30, 30,  0);
     TEV_INS_2(15,8,3,6,   7,7,7,4,    15,10,4,0, 7,0,4,4,  vita_cfg31, 31,  0);
     TEV_INS_2(15,8,10,8,  7,7,7,4,    15,10,4,0, 7,0,4,7,  vita_cfg32, 32,  0);
+
+    // CFG47: (C2 + C1*tex) * ras color + A2 alpha (formerly UBER0 fallback).
+    TEV_INS_2(15,8,4,6,   7,7,7,3,    15,0,10,15, 7,7,7,0, vita_cfg47, 47, 0);
+    // CFG48: lerp(ras,C1,A0)*tex color + tex.a alpha (formerly UBER2 fallback).
+    TEV_INS_2(10,4,3,15,  7,7,7,7,    15,0,8,15,  7,7,7,4, vita_cfg48, 48, 0);
+    // CFG49: C2*ras color + A2*tex.a alpha (formerly UBER1 fallback).
+    TEV_INS_2(15,15,15,6, 7,4,3,7,    15,0,10,15, 7,7,7,0, vita_cfg49, 49, 0);
+
+    // CFG50: TEX*C1*RAS color + A_reg*TEXA alpha. two matcher entries —
+    // UBER3 uses C1 in S0 slot C and resolves A1 via alpha slot C;
+    // UBER4 uses RASC in S0 slot C and C1 in S1 slot B, resolves A2.
+    // both end up as TEX*C1*RAS, and the CPU pre-resolves A1 or A2 into
+    // u_tev0_aval.z uniformly, so one shader covers both.
+    TEV_INS_2(15,8,4,15,  7,4,2,7,    15,0,10,15, 7,7,7,0, vita_cfg50, 50, 0);
+    TEV_INS_2(15,8,10,15, 7,4,3,7,    15,4,0,15,  7,7,7,0, vita_cfg50, 50, 0);
 
     // 3-stage literal configs
     TEV_INS_3(15,15,15,8, 7,7,7,4,    15,0,8,0,  7,0,4,7,

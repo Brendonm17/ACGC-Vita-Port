@@ -6,7 +6,77 @@
 #include "m_common_data.h"
 #include "GBA2/gba2.h"
 
+#ifdef TARGET_VITA
+#include <string.h>
+#endif
+
 static void aBC_actor_move(ACTOR*, GAME*);
+
+#ifdef TARGET_VITA
+static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz);
+static int aBC_setupActor_impl(GAME_PLAY* play, int mask);
+
+// per-block "fully prespawned" bitmap. set when aBC_prespawn_block
+// finishes populating a block; cleared in Actor_delete when any actor
+// in that block dies. turns "walk back into the acre you already
+// primed" from a 256-unit scan + per-item dedup walk into a bit check.
+#define aBC_MASK_ITEMS   0x1
+#define aBC_MASK_PROPS   0x2
+#define aBC_MASK_STRUCTS 0x4
+#define aBC_MASK_ALL     0x7
+
+static u8 aBC_block_spawned_mask[BLOCK_Z_NUM][BLOCK_X_NUM];
+
+// Pipeline stage for free_cam current-block spawn. On a transition
+// frame we only run ITEMS (cheap, gameplay-visible) and queue the
+// expensive work out across subsequent frames:
+//   0 = idle (nothing queued)
+//   1 = PROPS due next frame (items just ran)
+//   2 = STRUCTS due next frame (props just ran)
+// this flattens the per-actor ct_proc cost that otherwise stacks on
+// the transition frame — evidence from ac_perf.txt: transition frames
+// showed ~2 ms extra in `game` and ~2 ms extra in waitpdd because the
+// worker got a sudden flood of new modelview uniforms from all newly
+// spawned actors. spreading the spawn over 3 frames keeps the game-
+// logic and uniform-upload cost close to steady-state on any given
+// frame, at the cost of structures appearing 2 ticks (~33 ms) late —
+// imperceptible because the player can't rotate far enough in that
+// window to see the empty hole.
+static u8 aBC_pending_spawn_stage = 0;
+
+// prespawn queue — file-scope so scene-change detection can reset it.
+static const s8 aBC_prespawn_offsets[8][2] = {
+  { -1,  0 }, { +1,  0 }, {  0, -1 }, {  0, +1 },
+  { -1, -1 }, { +1, -1 }, { -1, +1 }, { +1, +1 },
+};
+static s8 aBC_prespawn_queue_bx = -1;
+static s8 aBC_prespawn_queue_bz = -1;
+static u8 aBC_prespawn_queue_next = 8;
+static BIRTH_CONTROL_ACTOR* aBC_last_seen_actor = NULL;
+static s16 aBC_last_seen_scene = -1;
+
+static int aBC_block_is_spawned(s8 bx, s8 bz) {
+  if (bx < 0 || bx >= BLOCK_X_NUM) return 0;
+  if (bz < 0 || bz >= BLOCK_Z_NUM) return 0;
+  return aBC_block_spawned_mask[bz][bx];
+}
+
+static void aBC_block_mark_spawned(s8 bx, s8 bz) {
+  if (bx < 0 || bx >= BLOCK_X_NUM) return;
+  if (bz < 0 || bz >= BLOCK_Z_NUM) return;
+  aBC_block_spawned_mask[bz][bx] = 1;
+}
+
+extern void aBC_vita_clear_block_spawned(s8 bx, s8 bz) {
+  if (bx < 0 || bx >= BLOCK_X_NUM) return;
+  if (bz < 0 || bz >= BLOCK_Z_NUM) return;
+  aBC_block_spawned_mask[bz][bx] = 0;
+}
+
+static void aBC_block_reset_spawn_mask(void) {
+  memset(aBC_block_spawned_mask, 0, sizeof(aBC_block_spawned_mask));
+}
+#endif
 
 ACTOR_PROFILE Birth_Control_Profile = {
   mAc_PROFILE_BIRTH_CONTROL,
@@ -115,6 +185,100 @@ static int aBC_setupOtherActor(GAME_PLAY* play, mActor_name_t actor_id, s16 prof
   return res;
 }
 
+#ifdef TARGET_VITA
+// mask-driven walk over the current block's items_p. each bit of `mask`
+// controls whether a case type gets processed this pass:
+//   aBC_MASK_ITEMS   = NAME_TYPE_ITEM2
+//   aBC_MASK_PROPS   = NAME_TYPE_PROPS
+//   aBC_MASK_STRUCTS = NAME_TYPE_STRUCT
+// returns the OR of "spawn failed" flags for cases that did run; caller
+// decides whether to commit that into birth_control->setup_actor_flag.
+// the split exists so free_cam can run items+props on the transition
+// frame and defer structures (DMA bank loads) to frame+1.
+static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
+  mFI_block_tbl_c* block_table = &play->block_table;
+  mActor_name_t* item_p = block_table->items;
+  f32 base_x = block_table->pos_x;
+  f32 base_z = block_table->pos_z;
+  int setup_actor_flag = FALSE;
+  mActor_name_t clear_item;
+  int ut_z;
+  int ut_x;
+  // under free_cam, BG/NPC actors from this block can still be alive
+  // (the 2-block keep-alive rule in aBC_deleteActor_part). without a
+  // dedup check the structure and props spawns below would stamp new
+  // actors on top of the existing ones every block transition.
+  const s8 cur_bx = play->block_table.block_x;
+  const s8 cur_bz = play->block_table.block_z;
+
+  for (ut_z = 0; ut_z < UT_Z_NUM; ut_z++) {
+    for (ut_x = 0; ut_x < UT_X_NUM; ut_x++) {
+      switch (ITEM_NAME_GET_TYPE(*item_p)) {
+        case NAME_TYPE_ITEM2:
+          if (mask & aBC_MASK_ITEMS) {
+            int idx = *item_p - ETC_START;
+            setup_actor_flag |= aBC_setupOtherActor(play, *item_p, move_obj_profile_table[idx], base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z], EMPTY_NO);
+          }
+          break;
+
+        case NAME_TYPE_PROPS:
+          if (mask & aBC_MASK_PROPS) {
+            int idx;
+            if (*item_p >= SNOWMAN0 && *item_p <= SNOWMAN8) {
+              clear_item = EMPTY_NO;
+            }
+            else {
+              clear_item = RSV_NO;
+            }
+            idx = *item_p - ACTOR_PROP_START;
+            if (g_pc_settings.free_cam && aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
+              break;
+            }
+            setup_actor_flag |= aBC_setupOtherActor(play, *item_p, props_profile_table[idx], base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z], clear_item);
+          }
+          break;
+
+        case NAME_TYPE_STRUCT:
+          if ((mask & aBC_MASK_STRUCTS) && Common_Get(clip).structure_clip != NULL) {
+            if (g_pc_settings.free_cam && aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
+              break;
+            }
+            STRUCTURE_ACTOR* actor = (*Common_Get(clip).structure_clip->setup_actor_proc)((GAME*)play, *item_p, -1, base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
+            setup_actor_flag |= actor == NULL;
+          }
+          break;
+      }
+      item_p++;
+    }
+  }
+  return setup_actor_flag;
+}
+
+static void aBC_setupActor(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
+  if (g_pc_settings.free_cam) {
+    // 3-frame pipeline on transition:
+    //   frame 0: ITEMS only (this call), queue PROPS
+    //   frame 1: PROPS only, queue STRUCTS
+    //   frame 2: STRUCTS only, idle
+    // items are the cheapest (fruit / tools, no DMA bank loads) and
+    // are also gameplay-visible immediately — must run on frame 0.
+    // props and structures can slip a frame or two.
+    int failed = aBC_setupActor_impl(play, aBC_MASK_ITEMS);
+    birth_control->setup_actor_flag = failed;
+    if (!failed) {
+      aBC_pending_spawn_stage = 1;
+    }
+    return;
+  }
+  // non-free_cam: run the full pass in one shot, including structs.
+  // cancel any pending deferred pass left over from a prior free_cam
+  // session — otherwise toggling free_cam off between frames could let
+  // the deferred pass re-spawn something that was just placed here (the
+  // _impl dedup guard is gated on free_cam and would not fire).
+  birth_control->setup_actor_flag = aBC_setupActor_impl(play, aBC_MASK_ALL);
+  aBC_pending_spawn_stage = 0;
+}
+#else
 static void aBC_setupActor(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
   mFI_block_tbl_c* block_table = &play->block_table;
   mActor_name_t* item_p = block_table->items;
@@ -167,6 +331,7 @@ static void aBC_setupActor(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) 
 
   birth_control->setup_actor_flag = setup_actor_flag;
 }
+#endif
 
 static int aBC_setupCommonMvActor(GAME_PLAY* play, mFM_move_actor_c* mv_actor_list, int mv_actor_list_no, s16 profile, f32 pos_x, f32 pos_z) {
   Actor_info* actor_info = &play->actor_info;
@@ -300,14 +465,21 @@ static void aBC_set_boat(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
 }
 
 #ifdef TARGET_VITA
-// return TRUE if this item already has an actor in the given block
+// return TRUE if this item already has an actor in the given block.
+// has to search every part list because different spawn kinds land in
+// different parts: items (grass patches, fruit) -> ACTOR_PART_ITEM,
+// structures like gyroids and houses -> ACTOR_PART_BG, props / snowmen
+// -> varies. only-checking ITEM was the original bug that let free_cam's
+// per-frame prespawn pass duplicate gyroids every acre transition.
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz) {
-  ACTOR* actor = play->actor_info.list[ACTOR_PART_ITEM].actor;
-  while (actor != NULL) {
-    if (actor->block_x == bx && actor->block_z == bz && actor->npc_id == item_id) {
-      return TRUE;
+  for (int part = 0; part < ACTOR_PART_NUM; part++) {
+    ACTOR* actor = play->actor_info.list[part].actor;
+    while (actor != NULL) {
+      if (actor->block_x == bx && actor->block_z == bz && actor->npc_id == item_id) {
+        return TRUE;
+      }
+      actor = actor->next_actor;
     }
-    actor = actor->next_actor;
   }
   return FALSE;
 }
@@ -340,10 +512,21 @@ static int aBC_setupOtherActor_block(GAME_PLAY* play, mActor_name_t actor_id, s1
 
 static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
   if (!mFI_BlockCheck(bx, bz)) return;
+  // phase 1.1 short-circuit: if this block was already fully prespawned
+  // and nothing in it has died since (Actor_delete clears the bit),
+  // there is nothing to do. the alternative is a 256-unit scan plus
+  // per-item dedup walks (each one linear over all actor-list parts),
+  // which is the dominant cost of re-entering an acre.
+  if (aBC_block_is_spawned(bx, bz)) return;
 
   int num = mFI_GetBlockNum(bx, bz);
   mActor_name_t* item_p = g_fdinfo->block_info[num].fg_info.items_p;
-  if (item_p == NULL) return;
+  if (item_p == NULL) {
+    // empty block (ocean / offscreen). still mark it done so we don't
+    // keep paying mFI_BlockCheck + this NULL check every frame.
+    aBC_block_mark_spawned(bx, bz);
+    return;
+  }
 
   f32 base_x, base_z;
   mFI_BkNum2WposXZ(&base_x, &base_z, bx, bz);
@@ -373,12 +556,34 @@ static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
       }
     }
   }
+
+  aBC_block_mark_spawned(bx, bz);
 }
 #endif
 
 static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   BIRTH_CONTROL_ACTOR* birth_control = (BIRTH_CONTROL_ACTOR*)actorx;
   GAME_PLAY* play = (GAME_PLAY*)game;
+
+#ifdef TARGET_VITA
+  // snapshot the transition signal before the rest of this function
+  // clears it. used below to gate free-cam's neighbor prespawn pass.
+  int vita_just_transitioned = mFI_ActorisBorn() == TRUE;
+
+  // scene-change detection: BIRTH_CONTROL_ACTOR is re-created per scene,
+  // so if the pointer changed we're in a fresh scene. also compare the
+  // scene_no in case the allocator reused the same slot (mainland <->
+  // island has distinct block grids; stale bits would leave the new
+  // scene empty because prespawn_block would short-circuit).
+  const s16 cur_scene_no = Save_Get(scene_no);
+  if (birth_control != aBC_last_seen_actor || cur_scene_no != aBC_last_seen_scene) {
+    aBC_last_seen_actor = birth_control;
+    aBC_last_seen_scene = cur_scene_no;
+    aBC_block_reset_spawn_mask();
+    aBC_pending_spawn_stage = 0;
+    aBC_prespawn_queue_next = 8;
+  }
+#endif
 
   if (Common_Get(bg_item_type) == 0) {
     birth_control->setup_actor_flag |= mFI_ActorisBorn() == TRUE;
@@ -404,6 +609,27 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   g_fdinfo->born_actor = FALSE;
 
   if (play->game.pad_initialized == TRUE) {
+#ifdef TARGET_VITA
+    // phase 1.3: step the deferred-spawn pipeline one stage per frame
+    // BEFORE the transition-frame setupActor call. if we just came off
+    // a transition (setup_actor_flag is 0, items succeeded) and a
+    // later stage is queued, run it now. gating on !setup_actor_flag
+    // avoids racing with items retry (if items failed on the previous
+    // frame, setupActor runs again below and we let it resolve first).
+    //
+    // stage 1: PROPS. stage 2: STRUCTS. stage 0: idle.
+    // stage advances monotonically — props before structs, never skip.
+    if (aBC_pending_spawn_stage > 0 && !birth_control->setup_actor_flag) {
+      int mask = (aBC_pending_spawn_stage == 1) ? aBC_MASK_PROPS : aBC_MASK_STRUCTS;
+      int failed = aBC_setupActor_impl(play, mask);
+      if (!failed) {
+        aBC_pending_spawn_stage = (aBC_pending_spawn_stage == 1) ? 2 : 0;
+      }
+      // on failure (actor quota full) stay at current stage; retries
+      // next frame exactly like items do via setup_actor_flag.
+    }
+#endif
+
     if (birth_control->setup_actor_flag) {
       aBC_deleteActor_part(play, ACTOR_PART_ITEM);
       aBC_setupActor(birth_control, play);
@@ -425,17 +651,31 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   }
 
 #ifdef TARGET_VITA
+  // free-cam neighbor prespawn, amortized across frames. one neighbor
+  // block per frame — doing all 8 in one tick is a ~60-120ms spike.
+  //
+  // cardinal-first ordering (aBC_prespawn_offsets): the first 4 slots
+  // are N/S/E/W, the last 4 are diagonals. cardinals are what the
+  // player sees first when moving along an axis, diagonals only matter
+  // if they change heading mid-transition.
+  //
+  // combined with the block_spawned_mask (phase 1.1), re-entering an
+  // already-primed acre costs one bitmap check per neighbor instead of
+  // 256 unit scans + per-item dedup walks.
   if (g_pc_settings.free_cam && play->game.pad_initialized == TRUE) {
     s8 bx = play->block_table.block_x;
     s8 bz = play->block_table.block_z;
-    aBC_prespawn_block(play, bx - 1, bz);
-    aBC_prespawn_block(play, bx + 1, bz);
-    aBC_prespawn_block(play, bx, bz - 1);
-    aBC_prespawn_block(play, bx, bz + 1);
-    aBC_prespawn_block(play, bx - 1, bz - 1);
-    aBC_prespawn_block(play, bx + 1, bz - 1);
-    aBC_prespawn_block(play, bx - 1, bz + 1);
-    aBC_prespawn_block(play, bx + 1, bz + 1);
+    if (vita_just_transitioned) {
+      aBC_prespawn_queue_bx = bx;
+      aBC_prespawn_queue_bz = bz;
+      aBC_prespawn_queue_next = 0;
+    }
+    if (aBC_prespawn_queue_next < 8) {
+      s8 ox = aBC_prespawn_offsets[aBC_prespawn_queue_next][0];
+      s8 oz = aBC_prespawn_offsets[aBC_prespawn_queue_next][1];
+      aBC_prespawn_block(play, aBC_prespawn_queue_bx + ox, aBC_prespawn_queue_bz + oz);
+      aBC_prespawn_queue_next++;
+    }
   }
 #endif
 }
