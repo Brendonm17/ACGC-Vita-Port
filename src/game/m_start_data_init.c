@@ -185,8 +185,6 @@ static int mSDI_StartInitNew(GAME* game, int player_no, int malloc_flag) {
 
     Common_Set(scene_from_title_demo, SCENE_START_DEMO);
 #ifdef TARGET_VITA
-    // time_sync: re-anchor OSGetTime to wall clock + zero Save time_delta
-    // so the intro guide dialogue asks about the real current time.
     extern void pc_time_sync_on_save_load(void);
     pc_time_sync_on_save_load();
 #endif
@@ -415,9 +413,6 @@ static int mSDI_StartInitFrom(GAME* game, int player_no, int malloc_flag) {
 
     Common_Set(scene_from_title_demo, SCENE_FG);
 #ifdef TARGET_VITA
-    // time_sync: this is the load-existing-save path. refresh the host
-    // clock anchor and clear the per-save time_delta so the greeting
-    // dialogue's rtc_time matches the Vita's real wall clock.
     extern void pc_time_sync_on_save_load(void);
     pc_time_sync_on_save_load();
 #endif

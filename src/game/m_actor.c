@@ -117,9 +117,7 @@ extern void Actor_delete(ACTOR* actor) {
     }
 
 #ifdef TARGET_VITA
-    // phase 1.1: something in this block is going away, so the
-    // "fully prespawned" bit no longer holds. cheap: it's a two-
-    // range-check bounds test + a byte store.
+    // block's prespawn bit no longer holds once an actor in it dies.
     aBC_vita_clear_block_spawned(actor->block_x, actor->block_z);
 #endif
 
@@ -298,22 +296,11 @@ extern int Actor_draw_actor_no_culling_check2(ACTOR* actor, xyz_t* camera_pos, f
     f32 height = actor->cull_height;
 
 #ifdef TARGET_VITA
-    // free_cam: modest distance expansion so adjacent-block actors
-    // aren't culled when the player is near an acre edge (they're alive
-    // from the 2-block keep-alive rule and need to be drawable).
-    //
-    // previous code multiplied everything by 3x which effectively
-    // disabled culling — radius=1050 meant any actor within 1050 units
-    // BEHIND the camera passed the near-plane check, so every loaded
-    // actor in the 8-block widescreen ring rendered regardless of view
-    // direction. in dense acres that was 500+ draws per frame with
-    // most of them off-screen.
-    //
-    // widescreen horizontal FOV is already handled by x_edge below.
-    // vertical FOV is unchanged (hor+ mode). so only forward distance
-    // needs a bump, and only modestly — 1.5x = 1500 units = roughly
-    // 2.3 blocks, enough to cover the nearest edge of any adjacent
-    // block from where the camera sits behind the player.
+    // free_cam: only the forward distance needs a bump so adjacent-
+    // block actors stay drawable at acre edges. x_edge below already
+    // covers widescreen horizontal FOV. previous code multiplied every
+    // bound by 3x which made radius big enough that actors behind the
+    // camera passed the near-plane check, killing back-face culling.
     if (g_pc_settings.free_cam) {
         dist *= 1.5f;
     }

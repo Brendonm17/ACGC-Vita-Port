@@ -16,35 +16,24 @@ static void aBC_actor_move(ACTOR*, GAME*);
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz);
 static int aBC_setupActor_impl(GAME_PLAY* play, int mask);
 
-// per-block "fully prespawned" bitmap. set when aBC_prespawn_block
-// finishes populating a block; cleared in Actor_delete when any actor
-// in that block dies. turns "walk back into the acre you already
-// primed" from a 256-unit scan + per-item dedup walk into a bit check.
 #define aBC_MASK_ITEMS   0x1
 #define aBC_MASK_PROPS   0x2
 #define aBC_MASK_STRUCTS 0x4
 #define aBC_MASK_ALL     0x7
 
+// set when aBC_prespawn_block finishes a block, cleared by Actor_delete
+// when any actor in that block dies. short-circuits the 256-unit scan
+// on re-entry.
 static u8 aBC_block_spawned_mask[BLOCK_Z_NUM][BLOCK_X_NUM];
 
-// Pipeline stage for free_cam current-block spawn. On a transition
-// frame we only run ITEMS (cheap, gameplay-visible) and queue the
-// expensive work out across subsequent frames:
-//   0 = idle (nothing queued)
-//   1 = PROPS due next frame (items just ran)
-//   2 = STRUCTS due next frame (props just ran)
-// this flattens the per-actor ct_proc cost that otherwise stacks on
-// the transition frame — evidence from ac_perf.txt: transition frames
-// showed ~2 ms extra in `game` and ~2 ms extra in waitpdd because the
-// worker got a sudden flood of new modelview uniforms from all newly
-// spawned actors. spreading the spawn over 3 frames keeps the game-
-// logic and uniform-upload cost close to steady-state on any given
-// frame, at the cost of structures appearing 2 ticks (~33 ms) late —
-// imperceptible because the player can't rotate far enough in that
-// window to see the empty hole.
+// stage machine for the 3-frame current-block spawn split in free_cam:
+//   0 = idle, 1 = props due next frame, 2 = structs due next frame.
+// keeps the per-actor ct_proc cost from stacking on the transition
+// frame.
 static u8 aBC_pending_spawn_stage = 0;
 
-// prespawn queue — file-scope so scene-change detection can reset it.
+// neighbor prespawn queue, cardinals first. file-scope so the
+// scene-change reset below can clear it.
 static const s8 aBC_prespawn_offsets[8][2] = {
   { -1,  0 }, { +1,  0 }, {  0, -1 }, {  0, +1 },
   { -1, -1 }, { +1, -1 }, { -1, +1 }, { +1, +1 },
@@ -186,15 +175,8 @@ static int aBC_setupOtherActor(GAME_PLAY* play, mActor_name_t actor_id, s16 prof
 }
 
 #ifdef TARGET_VITA
-// mask-driven walk over the current block's items_p. each bit of `mask`
-// controls whether a case type gets processed this pass:
-//   aBC_MASK_ITEMS   = NAME_TYPE_ITEM2
-//   aBC_MASK_PROPS   = NAME_TYPE_PROPS
-//   aBC_MASK_STRUCTS = NAME_TYPE_STRUCT
-// returns the OR of "spawn failed" flags for cases that did run; caller
-// decides whether to commit that into birth_control->setup_actor_flag.
-// the split exists so free_cam can run items+props on the transition
-// frame and defer structures (DMA bank loads) to frame+1.
+// mask bits pick which case types to process. free_cam uses this to
+// run items on the transition frame and defer props/structs.
 static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
   mFI_block_tbl_c* block_table = &play->block_table;
   mActor_name_t* item_p = block_table->items;
@@ -204,10 +186,8 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
   mActor_name_t clear_item;
   int ut_z;
   int ut_x;
-  // under free_cam, BG/NPC actors from this block can still be alive
-  // (the 2-block keep-alive rule in aBC_deleteActor_part). without a
-  // dedup check the structure and props spawns below would stamp new
-  // actors on top of the existing ones every block transition.
+  // 2-block keep-alive in free_cam means actors from this block may
+  // still be live. dedup props and structs or we spawn duplicates.
   const s8 cur_bx = play->block_table.block_x;
   const s8 cur_bz = play->block_table.block_z;
 
@@ -256,13 +236,7 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
 
 static void aBC_setupActor(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
   if (g_pc_settings.free_cam) {
-    // 3-frame pipeline on transition:
-    //   frame 0: ITEMS only (this call), queue PROPS
-    //   frame 1: PROPS only, queue STRUCTS
-    //   frame 2: STRUCTS only, idle
-    // items are the cheapest (fruit / tools, no DMA bank loads) and
-    // are also gameplay-visible immediately — must run on frame 0.
-    // props and structures can slip a frame or two.
+    // transition frame = items only. props run +1, structs run +2.
     int failed = aBC_setupActor_impl(play, aBC_MASK_ITEMS);
     birth_control->setup_actor_flag = failed;
     if (!failed) {
@@ -270,11 +244,8 @@ static void aBC_setupActor(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) 
     }
     return;
   }
-  // non-free_cam: run the full pass in one shot, including structs.
-  // cancel any pending deferred pass left over from a prior free_cam
-  // session — otherwise toggling free_cam off between frames could let
-  // the deferred pass re-spawn something that was just placed here (the
-  // _impl dedup guard is gated on free_cam and would not fire).
+  // full pass. also reset any deferred stage from a prior free_cam
+  // session so toggling it off mid-pipeline doesn't re-spawn structs.
   birth_control->setup_actor_flag = aBC_setupActor_impl(play, aBC_MASK_ALL);
   aBC_pending_spawn_stage = 0;
 }
@@ -465,12 +436,9 @@ static void aBC_set_boat(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
 }
 
 #ifdef TARGET_VITA
-// return TRUE if this item already has an actor in the given block.
-// has to search every part list because different spawn kinds land in
-// different parts: items (grass patches, fruit) -> ACTOR_PART_ITEM,
-// structures like gyroids and houses -> ACTOR_PART_BG, props / snowmen
-// -> varies. only-checking ITEM was the original bug that let free_cam's
-// per-frame prespawn pass duplicate gyroids every acre transition.
+// walk every actor-part list. items land in ACTOR_PART_ITEM, gyroids
+// and houses in ACTOR_PART_BG, props vary - only checking ITEM was
+// the gyroid-dup bug.
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz) {
   for (int part = 0; part < ACTOR_PART_NUM; part++) {
     ACTOR* actor = play->actor_info.list[part].actor;
@@ -512,18 +480,12 @@ static int aBC_setupOtherActor_block(GAME_PLAY* play, mActor_name_t actor_id, s1
 
 static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
   if (!mFI_BlockCheck(bx, bz)) return;
-  // phase 1.1 short-circuit: if this block was already fully prespawned
-  // and nothing in it has died since (Actor_delete clears the bit),
-  // there is nothing to do. the alternative is a 256-unit scan plus
-  // per-item dedup walks (each one linear over all actor-list parts),
-  // which is the dominant cost of re-entering an acre.
   if (aBC_block_is_spawned(bx, bz)) return;
 
   int num = mFI_GetBlockNum(bx, bz);
   mActor_name_t* item_p = g_fdinfo->block_info[num].fg_info.items_p;
   if (item_p == NULL) {
-    // empty block (ocean / offscreen). still mark it done so we don't
-    // keep paying mFI_BlockCheck + this NULL check every frame.
+    // ocean / offscreen. mark done to avoid re-checking every frame.
     aBC_block_mark_spawned(bx, bz);
     return;
   }
@@ -566,15 +528,12 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   GAME_PLAY* play = (GAME_PLAY*)game;
 
 #ifdef TARGET_VITA
-  // snapshot the transition signal before the rest of this function
-  // clears it. used below to gate free-cam's neighbor prespawn pass.
+  // snapshot before the function clears born_actor below.
   int vita_just_transitioned = mFI_ActorisBorn() == TRUE;
 
-  // scene-change detection: BIRTH_CONTROL_ACTOR is re-created per scene,
-  // so if the pointer changed we're in a fresh scene. also compare the
-  // scene_no in case the allocator reused the same slot (mainland <->
-  // island has distinct block grids; stale bits would leave the new
-  // scene empty because prespawn_block would short-circuit).
+  // detect scene change by pointer + scene_no. pointer catches
+  // reallocation, scene_no catches the allocator reusing the same slot
+  // (mainland <-> island have different block grids).
   const s16 cur_scene_no = Save_Get(scene_no);
   if (birth_control != aBC_last_seen_actor || cur_scene_no != aBC_last_seen_scene) {
     aBC_last_seen_actor = birth_control;
@@ -610,23 +569,15 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
 
   if (play->game.pad_initialized == TRUE) {
 #ifdef TARGET_VITA
-    // phase 1.3: step the deferred-spawn pipeline one stage per frame
-    // BEFORE the transition-frame setupActor call. if we just came off
-    // a transition (setup_actor_flag is 0, items succeeded) and a
-    // later stage is queued, run it now. gating on !setup_actor_flag
-    // avoids racing with items retry (if items failed on the previous
-    // frame, setupActor runs again below and we let it resolve first).
-    //
-    // stage 1: PROPS. stage 2: STRUCTS. stage 0: idle.
-    // stage advances monotonically — props before structs, never skip.
+    // step the 3-frame spawn pipeline. gated on !setup_actor_flag so
+    // we don't race with an items retry on a quota-exhausted frame.
     if (aBC_pending_spawn_stage > 0 && !birth_control->setup_actor_flag) {
       int mask = (aBC_pending_spawn_stage == 1) ? aBC_MASK_PROPS : aBC_MASK_STRUCTS;
       int failed = aBC_setupActor_impl(play, mask);
       if (!failed) {
         aBC_pending_spawn_stage = (aBC_pending_spawn_stage == 1) ? 2 : 0;
       }
-      // on failure (actor quota full) stay at current stage; retries
-      // next frame exactly like items do via setup_actor_flag.
+      // on quota-exhausted stay put; retries next frame.
     }
 #endif
 
@@ -651,17 +602,8 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   }
 
 #ifdef TARGET_VITA
-  // free-cam neighbor prespawn, amortized across frames. one neighbor
-  // block per frame — doing all 8 in one tick is a ~60-120ms spike.
-  //
-  // cardinal-first ordering (aBC_prespawn_offsets): the first 4 slots
-  // are N/S/E/W, the last 4 are diagonals. cardinals are what the
-  // player sees first when moving along an axis, diagonals only matter
-  // if they change heading mid-transition.
-  //
-  // combined with the block_spawned_mask (phase 1.1), re-entering an
-  // already-primed acre costs one bitmap check per neighbor instead of
-  // 256 unit scans + per-item dedup walks.
+  // prespawn one neighbor block per frame. cardinals first, diagonals
+  // after. all 8 at once is a 60-120ms spike.
   if (g_pc_settings.free_cam && play->game.pad_initialized == TRUE) {
     s8 bx = play->block_table.block_x;
     s8 bz = play->block_table.block_z;

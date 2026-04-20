@@ -110,6 +110,9 @@ extern void mNpc_ClearCacheName(void);
 extern void mTM_clear_renew_is(void);
 extern void lbRTC_GetTime(lbRTC_time_c* time);
 
+// defined further down; called from pc_save_read_gci
+void pc_time_sync_on_save_load(void);
+
 /* --- ARAM data blocks (mail/diary/original designs) --- */
 
 static u32 l_aram_alloc_size_table[mCD_ARAM_DATA_NUM] = {
@@ -367,8 +370,10 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
     dir_hdr.bannerFormat = 0;
     strncpy((char*)dir_hdr.fileName, "DobutsunomoriP_MURA", CARD_FILENAME_MAX);
     {
-        time_t unix_now = time(NULL);
-        u32 gc_secs = (u32)(unix_now - 946684800LL);
+        // use the pc_os-anchored clock so this is local wall time. direct
+        // time(NULL) produced UTC on Vita (no TZ in newlib) and the GC
+        // memcard browser expects local.
+        u32 gc_secs = (u32)(OSGetTime() / OS_TIMER_CLOCK);
         put_be32((u8*)&dir_hdr.time, gc_secs);
     }
     put_be32((u8*)&dir_hdr.iconAddr, 0xFFFFFFFF);
@@ -481,6 +486,11 @@ static int pc_save_read_gci(const char* path) {
 
     memcpy(&common_data.save.save, save_src, sizeof(Save_t));
     pc_save_bswap(&common_data.save.save, PC_BSWAP_FROM_BE);
+
+    // pak mode (continue home town) skips lbRTC_GetTime entirely, so
+    // hooking time_sync here catches every load path instead of just
+    // the mSDI_StartInit* callers.
+    pc_time_sync_on_save_load();
 
     /* --- Load ARAM blocks from Others section ---
      * Current saves (PC + Dolphin/GC) use order: mail, original, diary.
@@ -904,27 +914,8 @@ static void pc_save_prep_explicit(void) {
     }
 }
 
-// Called at the top of the save-init paths (mSDI_StartInitFrom / New /
-// NewPlayer) BEFORE lbRTC_GetTime populates Common_Get(time.rtc_time).
-// no-op unless the user enabled time_sync.
-//
-// Two things need to be true for the game's "is the time correct?"
-// dialogue (guide NPC for new players, welcome greeting for load) to
-// show a time that matches real wall clock:
-//
-//   1. OSGetTime() returns current wall clock. pc_os_time_resync()
-//      re-anchors the SDL perf-counter-based OSTime to time(NULL). this
-//      already runs at OSInit and on suspend-resume; calling it here
-//      is belt-and-braces in case the app has been at the title screen
-//      for a long time.
-//
-//   2. Save_Get(time_delta) is zero. lbRTC_GetGameTime() returns
-//      OSGetTime() + time_delta, so any previous in-game time-adjust
-//      (via the GUIDE NPC set-time menu or via time travel events)
-//      persists across loads and would skew the rtc_time populated by
-//      lbRTC_GetTime(). zeroing time_delta makes game-time exactly
-//      match wall-clock — which is the contract of time_sync = 1.
-extern void pc_time_sync_on_save_load(void);
+// time_sync: anchor OSGetTime to wall clock and zero time_delta so
+// game time matches the Vita RTC. no-op if time_sync is off.
 void pc_time_sync_on_save_load(void) {
     extern void pc_os_time_resync(void);
     if (!g_pc_settings.time_sync) return;

@@ -2,6 +2,9 @@
 #include "pc_platform.h"
 
 #include <time.h>
+#ifdef TARGET_VITA
+#include <psp2/rtc.h>
+#endif
 
 /* --- Memory arena --- */
 static u8* arena_memory = NULL;
@@ -291,37 +294,52 @@ void OSInit(void) {
     pc_os_time_resync();
 }
 
-// re-anchor osGetTime() to the host RTC. called from OSInit and again
-// from the vita resume-from-suspend path (time_sync setting). SDL's perf
-// counter doesn't advance during Vita sleep, so without this the in-game
-// clock drifts behind real time on every wake. idempotent.
+// re-anchor osGetTime() to the host RTC. idempotent.
 void pc_os_time_resync(void) {
     time_base_start = SDL_GetPerformanceCounter();
-    {
-        time_t unix_now = time(NULL);
-
-        struct tm* gmt = gmtime(&unix_now);
-        if (!gmt) { gc_epoch_offset_ticks = 0; return; }
-        struct tm utc_tm = *gmt;
-        utc_tm.tm_isdst = -1; // let mktime figure out DST
-        time_t utc_as_local = mktime(&utc_tm);
-        s64 tz_offset_secs = (s64)difftime(unix_now, utc_as_local);
-
-        if (g_pc_time_override >= 0) {
-            // --time H[:M[:S]] override on the command line
-            struct tm* lt = localtime(&unix_now);
-            if (lt) {
-                unix_now += (g_pc_time_override - lt->tm_hour) * 3600;
-                if (g_pc_min_override >= 0)
-                    unix_now += (g_pc_min_override - lt->tm_min) * 60;
-                if (g_pc_sec_override >= 0)
-                    unix_now += (g_pc_sec_override - lt->tm_sec);
-            }
-        }
-
-        s64 gc_secs = (s64)(unix_now - GC_UNIX_EPOCH_DIFF) + tz_offset_secs;
-        gc_epoch_offset_ticks = gc_secs * (s64)GC_TIMER_CLOCK;
+#ifdef TARGET_VITA
+    // Vita newlib has no TZ env and mktime silently treats its input as
+    // UTC, so the libc time/gmtime/mktime dance returned UTC and the
+    // in-game clock ran ~7-8 hours ahead of the Vita wall clock. skip
+    // libc and read Vita local time straight from sceRtc.
+    SceDateTime local;
+    if (sceRtcGetCurrentClockLocalTime(&local) < 0) {
+        gc_epoch_offset_ticks = 0;
+        return;
     }
+    time_t unix_local_as_utc = 0;
+    sceRtcConvertDateTimeToTime_t(&local, &unix_local_as_utc);
+    // sceRtcConvertDateTimeToTime_t treats SceDateTime as UTC, so
+    // feeding it local wall-clock values gives "seconds since 1970
+    // as if this were UTC" which is what the GC clock wants (naive
+    // seconds-to-calendar without any TZ step on the other end).
+    s64 gc_secs = (s64)unix_local_as_utc - GC_UNIX_EPOCH_DIFF;
+    gc_epoch_offset_ticks = gc_secs * (s64)GC_TIMER_CLOCK;
+#else
+    time_t unix_now = time(NULL);
+
+    struct tm* gmt = gmtime(&unix_now);
+    if (!gmt) { gc_epoch_offset_ticks = 0; return; }
+    struct tm utc_tm = *gmt;
+    utc_tm.tm_isdst = -1;
+    time_t utc_as_local = mktime(&utc_tm);
+    s64 tz_offset_secs = (s64)difftime(unix_now, utc_as_local);
+
+    if (g_pc_time_override >= 0) {
+        // --time H[:M[:S]] override on the command line
+        struct tm* lt = localtime(&unix_now);
+        if (lt) {
+            unix_now += (g_pc_time_override - lt->tm_hour) * 3600;
+            if (g_pc_min_override >= 0)
+                unix_now += (g_pc_min_override - lt->tm_min) * 60;
+            if (g_pc_sec_override >= 0)
+                unix_now += (g_pc_sec_override - lt->tm_sec);
+        }
+    }
+
+    s64 gc_secs = (s64)(unix_now - GC_UNIX_EPOCH_DIFF) + tz_offset_secs;
+    gc_epoch_offset_ticks = gc_secs * (s64)GC_TIMER_CLOCK;
+#endif
 }
 
 void OSInitAlarm(void) { }

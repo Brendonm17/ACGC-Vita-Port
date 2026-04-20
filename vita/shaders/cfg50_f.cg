@@ -1,22 +1,7 @@
-// Specialized shader for CFG50 (UBER3 + UBER4: TEX*C1*RAS color, reg*TEXA alpha)
-//
-// UBER3 TEV: S0 c(15,8,4,15) a(7,4,2,7), S1 c(15,0,10,15) a(7,7,7,0)
-//   S0 color = C1*TEXC, alpha = A1*TEXA
-//   S1 color = RASC*PREV = TEX*C1*RAS, alpha = APREV
-//
-// UBER4 TEV: S0 c(15,8,10,15) a(7,4,3,7), S1 c(15,4,0,15) a(7,7,7,0)
-//   S0 color = RASC*TEXC, alpha = A2*TEXA
-//   S1 color = C1*PREV = TEX*C1*RAS, alpha = APREV
-//
-// Both produce the same final output shape, differing only in which alpha
-// register (A1 vs A2) gets resolved into u_tev0_aval.z by the CPU side.
-// A single shader handles both — matcher inserts two entries pointing here.
-//
-// Color path: identical to cfg0 (TEX * C1 * RAS).
-// Alpha path: cfg11-style register-multiplied TEXA via the y+z trick
-// (aval.y = resolved B-slot (TEXA -> 0), aval.z = resolved C-slot (A1 or A2)).
-//
-// Compile variants: -DLIGHTING -DFOG -DALPHA_TEST
+// cfg50: TEX*C1*RAS color, A_reg*TEXA alpha.
+// covers UBER3 (A1) and UBER4 (A2) - CPU pre-resolves the register
+// into u_tev0_aval.z so one shader handles both.
+// color path mirrors cfg0, alpha uses the y+z trick from cfg11.
 
 void main(
     half4 v_color : COLOR0,
@@ -29,10 +14,10 @@ void main(
     uniform half u_use_texture0,
     uniform half u_tev0_tc_src,
 
-    // Stage 1 B input: pre-resolved C1 (register 1 color)
+    // pre-resolved C1 (register 1 color)
     uniform half3 u_tev1_cb,
 
-    // Stage 0 alpha: y = TEXA slot (resolved to 0), z = register slot (A1 or A2)
+    // y = TEXA slot (resolves to 0), z = register slot (A1 or A2)
     uniform half4 u_tev0_aval,
 
     uniform half u_num_chans,
@@ -86,9 +71,7 @@ void main(
 
     half3 ras_c = lerp(half3(1,1,1), matC, step(0.5h, u_num_chans));
 
-    // Color: TEX * C1 * RAS (3 ops)
     half3 prev_c = tex0.rgb * u_tev1_cb * ras_c;
-    // Alpha: TEXA * A_reg via y+z trick (aval.y is 0, aval.z is A1 or A2 resolved)
     half prev_a = tex0.a * (u_tev0_aval.y + u_tev0_aval.z);
 
 #ifdef ALPHA_TEST
