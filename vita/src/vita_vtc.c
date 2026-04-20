@@ -54,20 +54,24 @@ static VtcIndexEntry* g_vtc_index = NULL;
 static int g_vtc_count = 0;
 static int g_vtc_active = 0;
 
-// Loaded cache with vRAM budget + LRU eviction
-#define VTC_LOADED_CACHE_SIZE 4096
+// loaded cache with LRU eviction. HD textures go in main memory (not
+// CDRAM), and 32MB is a comfortable middle ground - rarely evicts in
+// normal play but leaves plenty of the 128MB heap for game state. the
+// cmd-queue race that eviction used to trigger is fixed by the deferred
+// delete holdoff in pc_gx_texture.c, so running tighter is safe.
+#define VTC_LOADED_CACHE_SIZE 8192
 #define VTC_LOADED_CACHE_MASK (VTC_LOADED_CACHE_SIZE - 1)
-#define VTC_VRAM_BUDGET (24 * 1024 * 1024)  // 24 MB max for HD textures
+#define VTC_VRAM_BUDGET (32 * 1024 * 1024)
 
 typedef struct {
     unsigned long long key;
     GLuint gl_tex;
     int tex_w, tex_h;
-    int vram_bytes;      // vRAM consumed by this texture
+    int vram_bytes;
     unsigned int last_used; // frame counter for LRU
     int occupied;
-    int tombstone;       // set when evicted. find() must keep probing past tombstones or entries later in the chain become unreachable, which leaks ref_count forever and corrupts HD texture lifetime across scene transitions.
-    int ref_count;       // number of tex_cache entries holding this texture. eviction skips ref_count > 0. decremented on tex_cache_invalidate walk.
+    int tombstone;       // set on evict; find() keeps probing past these so later chain entries stay reachable
+    int ref_count;       // number of tex_cache entries holding this texture; evict skips > 0, decremented on cache invalidate
 } VtcLoadedEntry;
 
 static VtcLoadedEntry g_vtc_loaded[VTC_LOADED_CACHE_SIZE];
@@ -293,6 +297,10 @@ static void vtc_loaded_evict_oldest(void) {
     VtcLoadedEntry* victim = &g_vtc_loaded[oldest_idx];
 
     extern void vita_defer_tex_delete(GLuint tex);
+    // strip the id out of any live binding before queuing the delete;
+    // pc_gx_texture.c holds the delete one extra frame so no in-flight cmd
+    // snapshot can still reference it when glGenTextures reuses the id
+    pc_gx_texture_invalidate_gl_tex(victim->gl_tex);
     vita_defer_tex_delete(victim->gl_tex);
     g_vtc_vram_used -= victim->vram_bytes;
     g_vtc_evictions++;

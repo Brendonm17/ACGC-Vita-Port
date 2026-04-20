@@ -26,14 +26,12 @@ typedef struct {
     int aspect_mode;      // 0=widescreen, 1=original 4:3
     char banner_name[32]; // banner filename in banners/, empty = none
 
-    // Vita performance
-    int multithread;      // 1=worker on core 1, 0=single-threaded
-
     // Vita texture pack
     char texture_pack[32]; // VTC filename (without .vtc) in texture_packs/, empty = none
 
     // Vita gameplay
-    int force_save;       // 0=off, 1=auto-save on suspend resume and quit
+    int auto_save;        // 0=off, 1=periodic auto-save while in town
+    int time_sync;        // 0=off, 1=resync in-game clock to RTC on resume from suspend
     int free_cam;         // 0=classic acre transitions, 1=seamless movement
 #endif
 } PCSettings;

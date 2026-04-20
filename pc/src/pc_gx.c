@@ -496,7 +496,9 @@ void pc_gx_save_world_state(void) {
 }
 
 // called from play_init. force latched clear to black and extend the
-// single-mode window to cover the new scene's iris-in.
+// single-mode window long enough for the worker to drain its old frames
+// without exposing pre-wipe content. only the first few frames after a
+// scene change can flash; the rest of the iris-in is safe in threaded mode.
 void pc_gx_notify_scene_change(void) {
     g_gx.latched_clear_color[0] = 0.0f;
     g_gx.latched_clear_color[1] = 0.0f;
@@ -508,7 +510,7 @@ void pc_gx_notify_scene_change(void) {
     g_gx.clear_color[3] = 1.0f;
 
     extern int vita_use_single_mode_frames;
-    int extend_to = 60;
+    int extend_to = 12;
     if (vita_use_single_mode_frames < extend_to)
         vita_use_single_mode_frames = extend_to;
 }

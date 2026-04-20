@@ -288,20 +288,27 @@ void OSInit(void) {
         arena_lo = arena_memory + 0x3100;
         arena_hi = arena_memory + PC_MAIN_MEMORY_SIZE;
     }
+    pc_os_time_resync();
+}
+
+// re-anchor osGetTime() to the host RTC. called from OSInit and again
+// from the vita resume-from-suspend path (time_sync setting). SDL's perf
+// counter doesn't advance during Vita sleep, so without this the in-game
+// clock drifts behind real time on every wake. idempotent.
+void pc_os_time_resync(void) {
     time_base_start = SDL_GetPerformanceCounter();
-    /* compute ticks from GC epoch (Jan 1, 2000) to now, with timezone */
     {
         time_t unix_now = time(NULL);
 
         struct tm* gmt = gmtime(&unix_now);
         if (!gmt) { gc_epoch_offset_ticks = 0; return; }
         struct tm utc_tm = *gmt;
-        utc_tm.tm_isdst = -1; /* let mktime determine DST */
+        utc_tm.tm_isdst = -1; // let mktime figure out DST
         time_t utc_as_local = mktime(&utc_tm);
         s64 tz_offset_secs = (s64)difftime(unix_now, utc_as_local);
 
         if (g_pc_time_override >= 0) {
-            /* --time H[:M[:S]] override */
+            // --time H[:M[:S]] override on the command line
             struct tm* lt = localtime(&unix_now);
             if (lt) {
                 unix_now += (g_pc_time_override - lt->tm_hour) * 3600;
@@ -326,21 +333,47 @@ void __OSCacheInit(void) {}
 
 u32 OSGetConsoleType(void) { return 0x10000004; /* OS_CONSOLE_DEVHW1 */ }
 
+// vita's stderr goes to the psp2link debug uart which isn't readable
+// anywhere. freopen on stderr+ux0 doesn't stick through newlib, so OSReport
+// output was silently dropping. route through our own FILE* opened once on
+// first use. fflush after each line so even a hard kill keeps the latest
+// output on disk.
+#ifdef TARGET_VITA
+static FILE* g_pc_log = NULL;
+static void pc_log_open(void) {
+    if (g_pc_log == NULL) {
+        g_pc_log = fopen("ux0:data/AnimalCrossing/error.log", "a");
+        if (g_pc_log) {
+            fprintf(g_pc_log, "\n--- launch %ld ---\n", (long)time(NULL));
+            fflush(g_pc_log);
+        }
+    }
+}
+#define PC_LOG_STREAM (g_pc_log ? g_pc_log : stderr)
+#else
+#define PC_LOG_STREAM stderr
+#endif
+
 void OSPanic(const char* file, int line, const char* msg, ...) {
     va_list args;
-    fprintf(stderr, "OSPanic at %s:%d: ", file, line);
+#ifdef TARGET_VITA
+    pc_log_open();
+#endif
+    fprintf(PC_LOG_STREAM, "OSPanic at %s:%d: ", file, line);
     va_start(args, msg);
-    vfprintf(stderr, msg, args);
+    vfprintf(PC_LOG_STREAM, msg, args);
     va_end(args);
-    fprintf(stderr, "\n");
+    fprintf(PC_LOG_STREAM, "\n");
+    fflush(PC_LOG_STREAM);
 }
 
 void OSReport(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
 #ifdef TARGET_VITA
-    vfprintf(stderr, fmt, args);
-    fflush(stderr);
+    pc_log_open();
+    vfprintf(PC_LOG_STREAM, fmt, args);
+    fflush(PC_LOG_STREAM);
 #else
     if (g_pc_verbose) {
         vprintf(fmt, args);
@@ -352,8 +385,9 @@ void OSReport(const char* fmt, ...) {
 
 void OSVReport(const char* fmt, va_list list) {
 #ifdef TARGET_VITA
-    vfprintf(stderr, fmt, list);
-    fflush(stderr);
+    pc_log_open();
+    vfprintf(PC_LOG_STREAM, fmt, list);
+    fflush(PC_LOG_STREAM);
 #else
     if (!g_pc_verbose) return;
     vprintf(fmt, list);

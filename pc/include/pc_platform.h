@@ -179,6 +179,10 @@ void pc_audio_mq_shutdown(void);
 void vita_init(void);
 #endif
 
+// re-anchor osGetTime to the host RTC. called from vita's resume path so
+// the day/night cycle stays in sync with real time across sleep.
+void pc_os_time_resync(void);
+
 #ifdef __cplusplus
 }
 #endif

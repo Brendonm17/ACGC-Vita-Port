@@ -75,8 +75,26 @@ Settings are stored at `ux0:data/AnimalCrossing/settings.ini`. Created with defa
 | `msaa` | 2 | 0, 2, 4 | Anti-aliasing |
 | `aspect_mode` | 0 | 0, 1 | 0 = 16:9 widescreen, 1 = 4:3 with pillarbox |
 | `banner` | *(empty)* | filename | PNG banner for 4:3 pillarbox bars |
-| `multithread` | 1 | 0, 1 | Worker thread for emu64 (keep on for performance) |
 | `texture_pack` | *(empty)* | name | HD texture pack name (without .vtc) |
+| `auto_save` | 0 | 0, 1 | Save town every ~1 min in the overworld, also on resume from sleep / app quit |
+| `time_sync` | 0 | 0, 1 | Re-anchor in-game clock to Vita RTC after sleep / home menu |
+
+#### Auto Save
+
+Saves only when you're walking around outside. Sub-scenes (buildings, dialogue, shops) are skipped so we never write a torn snapshot. Fires on:
+
+- PS button press (via `scePowerRegisterCallback`, the only pre-kill signal Vita gives user apps)
+- Resume from sleep / home menu
+- Every minute as a safety net
+- Clean app exits (`SDL_QUIT`, `SDL_APP_TERMINATING`)
+- Right before a Time Sync long-suspend reload
+
+#### Time Sync
+
+The Vita's monotonic clock doesn't advance during sleep, so the in-game day/night cycle drifts behind real time after every suspend. With Time Sync on:
+
+- Short suspend (under 30 min): clock catches up, world state untouched.
+- Long suspend (30+ min): app saves (if Auto Save is on) then reloads. AC's daily catch-up (NPC moveouts, mail, weeds, turnip prices, snowman) only runs at boot, so without the reload the world would silently skip those events. You land back at the title screen.
 
 ### Resolution
 

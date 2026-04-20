@@ -172,18 +172,24 @@ static void tex_hash_rebuild(void) {
 #ifdef TARGET_VITA
 extern volatile int vita_on_worker_thread;
 
-// deferred texture deletion. GXM crashes if a texture is deleted while
-// the GPU still references it, so we queue deletes and flush at the
-// start of the next frame after vglSwapBuffers. the queue is sized so
-// overflow should never happen in practice; on overflow we leak rather
-// than stall on glFinish.
+// two-frame holdoff on texture deletes. the cmd queue is double-buffered,
+// so worker frame N's snapshot gets replayed on main frame N+1. if we
+// glDeleteTextures at the end of frame N the gl id becomes reusable
+// immediately, and process_deferred_uploads on frame N+1 can grab it back
+// via glGenTextures for a different texture. when cmd[A] finally replays
+// it samples the wrong data (the letter-C-top DXT corruption bug).
+//
+// pending = this frame's new deletes, ready = last frame's pending. we
+// glDelete from ready in batches of 64 to avoid a stall from mass deletion.
 #define VITA_TEX_DELETE_MAX 16384
-static GLuint vita_tex_delete_queue[VITA_TEX_DELETE_MAX];
-static int vita_tex_delete_count = 0;
+static GLuint vita_tex_delete_pending[VITA_TEX_DELETE_MAX];
+static GLuint vita_tex_delete_ready[VITA_TEX_DELETE_MAX];
+static int vita_tex_delete_pending_count = 0;
+static int vita_tex_delete_ready_count = 0;
 
 void vita_defer_tex_delete(GLuint tex) {
     if (tex == 0) return;
-    if (vita_tex_delete_count >= VITA_TEX_DELETE_MAX) {
+    if (vita_tex_delete_pending_count >= VITA_TEX_DELETE_MAX) {
         // overflow: leak the texture rather than stall on glFinish
         static int _leaked = 0;
         if ((_leaked++ & 0xFF) == 0) {
@@ -191,19 +197,28 @@ void vita_defer_tex_delete(GLuint tex) {
         }
         return;
     }
-    vita_tex_delete_queue[vita_tex_delete_count++] = tex;
+    vita_tex_delete_pending[vita_tex_delete_pending_count++] = tex;
 }
 
 void pc_gx_texture_flush_deferred_deletes(void) {
-    if (vita_tex_delete_count > 0) {
-        // delete in batches of 64 to avoid GPU stall from mass deletion
-        int to_delete = vita_tex_delete_count < 64 ? vita_tex_delete_count : 64;
-        glDeleteTextures(to_delete, vita_tex_delete_queue);
-        if (to_delete < vita_tex_delete_count) {
-            memmove(vita_tex_delete_queue, &vita_tex_delete_queue[to_delete],
-                    (vita_tex_delete_count - to_delete) * sizeof(GLuint));
+    // drain up to 64 of last frame's pending deletes
+    if (vita_tex_delete_ready_count > 0) {
+        int to_delete = vita_tex_delete_ready_count < 64 ? vita_tex_delete_ready_count : 64;
+        glDeleteTextures(to_delete, vita_tex_delete_ready);
+        if (to_delete < vita_tex_delete_ready_count) {
+            memmove(vita_tex_delete_ready, &vita_tex_delete_ready[to_delete],
+                    (vita_tex_delete_ready_count - to_delete) * sizeof(GLuint));
         }
-        vita_tex_delete_count -= to_delete;
+        vita_tex_delete_ready_count -= to_delete;
+    }
+    // roll this frame's pending into next frame's ready queue
+    if (vita_tex_delete_pending_count > 0) {
+        int room = VITA_TEX_DELETE_MAX - vita_tex_delete_ready_count;
+        int move = vita_tex_delete_pending_count < room ? vita_tex_delete_pending_count : room;
+        memcpy(&vita_tex_delete_ready[vita_tex_delete_ready_count],
+               vita_tex_delete_pending, move * sizeof(GLuint));
+        vita_tex_delete_ready_count += move;
+        vita_tex_delete_pending_count = 0;
     }
 }
 #else
@@ -378,12 +393,16 @@ int vita_deferred_uploaded_count = 0;
 // legacy slot-based array (kept for compatibility)
 GLuint vita_just_uploaded_tex[8] = {0};
 
-// Invalidate tex_cache entries referencing a specific GL texture.
-// no longer called: VTC loaded_cache marks claimed entries and skips
-// eviction for them, so tex_cache references stay valid. kept as a stub
-// in case something else ends up calling it.
+// scrub a gl id out of the per-unit binding cache before deleting it.
+// without this, after the deferred-delete flush glGenTextures can hand the
+// same id back for a different texture and draws still holding the old id
+// bind the wrong data (shows as pink/cyan DXT block corruption after
+// long sessions with HD upgrades + LRU evictions).
 void pc_gx_texture_invalidate_gl_tex(GLuint tex) {
-    (void)tex;
+    if (tex == 0) return;
+    for (int s = 0; s < 8; s++) {
+        if (g_gx.gl_textures[s] == tex) g_gx.gl_textures[s] = 0;
+    }
 }
 
 // Per-frame timing for stutter diagnosis
@@ -508,6 +527,7 @@ void pc_gx_texture_process_deferred_uploads(void) {
             // find and release the reference when the entry is wiped.
             vita_vtc_loaded_cache_acquire_key(tex_cache[ci].vtc_cache_key);
 
+            pc_gx_texture_invalidate_gl_tex(tex_cache[ci].gl_tex);
             vita_defer_tex_delete(tex_cache[ci].gl_tex);
             tex_cache[ci].gl_tex = hd_tex;
             tex_cache[ci].external = 1;
@@ -659,6 +679,7 @@ void pc_gx_texture_cache_invalidate(void) {
     tex_cache_lock();
     for (int i = 0; i < tex_cache_count; i++) {
         if (tex_cache[i].gl_tex && !tex_cache[i].external) {
+            pc_gx_texture_invalidate_gl_tex(tex_cache[i].gl_tex);
             PC_DELETE_TEXTURE(tex_cache[i].gl_tex);
         }
 #ifdef TARGET_VITA
@@ -668,10 +689,16 @@ void pc_gx_texture_cache_invalidate(void) {
         // "zombie" refs that prevent LRU eviction, and the 24 MB HD
         // texture budget fills up over enough scene transitions.
         if (tex_cache[i].external && tex_cache[i].vtc_cache_key != 0) {
+            // scrub so a later LRU evict of this HD tex (now ref_count=0)
+            // doesn't leave a stale id binding behind
+            pc_gx_texture_invalidate_gl_tex(tex_cache[i].gl_tex);
             vita_vtc_loaded_cache_release_key(tex_cache[i].vtc_cache_key);
         }
 #endif
     }
+    // blanket-clear bindings. next GXLoadTexObj per unit repopulates from
+    // the fresh tex_cache
+    for (int s = 0; s < 8; s++) g_gx.gl_textures[s] = 0;
     tex_cache_count = 0;
 #ifdef TARGET_VITA
     tex_hash_clear();

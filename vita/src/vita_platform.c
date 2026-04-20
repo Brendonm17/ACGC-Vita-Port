@@ -15,6 +15,8 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <vitaGL.h>
+#include <time.h>
+#include <dolphin/os.h>
 
 // vita SDK "directory already exists"
 #define VITA_EEXIST ((int)0x80010011)
@@ -51,6 +53,71 @@ int g_pc_sec_override = -1;
 static jmp_buf* pc_active_jmpbuf = NULL;
 static volatile unsigned int pc_last_crash_addr = 0;
 static volatile unsigned int pc_last_crash_data_addr = 0;
+
+// scePower callback for save-on-suspend. vita's SDL lifecycle events are
+// unreliable; the only pre-kill signal that actually fires is the power
+// callback. same trick rinnegatamante's ports use.
+//
+// the callback is delivered to a dedicated thread parked in
+// sceKernelDelayThreadCB (the one wait state that lets SCE callbacks
+// dispatch). the save runs synchronously inside the callback; the kernel
+// holds the suspend off until we return.
+static SceUID s_power_cb_uid    = -1;
+static SceUID s_power_cb_thread = -1;
+static volatile int s_power_cb_running = 1;
+
+// power events that mean "save now". docs say APP_SUSPEND is the right bit
+// but on real hardware it doesn't fire for the PS-button close path, so
+// we also watch BUTTON_PS_PRESS (verified firing at 0x20000080 when PS
+// opens LiveArea) and the sleep/power button bits. PS_PRESS is documented
+// as kernel-only but vita delivers it to user callbacks anyway.
+#define PC_POWER_SAVE_MASK ( \
+    SCE_POWER_CB_APP_SUSPEND        | \
+    SCE_POWER_CB_BUTTON_PS_PRESS    | \
+    SCE_POWER_CB_BUTTON_POWER_PRESS | \
+    SCE_POWER_CB_BUTTON_POWER_HOLD)
+
+static int vita_power_callback(int notifyId, int notifyCount, int powerInfo, void *userData) {
+    (void)notifyId; (void)notifyCount; (void)userData;
+    if (powerInfo & PC_POWER_SAVE_MASK) {
+        extern int pc_auto_save_force(void);
+        if (g_pc_settings.auto_save) {
+            pc_auto_save_force();
+        }
+    }
+    return 0;
+}
+
+static int vita_power_cb_thread(SceSize args, void *argp) {
+    (void)args; (void)argp;
+    s_power_cb_uid = sceKernelCreateCallback("ac_pwr_cb", 0, vita_power_callback, NULL);
+    if (s_power_cb_uid < 0) return 0;
+    scePowerRegisterCallback(s_power_cb_uid);
+    // park here so SCE callbacks dispatch on us
+    while (s_power_cb_running) {
+        sceKernelDelayThreadCB(10 * 1000 * 1000);
+    }
+    if (s_power_cb_uid >= 0) {
+        scePowerUnregisterCallback(s_power_cb_uid);
+        sceKernelDeleteCallback(s_power_cb_uid);
+        s_power_cb_uid = -1;
+    }
+    return 0;
+}
+
+static void vita_power_callback_init(void) {
+    s_power_cb_thread = sceKernelCreateThread(
+        "ac_pwr_cb_thr",
+        vita_power_cb_thread,
+        0x10000100,                 // just below main
+        16 * 1024,                  // small stack, thread just sleeps
+        0,
+        SCE_KERNEL_CPU_MASK_USER_2, // keep off the render core
+        NULL);
+    if (s_power_cb_thread >= 0) {
+        sceKernelStartThread(s_power_cb_thread, 0, NULL);
+    }
+}
 
 static void vita_signal_handler(int sig) {
     (void)sig;
@@ -132,9 +199,15 @@ void vita_init(void) {
             printf("[VITA] WARNING: texture_packs dir failed: 0x%08X\n", mk_ret6);
     }
 
+    // truncate each launch; OSReport in pc_os.c opens the same file in
+    // append mode so everything from this session accumulates cleanly.
     if (!freopen("ux0:data/AnimalCrossing/error.log", "w", stderr))
         stderr = stdout;  // fallback to psp2link
     setvbuf(stderr, NULL, _IONBF, 0);
+
+    // after stderr is redirected so any failures inside the callback init
+    // land in error.log
+    vita_power_callback_init();
 
     printf("[VITA] Main thread stack: %u KB\n", sceUserMainThreadStackSize / 1024);
 }
@@ -230,10 +303,6 @@ static int emu64_worker_func(SceSize args, void* argp) {
 }
 
 void vita_emu64_worker_init(void) {
-    if (!g_pc_settings.multithread) {
-        printf("[VITA] Multithreading disabled via settings.\n");
-        return;
-    }
     emu64_work_ready_sema = sceKernelCreateSema("emu64_ready", 0, 0, 1, NULL);
     emu64_work_done_sema = sceKernelCreateSema("emu64_done", 0, 0, 1, NULL);
 
@@ -486,38 +555,71 @@ void pc_platform_swap_buffers(void) {
 #endif
 }
 
-static void vita_force_save(void) {
-    extern int pc_save_loaded;
-    if (pc_save_loaded) {
-        extern int mCD_SaveHome_bg(int, int*);
-        mCD_SaveHome_bg(0, NULL);
-    }
-}
+// a wall-clock gap between polls this big can only be a sleep/resume.
+// normal frames are 16-33ms, we look at time(NULL) from the previous
+// poll and note any multi-second jump.
+#define PC_SUSPEND_DETECT_SEC 2
+
+// suspends this long likely crossed a day boundary; save and reload so
+// AC's at-boot daily catch-up (NPC moveouts, mail, weeds, turnip prices,
+// snowman, etc.) runs against the new date. shorter wakes just re-anchor
+// the clock in place.
+#define PC_LONG_SUSPEND_SEC (30 * 60)
+
+static time_t s_pc_last_alive = 0;
 
 int pc_platform_poll_events(void) {
-    // check for resume from suspend
-    if (g_pc_settings.force_save) {
-        SceAppMgrSystemEvent sys_event;
-        while (sceAppMgrReceiveSystemEvent(&sys_event) >= 0) {
-            if (sys_event.systemEvent == SCE_APPMGR_SYSTEMEVENT_ON_RESUME) {
-                vita_force_save();
+    extern void pc_auto_save_tick(void);
+    extern int  pc_auto_save_force(void);
+
+    time_t poll_now = time(NULL);
+    time_t elapsed = (s_pc_last_alive > 0 && poll_now > s_pc_last_alive)
+                     ? (poll_now - s_pc_last_alive) : 0;
+    int just_resumed = (s_pc_last_alive > 0) && (elapsed >= PC_SUSPEND_DETECT_SEC);
+
+    if (just_resumed) {
+        OSReport("[PC] Resumed from suspend after %ld s\n", (long)elapsed);
+
+        // memory is preserved across vita sleep, so writing on resume
+        // captures the same state a pre-suspend save would have
+        if (g_pc_settings.auto_save) pc_auto_save_force();
+
+        if (g_pc_settings.time_sync) {
+            if (elapsed >= PC_LONG_SUSPEND_SEC) {
+                OSReport("[PC] Long suspend, reloading app\n");
                 sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
+                // not reached
+            } else {
+                pc_os_time_resync();
             }
         }
     }
 
+    // safety-net periodic save. no-op when feature off or not yet due.
+    pc_auto_save_tick();
+
+    // these SDL lifecycle events rarely fire on vita (the power callback
+    // above is the real hook), but wire them up anyway as belt-and-braces.
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
+            case SDL_APP_WILLENTERBACKGROUND:
+                if (g_pc_settings.auto_save) pc_auto_save_force();
+                break;
+
+            case SDL_APP_TERMINATING:
+                if (g_pc_settings.auto_save) pc_auto_save_force();
+                g_pc_running = 0;
+                return 0;
+
             case SDL_QUIT:
-                if (g_pc_settings.force_save) {
-                    vita_force_save();
-                }
+                if (g_pc_settings.auto_save) pc_auto_save_force();
                 g_pc_running = 0;
                 return 0;
         }
     }
 
+    s_pc_last_alive = poll_now;
     return 1;
 }
 

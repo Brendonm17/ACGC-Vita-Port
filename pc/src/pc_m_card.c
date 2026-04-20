@@ -20,7 +20,10 @@
 #include "m_event.h"
 #include "m_time.h"
 #include "m_scene.h"
+#include "m_scene_table.h"
 #include "m_name_table.h"
+#include "m_actor.h"
+#include "m_notice.h"
 #include "sys_math3d.h"
 #include "sys_math.h"
 #include "zurumode.h"
@@ -886,6 +889,95 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
     }
 
     return mCD_TRANS_ERR_NONE;
+}
+
+// auto-save driven from the per-frame poll. only fires when the player
+// is outdoors in the town overworld (SCENE_FG), since sub-scenes leave
+// Save_t in a transient state the writer can't roundtrip. calls the same
+// mCD_SaveHome_bg path the gyroid uses so the disk format matches a
+// normal save.
+//
+// the actual save-on-quit hook is in vita_platform.c's scePower callback
+// (PS button press). this periodic tick is a safety net for crashes and
+// hard reboots where no power event fires.
+#define PC_AUTO_SAVE_INTERVAL_SEC 60
+#define PC_AUTO_SAVE_RETRY_SEC    10
+
+static time_t s_pc_auto_save_last = 0;
+
+// mirror the gyroid's pre-save prep. buildings / items / FG actors track
+// their state in actor structs while the game runs; Actor_info_save_actor
+// walks the actor list and calls each sv_proc to flush that state back
+// into Save_t. skipping this writes a stale combi_table + fg array, which
+// looks like vanished buildings on reload. mNtc_set_auto_nwrite_data
+// flushes the noticeboard auto-write buffer same as the gyroid talk.
+static void pc_auto_save_flush_world_state(void) {
+    GAME_PLAY* play = (GAME_PLAY*)gamePT;
+    if (play == NULL) return;
+    Actor_info_save_actor(play);
+    mNtc_set_auto_nwrite_data();
+}
+
+void pc_auto_save_tick(void) {
+    time_t now;
+
+    if (!g_pc_settings.auto_save) {
+        // feature off, reset timer so a later toggle-on starts fresh
+        s_pc_auto_save_last = 0;
+        return;
+    }
+    if (!pc_save_loaded || !pc_save_ready) return;
+    if (Now_Private == NULL) return;
+    if (Save_Get(scene_no) != SCENE_FG) return;
+
+    now = time(NULL);
+    if (s_pc_auto_save_last == 0) {
+        s_pc_auto_save_last = now;
+        return;
+    }
+    if ((now - s_pc_auto_save_last) < PC_AUTO_SAVE_INTERVAL_SEC) return;
+
+    {
+        int chan = 0;
+        int result;
+        pc_auto_save_flush_world_state();
+        result = mCD_SaveHome_bg(0, &chan);
+        if (result == mCD_TRANS_ERR_NONE) {
+            OSReport("[PC] Auto-save complete (chan=%d)\n", chan);
+            s_pc_auto_save_last = now;
+        } else {
+            OSReport("[PC] Auto-save failed: %d (retry in %ds)\n",
+                     result, PC_AUTO_SAVE_RETRY_SEC);
+            s_pc_auto_save_last = now - PC_AUTO_SAVE_INTERVAL_SEC + PC_AUTO_SAVE_RETRY_SEC;
+        }
+    }
+}
+
+// force a save now, ignoring the periodic interval. same safety checks
+// as the tick. called from the power callback (PS button / sleep) and on
+// long-suspend resume. returns 1 if a save was written, 0 if skipped.
+int pc_auto_save_force(void) {
+    int chan = 0;
+    int result;
+
+    if (!g_pc_settings.auto_save) return 0;
+    if (!pc_save_loaded || !pc_save_ready) return 0;
+    if (Now_Private == NULL) return 0;
+    if (Save_Get(scene_no) != SCENE_FG) {
+        OSReport("[PC] Forced save skipped: not in town overworld (scene=%d)\n",
+                 (int)Save_Get(scene_no));
+        return 0;
+    }
+
+    pc_auto_save_flush_world_state();
+    result = mCD_SaveHome_bg(0, &chan);
+    if (result == mCD_TRANS_ERR_NONE) {
+        OSReport("[PC] Forced save complete (chan=%d)\n", chan);
+        s_pc_auto_save_last = time(NULL);
+        return 1;
+    }
+    OSReport("[PC] Forced save failed: %d\n", result);
+    return 0;
 }
 
 /* --- Travel / Station functions --- */

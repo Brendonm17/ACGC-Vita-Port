@@ -378,7 +378,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
 
 #ifdef TARGET_VITA
     // order: Resolution, Aspect, [Banner if 4:3], MSAA, Tex Pack,
-    //        NES Aspect, Disable Resetti, Force Save, Free Cam
+    //        NES Aspect, Disable Resetti, Auto Save, Time Sync, Free Cam
     {
       int has_banner = g_pc_settings.aspect_mode;
       int banner_idx = 2;
@@ -386,8 +386,9 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       int texpack_idx  = msaa_idx + 1;
       int nesasp_idx   = texpack_idx + 1;
       int resetti_idx  = nesasp_idx + 1;
-      int fsave_idx    = resetti_idx + 1;
-      int freecam_idx  = fsave_idx + 1;
+      int autosave_idx = resetti_idx + 1;
+      int timesync_idx = autosave_idx + 1;
+      int freecam_idx  = timesync_idx + 1;
       int max_sel = freecam_idx;
       if (actor->pc_options_sel > max_sel) actor->pc_options_sel = max_sel;
 
@@ -458,8 +459,10 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
             g_pc_settings.nes_aspect = !g_pc_settings.nes_aspect;
           } else if (s == resetti_idx) { // Disable Resetti
             g_pc_settings.disable_resetti = !g_pc_settings.disable_resetti;
-          } else if (s == fsave_idx) { // Force Save
-            g_pc_settings.force_save = !g_pc_settings.force_save;
+          } else if (s == autosave_idx) { // Auto Save
+            g_pc_settings.auto_save = !g_pc_settings.auto_save;
+          } else if (s == timesync_idx) { // Time Sync
+            g_pc_settings.time_sync = !g_pc_settings.time_sync;
           } else if (s == freecam_idx) { // Free Cam
             g_pc_settings.free_cam = !g_pc_settings.free_cam;
           }
@@ -1073,10 +1076,15 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     { static u8 lbl[] = { 'N', 'o', ' ', 'R', 'e', 's', 'e', 't', 't', 'i' };
       DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.disable_resetti != B->disable_resetti); }
 
-    // Force Save
-    len = sprintf(buf, "< %s >", g_pc_settings.force_save ? "On" : "Off");
-    { static u8 lbl[] = { 'F', 'o', 'r', 'c', 'e', ' ', 'S', 'a', 'v', 'e' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.force_save != B->force_save); }
+    // Auto Save
+    len = sprintf(buf, "< %s >", g_pc_settings.auto_save ? "On" : "Off");
+    { static u8 lbl[] = { 'A', 'u', 't', 'o', ' ', 'S', 'a', 'v', 'e' };
+      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.auto_save != B->auto_save); }
+
+    // Time Sync
+    len = sprintf(buf, "< %s >", g_pc_settings.time_sync ? "On" : "Off");
+    { static u8 lbl[] = { 'T', 'i', 'm', 'e', ' ', 'S', 'y', 'n', 'c' };
+      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.time_sync != B->time_sync); }
 
     // Free Cam
     len = sprintf(buf, "< %s >", g_pc_settings.free_cam ? "On" : "Off");

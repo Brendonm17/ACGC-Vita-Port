@@ -21,9 +21,9 @@ PCSettings g_pc_settings = {
     .render_h      = 544,
     .aspect_mode   = 0,
     .banner_name   = "",
-    .multithread   = 1,
     .texture_pack  = "",
-    .force_save    = 0,
+    .auto_save     = 0,
+    .time_sync     = 0,
     .free_cam      = 0,
 #endif
 };
@@ -51,10 +51,6 @@ static const char* DEFAULT_SETTINGS =
     "# banner: filename in ux0:data/AnimalCrossing/banners/ (empty = none)\n"
     "banner = \n"
     "\n"
-    "[Performance]\n"
-    "# multithread: 1 = emu64 on core 1 for ~2x performance, 0 = single-threaded\n"
-    "multithread = 1\n"
-    "\n"
     "[Textures]\n"
     "# preload_textures: 0 = off, 1 = load on demand, 2 = preload + cache (recommended)\n"
     "preload_textures = 0\n"
@@ -64,8 +60,11 @@ static const char* DEFAULT_SETTINGS =
     "texture_pack = \n"
     "\n"
     "[Gameplay]\n"
-    "# force_save: 0 = off, 1 = auto-save on suspend resume and quit\n"
-    "force_save = 0\n"
+    "# auto_save: 0 = off, 1 = save town every few minutes while walking around\n"
+    "auto_save = 0\n"
+    "\n"
+    "# time_sync: 0 = off, 1 = re-anchor in-game clock to Vita RTC after sleep/home menu\n"
+    "time_sync = 0\n"
     "\n"
     "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n"
     "free_cam = 0\n";
@@ -156,13 +155,13 @@ static void apply_setting(const char* key, const char* value) {
     } else if (strcmp(key, "banner") == 0) {
         strncpy(g_pc_settings.banner_name, value, sizeof(g_pc_settings.banner_name) - 1);
         g_pc_settings.banner_name[sizeof(g_pc_settings.banner_name) - 1] = '\0';
-    } else if (strcmp(key, "multithread") == 0) {
-        g_pc_settings.multithread = (val != 0) ? 1 : 0;
     } else if (strcmp(key, "texture_pack") == 0) {
         strncpy(g_pc_settings.texture_pack, value, sizeof(g_pc_settings.texture_pack) - 1);
         g_pc_settings.texture_pack[sizeof(g_pc_settings.texture_pack) - 1] = '\0';
-    } else if (strcmp(key, "force_save") == 0) {
-        g_pc_settings.force_save = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "auto_save") == 0) {
+        g_pc_settings.auto_save = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "time_sync") == 0) {
+        g_pc_settings.time_sync = (val != 0) ? 1 : 0;
     } else if (strcmp(key, "free_cam") == 0) {
         g_pc_settings.free_cam = (val != 0) ? 1 : 0;
     }
@@ -194,15 +193,14 @@ void pc_settings_save(void) {
     fprintf(f, "aspect_mode = %d\n\n", g_pc_settings.aspect_mode);
     fprintf(f, "# banner: filename in ux0:data/AnimalCrossing/banners/ (empty = none)\n");
     fprintf(f, "banner = %s\n\n", g_pc_settings.banner_name);
-    fprintf(f, "[Performance]\n");
-    fprintf(f, "# multithread: 1 = emu64 on core 1 for ~2x performance, 0 = single-threaded\n");
-    fprintf(f, "multithread = %d\n\n", g_pc_settings.multithread);
     fprintf(f, "[Textures]\n");
     fprintf(f, "# texture_pack: name of .vtc file in texture_packs/ (without .vtc), empty = none\n");
     fprintf(f, "texture_pack = %s\n\n", g_pc_settings.texture_pack);
     fprintf(f, "[Gameplay]\n");
-    fprintf(f, "# force_save: 0 = off, 1 = auto-save on suspend resume and quit\n");
-    fprintf(f, "force_save = %d\n\n", g_pc_settings.force_save);
+    fprintf(f, "# auto_save: 0 = off, 1 = save town every few minutes while walking around\n");
+    fprintf(f, "auto_save = %d\n\n", g_pc_settings.auto_save);
+    fprintf(f, "# time_sync: 0 = off, 1 = re-anchor in-game clock to Vita RTC after sleep/home menu\n");
+    fprintf(f, "time_sync = %d\n\n", g_pc_settings.time_sync);
     fprintf(f, "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n");
     fprintf(f, "free_cam = %d\n", g_pc_settings.free_cam);
 #else
@@ -295,9 +293,9 @@ void pc_settings_load(void) {
     fclose(f);
 
 #ifdef TARGET_VITA
-    printf("[Settings] Loaded %s: render=%dx%d msaa=%d multithread=%d texpack=%s\n",
+    printf("[Settings] Loaded %s: render=%dx%d msaa=%d texpack=%s\n",
            SETTINGS_FILE, g_pc_settings.render_w, g_pc_settings.render_h,
-           g_pc_settings.msaa, g_pc_settings.multithread,
+           g_pc_settings.msaa,
            g_pc_settings.texture_pack[0] ? g_pc_settings.texture_pack : "(none)");
 #else
     printf("[Settings] Loaded %s: %dx%d fullscreen=%d vsync=%d msaa=%d preload_textures=%d\n",
