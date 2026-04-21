@@ -1030,6 +1030,9 @@ void pc_auto_save_tick(void) {
     if (Now_Private == NULL) return;
     if (Save_Get(scene_no) != SCENE_FG) return;
     if (pc_auto_save_player_busy()) return;
+    // intro_demo restarts from train arrival on any reload while
+    // FIRSTINTRO is set and last_field_id != PLAYER0_ROOM
+    if (mEv_CheckFirstIntro()) return;
 
     now = time(NULL);
     if (s_pc_auto_save_last == 0) {
@@ -1075,6 +1078,10 @@ int pc_auto_save_force(void) {
         // the game is handling its own save (porter, gyroid, etc) so
         // let it finish, we'll catch the next suspend or tick
         OSReport("[PC] Forced save skipped: player busy in dialogue/demo\n");
+        return 0;
+    }
+    if (mEv_CheckFirstIntro()) {
+        OSReport("[PC] Forced save skipped: onboarding intro active\n");
         return 0;
     }
 

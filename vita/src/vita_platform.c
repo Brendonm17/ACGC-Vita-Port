@@ -585,11 +585,17 @@ int pc_platform_poll_events(void) {
         if (g_pc_settings.auto_save) pc_auto_save_force();
 
         if (g_pc_settings.time_sync) {
-            if (elapsed >= PC_LONG_SUSPEND_SEC) {
+            // reload during intro respawns intro_demo into train arrival
+            // and softlocks, so just resync the clock in place
+            extern int mEv_CheckFirstIntro(void);
+            if (elapsed >= PC_LONG_SUSPEND_SEC && !mEv_CheckFirstIntro()) {
                 OSReport("[PC] Long suspend, reloading app\n");
                 sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
                 // not reached
             } else {
+                if (elapsed >= PC_LONG_SUSPEND_SEC) {
+                    OSReport("[PC] Long suspend during intro, skipping reload\n");
+                }
                 pc_os_time_resync();
             }
         }

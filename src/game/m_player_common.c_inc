@@ -2569,7 +2569,8 @@ static void* Player_actor_get_door_label(GAME* game) {
 static void Player_actor_BGcheck_common_type1(ACTOR* actorx) {
     mCoBG_BgCheckControll(NULL, actorx, 18.0f, 0.0f, TRUE, FALSE, 1);
 #ifdef TARGET_VITA
-    if (!g_pc_settings.free_cam)
+    // intro pins the player via the acre wall, defer free_cam bypass
+    if (!g_pc_settings.free_cam || mPlib_Get_unable_wade())
 #endif
     Player_actor_CorrectWadeBlockBorder(actorx);
 }
@@ -3661,7 +3662,8 @@ static void Player_actor_Init_ScrollDemo_forWade_snowball(ACTOR* actorx) {
 
 static int Player_actor_Set_ScrollDemo_forWade(ACTOR* actorx, GAME* game, int npc_check_flag) {
 #ifdef TARGET_VITA
-    if (g_pc_settings.free_cam) {
+    // defer to unable_wade so intro blocker can arm excute_cancel_wade
+    if (g_pc_settings.free_cam && !mPlib_Get_unable_wade()) {
         // free cam: skip scroll demo, fire wade side effects directly
         // on block crossing so npcs still spawn via the normal pipeline
         static int s_last_bx = -1, s_last_bz = -1;
@@ -3730,7 +3732,7 @@ static int Player_actor_Set_ScrollDemo_forDemo_geton_boat_wade(ACTOR* actorx, f3
 
 static int Player_actor_Set_ScrollDemo_forWade_snowball(ACTOR* actorx, int request_dir, const xyz_t* snowball_dist) {
 #ifdef TARGET_VITA
-    if (g_pc_settings.free_cam) return FALSE;
+    if (g_pc_settings.free_cam && !mPlib_Get_unable_wade()) return FALSE;
 #endif
     PLAYER_ACTOR* player = (PLAYER_ACTOR*)actorx;
 
