@@ -186,8 +186,10 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
   mActor_name_t clear_item;
   int ut_z;
   int ut_x;
-  // 2-block keep-alive in free_cam means actors from this block may
-  // still be live. dedup props and structs or we spawn duplicates.
+  // BG actors (gyroid, houses) aren't cleared by aBC_deleteActor_part
+  // ITEM/NPC sweeps, so a re-entered acre can still have them live.
+  // dedup props and structs unconditionally; quota retries and any
+  // spawn path that reruns against the same block won't duplicate.
   const s8 cur_bx = play->block_table.block_x;
   const s8 cur_bz = play->block_table.block_z;
 
@@ -211,7 +213,7 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
               clear_item = RSV_NO;
             }
             idx = *item_p - ACTOR_PROP_START;
-            if (g_pc_settings.free_cam && aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
+            if (aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
               break;
             }
             setup_actor_flag |= aBC_setupOtherActor(play, *item_p, props_profile_table[idx], base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z], clear_item);
@@ -220,7 +222,7 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
 
         case NAME_TYPE_STRUCT:
           if ((mask & aBC_MASK_STRUCTS) && Common_Get(clip).structure_clip != NULL) {
-            if (g_pc_settings.free_cam && aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
+            if (aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
               break;
             }
             STRUCTURE_ACTOR* actor = (*Common_Get(clip).structure_clip->setup_actor_proc)((GAME*)play, *item_p, -1, base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
