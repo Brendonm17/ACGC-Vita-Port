@@ -65,7 +65,13 @@ fi
 # VitaGL's texture loop so tex->last_frame never gets updated, and the
 # default free path would take the immediate-free branch while the GPU
 # may still be sampling. SPEEDHACK forces markAsDirty (4-frame deferred).
-VITAGL_FLAGS="BUFFERS_SPEEDHACK=1 DRAW_SPEEDHACK=1 SAMPLERS_SPEEDHACK=1 PRIMITIVES_SPEEDHACK=1 TEXTURES_SPEEDHACK=1 USE_SCRATCH_MEMORY=1 HAVE_SHADER_CACHE=1 NO_DEBUG=1 DRAW_PHASE_PROFILING=1 DRAW_STATE_CACHE=1"
+# USE_SCRATCH_MEMORY removed: routes DYNAMIC/STREAM VBOs through
+# vgl_reserve_data_pool (the 256KB circular data pool from vglInitExtended).
+# when the pool wraps before the GPU finishes reading last frame's data,
+# old verts/textures get overwritten - corruption shows up as garbled
+# framebuffer tiles on title screens / scene loads. our fork has no
+# failsafe option, so removing the flag is the safe call.
+VITAGL_FLAGS="BUFFERS_SPEEDHACK=1 DRAW_SPEEDHACK=1 SAMPLERS_SPEEDHACK=1 PRIMITIVES_SPEEDHACK=1 TEXTURES_SPEEDHACK=1 HAVE_SHADER_CACHE=1 NO_DEBUG=1 DRAW_STATE_CACHE=1"
 
 echo "--- Building vitaGL ($VITAGL_FLAGS) ---"
 make clean 2>/dev/null || true
