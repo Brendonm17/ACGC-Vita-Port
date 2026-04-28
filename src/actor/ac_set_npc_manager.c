@@ -7,26 +7,6 @@
 #include "libultra/libultra.h"
 #include "m_random_field.h"
 #include "m_event_map_npc.h"
-#ifdef TARGET_PC
-#include "pc_settings.h"
-#endif
-
-#ifdef TARGET_PC
-// save-state repair: if schedule says home but is_home is stuck FALSE,
-// fix it so villagers don't sleep outside or skip emerge animations
-static void Vita_sync_is_home_with_schedule(Animal_c* animal_p, mNpc_NpcList_c* list_p, mNPS_schedule_c* schedule_p) {
-    int i;
-    for (i = 0; i < ANIMAL_NUM_MAX; i++) {
-        if (animal_p[i].home_info.block_x != 0xFF &&
-            !animal_p[i].is_home &&
-            (schedule_p[i].current_type == mNPS_SCHED_IN_HOUSE ||
-             schedule_p[i].current_type == mNPS_SCHED_SLEEP)) {
-            animal_p[i].is_home = TRUE;
-            list_p[i].position = list_p[i].house_position;
-        }
-    }
-}
-#endif
 
 static void aSNMgr_actor_ct(ACTOR* actorx, GAME* game);
 static void aSNMgr_actor_dt(ACTOR* actorx, GAME* game);
@@ -99,12 +79,6 @@ static void aSNMgr_actor_ct(ACTOR* actorx, GAME* game) {
         aSNMgr_move_event_set(manager);
         aSNMgr_force_go_home_event_start(manager);
     }
-
-#ifdef TARGET_PC
-    // sync is_home with schedule at scene load
-    Vita_sync_is_home_with_schedule(manager->npc_info.animal_p, manager->npc_info.list_p,
-                                     manager->npc_info.schedule_p);
-#endif
 
     aSNMgr_setup_set_proc(manager, aSNMgr_SET_MODE_REGULAR);
 }
@@ -1281,13 +1255,6 @@ static void aSNMgr_actor_move(ACTOR* actorx, GAME* game) {
 
     switch (mFI_GetPlayerWade()) {
         case mFI_WADE_START:
-#ifdef TARGET_PC
-            // free cam: sync is_home before villagers spawn in new acre
-            if (g_pc_settings.free_cam) {
-                Vita_sync_is_home_with_schedule(manager->npc_info.animal_p, manager->npc_info.list_p,
-                                                 manager->npc_info.schedule_p);
-            }
-#endif
             aSNMgr_clear_make_npc(manager->npc_info.make, aSNMgr_EVENT_NORMAL_NPC_NUM);
             aSNMgr_renewal_player_next_block(manager);
             aSNMgr_renewal_set_scope(manager);

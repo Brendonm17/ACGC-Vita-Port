@@ -24,13 +24,7 @@ static void aNPC_sleep_schedule_main_proc(NPC_ACTOR* nactorx, GAME_PLAY* play) {
 }
 
 static void aNPC_sleep_schedule_init_proc(NPC_ACTOR* nactorx, GAME_PLAY* play) {
-#ifdef TARGET_PC
-    // show villager sleeping instead of hiding them at night
-    aNPC_set_hide_flg(nactorx, FALSE);
-    aNPC_set_feel_info(nactorx, mNpc_FEEL_SLEEPY, -1);
-#else
     aNPC_set_hide_flg(nactorx, TRUE);
-#endif
     aNPC_think_init_proc(nactorx, play, aNPC_THINK_WAIT);
 }
 
@@ -118,38 +112,6 @@ static void aNPC_schedule_proc(NPC_ACTOR* nactorx, GAME_PLAY* play) {
     int type = nactorx->schedule.type;
 
     if (type != aNPC_SCHEDULE_NONE) {
-#ifdef TARGET_PC
-        // npc2 interior: keep schedule and is_home in sync per frame
-        if (nactorx->npc_info.schedule != NULL) {
-            u8 live_type = nactorx->npc_info.schedule->current_type;
-
-            if (live_type == mNPS_SCHED_IN_HOUSE || live_type == mNPS_SCHED_SLEEP) {
-                Animal_c* animal = aNPC_GET_ANM(nactorx);
-                if (animal != NULL && !animal->is_home) {
-                    animal->is_home = TRUE;
-                }
-                if (nactorx->schedule.type != mNPS_SCHED_IN_HOUSE) {
-                    aNPC_chg_schedule(nactorx, play, mNPS_SCHED_IN_HOUSE);
-                    type = nactorx->schedule.type;
-                }
-                // re-apply sleepy feel after talks end so villager
-                // falls back asleep
-                if (live_type == mNPS_SCHED_SLEEP &&
-                    nactorx->condition_info.talk_condition == aNPC_TALK_TYPE_NONE &&
-                    animal != NULL && animal->mood != mNpc_FEEL_SLEEPY) {
-                    aNPC_set_feel_info(nactorx, mNpc_FEEL_SLEEPY, -1);
-                    aNPC_set_request_act(nactorx, 4, aNPC_ACT_WAIT, aNPC_ACT_TYPE_DEFAULT, aNPC_req_default_data);
-                }
-            } else {
-                // field or other: follow vanilla schedule transitions
-                if (nactorx->schedule.type != live_type &&
-                    nactorx->condition_info.talk_condition == aNPC_TALK_TYPE_NONE) {
-                    aNPC_chg_schedule(nactorx, play, live_type);
-                    type = nactorx->schedule.type;
-                }
-            }
-        }
-#endif
         (*aNPC_sche_proc[type])(nactorx, play, aNPC_SCHEDULE_PROC_MAIN);
     }
 }
@@ -162,22 +124,7 @@ static void aNPC_first_set_schedule(NPC_ACTOR* nactorx) {
         sched_p->current_type = mNPS_SCHED_WANDER;
         nactorx->schedule.type = aNPC_SCHEDULE_TYPE_WANDER;
     } else {
-#ifdef TARGET_PC
-        // fix: force is_home TRUE and remap SLEEP to IN_HOUSE so
-        // villagers are visible inside their house at night
-        u8 t = sched_p->current_type;
-        if (t == mNPS_SCHED_IN_HOUSE || t == mNPS_SCHED_SLEEP) {
-            Animal_c* animal = aNPC_GET_ANM(nactorx);
-            if (animal != NULL) {
-                animal->is_home = TRUE;
-            }
-            nactorx->schedule.type = mNPS_SCHED_IN_HOUSE;
-        } else {
-            nactorx->schedule.type = t;
-        }
-#else
         nactorx->schedule.type = sched_p->current_type;
-#endif
     }
 
     nactorx->npc_info.schedule = sched_p;
