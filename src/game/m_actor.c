@@ -24,6 +24,7 @@
 #endif
 #ifdef TARGET_VITA
 #include "ac_birth_control.h"
+static void restore_fgdata_one(ACTOR* actor, GAME_PLAY* play);
 #endif
 
 #ifdef MUST_MATCH
@@ -502,6 +503,21 @@ extern void Actor_info_call_actor(GAME_PLAY* play, Actor_info* actor_info) {
                         play->game.doing_point_specific = 157;
                     } else {
                         play->game.doing_point_specific = 158;
+#ifdef TARGET_VITA
+                        // structures stamp DUMMY at home in init. if
+                        // cull-delete hits while drawn was TRUE, only
+                        // Actor_dt runs and the DUMMY stays - STRUCTS
+                        // pass then skips it. restore now so the FG
+                        // is right when the player walks in. gated to
+                        // STRUCT/PROPS: ITEM2's restore picks a random
+                        // empty slot, calling twice would duplicate.
+                        {
+                            int t = ITEM_NAME_GET_TYPE(actor->npc_id);
+                            if (t == NAME_TYPE_STRUCT || t == NAME_TYPE_PROPS) {
+                                restore_fgdata_one(actor, play);
+                            }
+                        }
+#endif
                         Actor_dt(actor, (GAME*)play);
                         play->game.doing_point_specific = 159;
                         next = actor->next_actor;
