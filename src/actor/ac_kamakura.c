@@ -11,6 +11,9 @@
 #include "sys_matrix.h"
 #include "m_rcp.h"
 #include "libforest/gbi_extensions.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 enum {
     aKKR_ACTION_WAIT,

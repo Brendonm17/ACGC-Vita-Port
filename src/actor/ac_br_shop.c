@@ -5,6 +5,9 @@
 #include "sys_matrix.h"
 #include "m_bgm.h"
 #include "m_rcp.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aBRS_actor_ct(ACTOR*, GAME*);
 static void aBRS_actor_dt(ACTOR*, GAME*);

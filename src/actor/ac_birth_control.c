@@ -440,12 +440,16 @@ static void aBC_set_boat(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
 #ifdef TARGET_VITA
 // walk every actor-part list. items land in ACTOR_PART_ITEM, gyroids
 // and houses in ACTOR_PART_BG, props vary - only checking ITEM was
-// the gyroid-dup bug.
+// the gyroid-dup bug. skip actors with mv_proc cleared: those are in
+// the post-Actor_delete window where dw_proc is null too. matching
+// them blocks a legitimate respawn for the 1-2 frames before they get
+// fully removed.
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz) {
   for (int part = 0; part < ACTOR_PART_NUM; part++) {
     ACTOR* actor = play->actor_info.list[part].actor;
     while (actor != NULL) {
-      if (actor->block_x == bx && actor->block_z == bz && actor->npc_id == item_id) {
+      if (actor->mv_proc != NULL &&
+          actor->block_x == bx && actor->block_z == bz && actor->npc_id == item_id) {
         return TRUE;
       }
       actor = actor->next_actor;
@@ -542,7 +546,15 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
     aBC_last_seen_scene = cur_scene_no;
     aBC_block_reset_spawn_mask();
     aBC_pending_spawn_stage = 0;
-    aBC_prespawn_queue_next = 8;
+    // arm prespawn for the start block. without this, queue_next stays
+    // at 8 (disabled) until the next acre transition, so neighbors of
+    // the spawn block never get prespawned. the in-block pipeline still
+    // handles the start block itself; the prespawn fills neighbors so
+    // the player doesn't see abrupt struct/prop spawn when they walk
+    // out of the start acre.
+    aBC_prespawn_queue_bx = play->block_table.block_x;
+    aBC_prespawn_queue_bz = play->block_table.block_z;
+    aBC_prespawn_queue_next = 0;
   }
 #endif
 

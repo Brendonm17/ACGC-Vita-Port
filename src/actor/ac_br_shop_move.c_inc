@@ -264,13 +264,33 @@ static void aBRS_actor_move(ACTOR* actor, GAME* game) {
     int bz1;
     int bx2;
     int bz2;
+    int blocks_differ;
 
     mFI_Wpos2BlockNum(&bx1, &bz1, actor->world.position);
     mFI_Wpos2BlockNum(&bx2, &bz2, player->actor_class.world.position);
 
+    blocks_differ = (bx1 != bx2) || (bz1 != bz2);
+#ifdef TARGET_VITA
+    // free_cam: skip self-delete when player is within 2-block keep-alive
+    // range. without this, prespawn creates the tent in a neighbor acre
+    // and the embedded actor_move call inside aBRS_actor_init immediately
+    // self-deletes (bx1 != bx2). that nulls dw_proc, init then re-arms
+    // mv_proc, leaving an alive-but-invisible actor that loops through
+    // delete sequences. the home FG slot ends up overwritten with
+    // DUMMY_BROKER_SHOP from init while the actor never properly draws,
+    // so the tent never appears even when the player walks into the acre.
+    if (g_pc_settings.free_cam && blocks_differ) {
+        int dx = bx1 - bx2;
+        int dz = bz1 - bz2;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+            blocks_differ = 0;
+        }
+    }
+#endif
+
     if ((mDemo_Check(mDemo_TYPE_SCROLL, &player->actor_class) == FALSE) &&
         (mDemo_Check(mDemo_TYPE_SCROLL2, &player->actor_class) == FALSE) &&
-        (mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == FALSE) && ((bx1 != bx2) || (bz1 != bz2))) {
+        (mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == FALSE) && blocks_differ) {
         Actor_delete(actor);
     } else {
         f32 window;

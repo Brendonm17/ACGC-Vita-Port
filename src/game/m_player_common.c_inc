@@ -3665,14 +3665,18 @@ static int Player_actor_Set_ScrollDemo_forWade(ACTOR* actorx, GAME* game, int np
     // defer to unable_wade so intro blocker can arm excute_cancel_wade
     if (g_pc_settings.free_cam && !mPlib_Get_unable_wade()) {
         // free cam: skip scroll demo, fire wade side effects directly
-        // on block crossing so npcs still spawn via the normal pipeline
-        static int s_last_bx = -1, s_last_bz = -1;
+        // on block crossing so npcs still spawn via the normal pipeline.
+        // compare against block_table directly instead of a static cache:
+        // block_table is updated by SetBearActor (here, in vanilla wade,
+        // and in Actor_info_ct at scene load), so bx==block_table.block_x
+        // means the spawn pipeline is already in sync. avoids redundant
+        // SetBearActor on the first frame after scene/save load (which
+        // restarts the 3-frame pipeline and delays structure spawning).
+        GAME_PLAY* play = (GAME_PLAY*)game;
         int bx, bz;
         if (mFI_Wpos2BlockNum(&bx, &bz, actorx->world.position)) {
-            if (bx != s_last_bx || bz != s_last_bz) {
-                s_last_bx = bx;
-                s_last_bz = bz;
-                mFI_SetBearActor((GAME_PLAY*)game, actorx->world.position, TRUE);
+            if (bx != play->block_table.block_x || bz != play->block_table.block_z) {
+                mFI_SetBearActor(play, actorx->world.position, TRUE);
                 mFI_trigger_freecam_wade();
                 Common_Set(in_initial_block, FALSE);
             }

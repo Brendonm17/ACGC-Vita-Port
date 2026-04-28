@@ -124,9 +124,27 @@ static STRUCTURE_ACTOR* aSTR_setupActor_proc(GAME* game, mActor_name_t structure
     pos.z = z;
     pos.y = mCoBG_GetBgY_OnlyCenter_FromWpos2(pos, 0.0f);
 
+#ifdef TARGET_VITA
+    // free_cam prespawn calls this for non-current blocks, so the
+    // actor's block_x/block_z must come from its world position, not
+    // from play->block_table. Otherwise the keep-alive check in
+    // Actor_delete_check uses the wrong reference, the actor gets
+    // culled-deleted while still in view, and aBC_block_spawned_mask
+    // gets cleared for the wrong block. Symptom: bridge/house geometry
+    // still walkable but invisible until free_cam toggle.
+    int target_bx, target_bz;
+    if (mFI_Wpos2BlockNum(&target_bx, &target_bz, pos) == FALSE) {
+        target_bx = play->block_table.block_x;
+        target_bz = play->block_table.block_z;
+    }
+    str_actor = (STRUCTURE_ACTOR*)Actor_info_make_actor(&play->actor_info, game, profile, pos.x, pos.y, pos.z, 0, 0, 0,
+                                                        (s8)target_bx, (s8)target_bz, -1,
+                                                        structure_name, arg, -1, -1);
+#else
     str_actor = (STRUCTURE_ACTOR*)Actor_info_make_actor(&play->actor_info, game, profile, pos.x, pos.y, pos.z, 0, 0, 0,
                                                         play->block_table.block_x, play->block_table.block_z, -1,
                                                         structure_name, arg, -1, -1);
+#endif
     if (str_actor != NULL) {
         mFI_SetFG_common(RSV_NO, pos, FALSE);
     }

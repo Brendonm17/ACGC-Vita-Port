@@ -201,9 +201,25 @@ static void aKKR_actor_move(ACTOR* actor, GAME* game) {
     mFI_Wpos2BlockNum(&bx1, &bz1, actor->world.position);
     mFI_Wpos2BlockNum(&bx2, &bz2, player->actor_class.world.position);
 
+    int blocks_differ = (bx1 != bx2) || (bz1 != bz2);
+#ifdef TARGET_VITA
+    // free_cam: skip self-delete when player is within 2-block keep-alive
+    // range. matches the BR shop fix pattern. without this, prespawn
+    // creates the structure in a neighbor acre and aKKR_actor_init's
+    // embedded actor_move call self-deletes immediately, leaving an
+    // alive-but-invisible actor and a stuck DUMMY_KAMAKURA in the FG.
+    if (g_pc_settings.free_cam && blocks_differ) {
+        int dx = bx1 - bx2;
+        int dz = bz1 - bz2;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+            blocks_differ = 0;
+        }
+    }
+#endif
+
     if ((mDemo_Check(mDemo_TYPE_SCROLL, &player->actor_class) == FALSE) &&
         (mDemo_Check(mDemo_TYPE_SCROLL2, &player->actor_class) == FALSE) &&
-        (mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == FALSE) && ((bx1 != bx2) || (bz1 != bz2))) {
+        (mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == FALSE) && blocks_differ) {
         Actor_delete(actor);
     } else {
         kamakura->action_proc(kamakura, play);
