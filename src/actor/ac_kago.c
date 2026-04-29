@@ -7,6 +7,9 @@
 #include "sys_matrix.h"
 #include "m_player_lib.h"
 #include "m_rcp.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aKAG_actor_ct(ACTOR*, GAME*);
 static void aKAG_actor_init(ACTOR*, GAME*);

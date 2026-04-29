@@ -33,11 +33,24 @@ static void aMIK_actor_move(ACTOR* actor, GAME* game){
     mFI_Wpos2BlockNum(&world_bx, &world_bz, actor->world.position);
     mFI_Wpos2BlockNum(&player_bx, &player_bz, player_actor->actor_class.world.position);
 
+    int blocks_differ = (world_bx != player_bx) || (world_bz != player_bz);
+#ifdef TARGET_VITA
+    // free_cam: skip self-delete inside 2-block keep-alive. matches the
+    // BR shop / buggy / s_car fix pattern.
+    if (g_pc_settings.free_cam && blocks_differ) {
+        int dx = world_bx - player_bx;
+        int dz = world_bz - player_bz;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+            blocks_differ = 0;
+        }
+    }
+#endif
+
     if (
-        mDemo_Check(mDemo_TYPE_SCROLL, (ACTOR*)player_actor) == FALSE && 
-        mDemo_Check(mDemo_TYPE_SCROLL2, (ACTOR*)player_actor) == FALSE && 
-        mDemo_Check(mDemo_TYPE_SCROLL3, (ACTOR*)player_actor) == FALSE && 
-        (world_bx != player_bx || world_bz != player_bz)
+        mDemo_Check(mDemo_TYPE_SCROLL, (ACTOR*)player_actor) == FALSE &&
+        mDemo_Check(mDemo_TYPE_SCROLL2, (ACTOR*)player_actor) == FALSE &&
+        mDemo_Check(mDemo_TYPE_SCROLL3, (ACTOR*)player_actor) == FALSE &&
+        blocks_differ
     ) {
         Actor_delete(actor);
     }

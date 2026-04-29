@@ -12,6 +12,9 @@
 #include "m_player_lib.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 enum {
     aTUR_ACT_WAIT,

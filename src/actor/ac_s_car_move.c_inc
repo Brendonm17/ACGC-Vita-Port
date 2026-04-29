@@ -46,10 +46,28 @@ static void aSCR_actor_move(ACTOR* actor, GAME* game) {
     mFI_Wpos2BlockNum(&car_bx, &car_bz, actor->world.position);
     mFI_Wpos2BlockNum(&player_bx, &player_bz, player_actor->actor_class.world.position);
 
+    int blocks_differ = (car_bx != player_bx) || (car_bz != player_bz);
+#ifdef TARGET_VITA
+    // free_cam: skip self-delete when player is within 2-block keep-alive
+    // range. matches the BR shop / buggy fix pattern. without this, when
+    // gracie's BIP-day spawn lands the car in a neighbor acre during
+    // free_cam prespawn, aSCR_actor_init's embedded actor_move call
+    // self-deletes immediately. that leaves the designer NPC waiting
+    // forever in aEDSN_game_start_call_wait for a DESIGNER_CAR actor
+    // that no longer exists, which softlocks the wash-car minigame.
+    if (g_pc_settings.free_cam && blocks_differ) {
+        int dx = car_bx - player_bx;
+        int dz = car_bz - player_bz;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+            blocks_differ = 0;
+        }
+    }
+#endif
+
     if (mDemo_Check(mDemo_TYPE_SCROLL, &player_actor->actor_class) == FALSE &&
         mDemo_Check(mDemo_TYPE_SCROLL2, &player_actor->actor_class) == FALSE &&
         mDemo_Check(mDemo_TYPE_SCROLL3, &player_actor->actor_class) == FALSE &&
-        (car_bx != player_bx || car_bz != player_bz)) {
+        blocks_differ) {
         Actor_delete(actor);
         return;
     }

@@ -31,9 +31,22 @@ static void aKAG_actor_move(ACTOR* actor, GAME* game) {
 
     mFI_Wpos2BlockNum(&playerbx, &playerbz, player->actor_class.world.position);
 
+    int blocks_differ = (bx != playerbx) || (bz != playerbz);
+#ifdef TARGET_VITA
+    // free_cam: skip self-delete inside 2-block keep-alive. matches the
+    // BR shop / buggy / s_car fix pattern.
+    if (g_pc_settings.free_cam && blocks_differ) {
+        int dx = bx - playerbx;
+        int dz = bz - playerbz;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+            blocks_differ = 0;
+        }
+    }
+#endif
+
     if ((mDemo_Check(mDemo_TYPE_SCROLL, &player->actor_class) == 0) &&
         (mDemo_Check(mDemo_TYPE_SCROLL2, &player->actor_class) == 0) &&
-        (mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == 0) && ((bx != playerbx) || (bz != playerbz))) {
+        (mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == 0) && blocks_differ) {
         Actor_delete(actor);
     } else {
         kago->structure_class.action_proc(&kago->structure_class, play);

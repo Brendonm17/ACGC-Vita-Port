@@ -6,6 +6,9 @@
 #include "m_rcp.h"
 #include "m_common_data.h"
 #include "m_player_lib.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aTUK_actor_ct(ACTOR* actor, GAME* game);
 static void aTUK_actor_dt(ACTOR* actor, GAME* game);

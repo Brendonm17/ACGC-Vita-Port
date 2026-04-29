@@ -9,11 +9,24 @@ static void aTAM_actor_move(ACTOR* actorx, GAME* game) {
   mFI_Wpos2BlockNum(&bx, &bz, actorx->world.position);
   mFI_Wpos2BlockNum(&player_bx, &player_bz, player->actor_class.world.position);
 
+  int blocks_differ = (bx != player_bx) || (bz != player_bz);
+#ifdef TARGET_VITA
+  // free_cam: skip self-delete inside 2-block keep-alive. matches the
+  // BR shop / buggy / s_car fix pattern.
+  if (g_pc_settings.free_cam && blocks_differ) {
+    int dx = bx - player_bx;
+    int dz = bz - player_bz;
+    if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+      blocks_differ = 0;
+    }
+  }
+#endif
+
   if (
     mDemo_Check(mDemo_TYPE_SCROLL, &player->actor_class) == FALSE &&
     mDemo_Check(mDemo_TYPE_SCROLL2, &player->actor_class) == FALSE &&
     mDemo_Check(mDemo_TYPE_SCROLL3, &player->actor_class) == FALSE &&
-    (bx != player_bx || bz != player_bz)
+    blocks_differ
   ) {
     Actor_delete(actorx);
   }

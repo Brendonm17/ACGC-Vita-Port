@@ -72,10 +72,23 @@ static void aYAT_actor_move(ACTOR* actor, GAME* game) {
     mFI_Wpos2BlockNum(&yatai_bx, &yatai_bz, actor->world.position);
     mFI_Wpos2BlockNum(&player_bx, &player_bz, player_actor->actor_class.world.position);
 
+    int blocks_differ = (yatai_bx != player_bx) || (yatai_bz != player_bz);
+#ifdef TARGET_VITA
+    // free_cam: skip self-delete inside 2-block keep-alive. matches the
+    // BR shop / buggy / s_car fix pattern.
+    if (g_pc_settings.free_cam && blocks_differ) {
+        int dx = yatai_bx - player_bx;
+        int dz = yatai_bz - player_bz;
+        if (dx >= -2 && dx <= 2 && dz >= -2 && dz <= 2) {
+            blocks_differ = 0;
+        }
+    }
+#endif
+
     if (mDemo_Check(mDemo_TYPE_SCROLL, &player_actor->actor_class) == FALSE
         && mDemo_Check(mDemo_TYPE_SCROLL2, &player_actor->actor_class) == FALSE
         && mDemo_Check(mDemo_TYPE_SCROLL3, &player_actor->actor_class) == FALSE
-        && (yatai_bx != player_bx || yatai_bz != player_bz))
+        && blocks_differ)
     {
         Actor_delete(actor);
     }

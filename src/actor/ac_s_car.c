@@ -7,6 +7,9 @@
 #include "m_common_data.h"
 #include "m_player_lib.h"
 #include "m_event.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aSCR_actor_ct(ACTOR* actor, GAME* game);
 static void aSCR_actor_dt(ACTOR* actor, GAME* game);

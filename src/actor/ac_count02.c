@@ -5,6 +5,9 @@
 #include "m_player_lib.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 enum {
     aCOU_ACT_INIT,

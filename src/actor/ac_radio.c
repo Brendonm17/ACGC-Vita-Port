@@ -8,6 +8,9 @@
 #include "m_field_info.h"
 #include "m_demo.h"
 #include "m_common_data.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aRAD_actor_ct(ACTOR*, GAME*);
 static void aRAD_actor_init(ACTOR*, GAME*);

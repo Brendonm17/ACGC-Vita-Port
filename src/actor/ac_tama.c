@@ -7,6 +7,9 @@
 #include "m_common_data.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aTAM_actor_ct(ACTOR* actorx, GAME* game);
 static void aTAM_actor_init(ACTOR* actorx, GAME* game);

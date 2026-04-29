@@ -8,6 +8,9 @@
 #include "m_field_info.h"
 #include "m_demo.h"
 #include "m_common_data.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aMIK_actor_ct(ACTOR* actor, GAME* game);
 static void aMIK_actor_init(ACTOR* actor, GAME* game);

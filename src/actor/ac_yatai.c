@@ -7,6 +7,9 @@
 #include "m_common_data.h"
 #include "m_player_lib.h"
 #include "m_handbill.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static void aYAT_actor_ct(ACTOR* actor, GAME* game);
 static void aYAT_actor_init(ACTOR* actor, GAME* game);
