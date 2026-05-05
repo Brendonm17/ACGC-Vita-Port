@@ -393,6 +393,11 @@ void pc_gx_init(void) {
 
 #ifdef TARGET_VITA
 int g_vita_force_state_resync = 0;
+
+// > 0 = use single-mode dispatch this frame so submit reads the cmd
+// queue we just wrote (no threaded display lag). refreshed per-frame
+// from m_play.c while the wipe/fade state machine reports a transition.
+int g_pc_gx_dual_write_frames = 0;
 #endif
 
 void pc_gx_invalidate_all_state(void) {
@@ -493,34 +498,6 @@ void pc_gx_save_world_state(void) {
     PC_GX_SAVE_ARRAY(fog_color);
     PC_GX_SAVE_FIELD(num_ind_stages);
     s_world_state.valid = 1;
-}
-
-// called from play_init. force latched clear to black and extend the
-// single-mode window long enough for the worker to drain its old frames
-// without exposing pre-wipe content. only the first few frames after a
-// scene change can flash; the rest of the iris-in is safe in threaded mode.
-void pc_gx_notify_scene_change(void) {
-    g_gx.latched_clear_color[0] = 0.0f;
-    g_gx.latched_clear_color[1] = 0.0f;
-    g_gx.latched_clear_color[2] = 0.0f;
-    g_gx.latched_clear_color[3] = 1.0f;
-    g_gx.clear_color[0] = 0.0f;
-    g_gx.clear_color[1] = 0.0f;
-    g_gx.clear_color[2] = 0.0f;
-    g_gx.clear_color[3] = 1.0f;
-
-    extern int vita_use_single_mode_frames;
-    int extend_to = 12;
-    if (vita_use_single_mode_frames < extend_to)
-        vita_use_single_mode_frames = extend_to;
-}
-
-// called from m_play.c on prerender menu close transition.
-void pc_gx_notify_menu_close(void) {
-    extern int vita_use_single_mode_frames;
-    int extend_to = 4;
-    if (vita_use_single_mode_frames < extend_to)
-        vita_use_single_mode_frames = extend_to;
 }
 
 void pc_gx_restore_world_state(void) {

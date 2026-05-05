@@ -985,11 +985,13 @@ void pc_gx_submit_frame(void) {
         uint32_t ts_setup_start = sceKernelGetProcessTimeLow();
 #endif
 
-        // late EFB texture re-resolve for stages that reference one.
+        // late EFB re-resolve. get_or_create (not find) so an evicted or
+        // never-created entry still returns a valid tex id; the capture
+        // replay below reuses the same id and fills it with content.
         if (cmd->textures.efb_src_ptr[0] | cmd->textures.efb_src_ptr[1] | cmd->textures.efb_src_ptr[2]) {
             for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
                 if (cmd->textures.efb_src_ptr[s] != 0) {
-                    GLuint fresh = pc_gx_efb_capture_find(cmd->textures.efb_src_ptr[s]);
+                    GLuint fresh = pc_gx_efb_capture_get_or_create(cmd->textures.efb_src_ptr[s]);
                     if (fresh && fresh != cmd->textures.obj_stage[s]) {
                         cmd->textures.obj_stage[s] = fresh;
                         cmd->textures.use_stage[s] = 1;

@@ -11,16 +11,12 @@
 #include <psp2/kernel/processmgr.h>
 #include <stdio.h>
 
-// > 0 = use single-mode path this frame to mask threaded submit lag
-// during transitions. set by notify_scene_change / notify_menu_close.
-int vita_use_single_mode_frames = 0;
-
-// suppress one threaded top-swap after returning from single-mode so
-// single's bottom swap isn't undone.
-int vita_skip_next_top_swap = 0;
-
 static int vita_first_frame = 1;
 static int vita_worker_pending = 0;
+
+// single-mode swaps at frame bottom; the next threaded frame's top-swap
+// would undo it. set when leaving the dual-write window; cleared on use.
+static int vita_skip_next_top_swap = 0;
 
 static int vita_perf_log_init_done = 0;
 
@@ -205,9 +201,9 @@ static void vita_perf_log_frame(void) {
 
 static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     if (!vita_first_frame) {
-        int skip_top_swap = vita_skip_next_top_swap;
+        int skip_top = vita_skip_next_top_swap;
         vita_skip_next_top_swap = 0;
-        if (!vita_gpu_skip_draws && !skip_top_swap) {
+        if (!vita_gpu_skip_draws && !skip_top) {
 #ifdef VITA_DEBUG
             unsigned int ef0 = sceKernelGetProcessTimeLow();
 #endif
@@ -302,17 +298,19 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
 
 void vita_frame_run(ucode_info* ucode, void* gfx_list) {
     int worker_active = vita_emu64_worker_active();
-    if (worker_active && vita_use_single_mode_frames > 0) {
-        vita_use_single_mode_frames--;
-        // drain pending worker before running emu64 on main
+    extern int g_pc_gx_dual_write_frames;
+    // dual-write window: drain the worker, then run single-mode so submit
+    // reads the cmd queue we just wrote (no 2-frame display lag during
+    // wipe / fade transitions).
+    if (worker_active && g_pc_gx_dual_write_frames > 0) {
+        g_pc_gx_dual_write_frames--;
         if (vita_worker_pending) {
             vita_emu64_wait_done();
             emu64_cleanup();
             vita_worker_pending = 0;
         }
         vita_frame_run_single(ucode, gfx_list);
-        // arm the skip so next threaded frame doesn't double-swap
-        if (vita_use_single_mode_frames == 0) {
+        if (g_pc_gx_dual_write_frames == 0) {
             vita_skip_next_top_swap = 1;
         }
         return;

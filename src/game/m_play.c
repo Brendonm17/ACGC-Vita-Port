@@ -414,6 +414,14 @@ extern void play_init(GAME* game) {
     u32 aligned;
     u32 size;
 
+#ifdef TARGET_VITA
+    // wipe stale gx state inherited from the old scene. without this,
+    // worker prededup caches and gl_cache leak across scene changes
+    // and the new scene's first cmd renders with stale matrices/TEV.
+    extern void pc_gx_invalidate_all_state(void);
+    pc_gx_invalidate_all_state();
+#endif
+
     game_resize_hyral(game, -Game_play_HYRAL_SIZE); // reserve bytes from gamealloc
     Common_Set(rhythym_updated, 0);
 
@@ -474,15 +482,6 @@ extern void play_init(GAME* game) {
     fbdemo_fade_startup(fade);
 
     play->fade_color_value.rgba8888 = 0;
-
-#ifdef TARGET_VITA
-    // arm the cmd-replay skip so the worker's last-OLD-scene cmds and
-    // this frame's first-NEW-scene cmds don't display before the iris
-    // animation is ready (Vita's threaded path lags the swap by one
-    // frame, exposing both as a "scene flash before vignette").
-    extern void pc_gx_notify_scene_change(void);
-    pc_gx_notify_scene_change();
-#endif
 
     freebytes = game_getFreeBytes(game);
     alloc = (u32)THA_alloc16(&game->tha, freebytes);
@@ -698,6 +697,21 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
 
     PC_DIAG(3, "makeBumpTexture: enter fb_mode=%d fb_wipe_mode=%d submenu.mode=%d\n",
             play->fb_mode, play->fb_wipe_mode, play->submenu.mode);
+
+#ifdef TARGET_VITA
+    // dual-write while the wipe/fade state machine reports a transition.
+    // refreshed per-frame, so the window covers the exact transition
+    // duration (no magic frame counts). 4 frames trails after the
+    // transition ends to cover the threaded pipeline's 2-frame lag.
+    if (play->fb_wipe_mode != WIPE_MODE_NONE ||
+        play->fb_mode != FBDEMO_MODE_NONE ||
+        (play->fb_fade_type != FADE_TYPE_NONE &&
+         play->fb_fade_type != FADE_TYPE_LOCK)) {
+        extern int g_pc_gx_dual_write_frames;
+        if (g_pc_gx_dual_write_frames < 4) g_pc_gx_dual_write_frames = 4;
+    }
+#endif
+
     OPEN_DISP(graph1);
 
     if ((GETREG(HREG, 80) != 10) || (GETREG(HREG, 92) != 0)) {
@@ -766,14 +780,26 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
         if (!prev_active && curr_active) {
             extern void pc_gx_save_world_state(void);
             pc_gx_save_world_state();
+            // pre-allocate prbuf's gl tex id on main before the worker
+            // ever reads s_efb_captures, so the worker's find can't race
+            // a half-inserted entry and snapshot obj_stage=0 (random
+            // black flash). capture replay later fills the same id.
+            extern unsigned int pc_gx_efb_capture_get_or_create(unsigned int dest_ptr);
+            pc_gx_efb_capture_get_or_create((unsigned int)(uintptr_t)&prbuf[0]);
+            // do NOT enable dual-write on open: single-mode runs emu64
+            // synchronously, so GXCopyTex would copy the cleared FBO
+            // (no draws rendered yet) into prbuf. threaded mode runs
+            // capture replay after draws and works correctly.
         } else if (prev_active && !curr_active) {
             extern void pc_gx_restore_world_state(void);
             pc_gx_restore_world_state();
             Gfx* poly = NOW_POLY_OPA_DISP;
             gDPNoOpTag(poly++, PC_NOOP_FULL_STATE_INVALIDATE);
             SET_POLY_OPA_DISP(poly);
-            extern void pc_gx_notify_menu_close(void);
-            pc_gx_notify_menu_close();
+            // dual-write the world's first frame so the lagged display
+            // can't show it with stale uniforms (roof color flash).
+            extern int g_pc_gx_dual_write_frames;
+            if (g_pc_gx_dual_write_frames < 3) g_pc_gx_dual_write_frames = 3;
         }
         s_prev_submenu_mode = play->submenu.mode;
     }
