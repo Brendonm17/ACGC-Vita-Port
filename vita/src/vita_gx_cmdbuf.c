@@ -90,7 +90,10 @@ void vita_cmdbuf_prededup(void) {
             __builtin_prefetch((char*)nc + 128, 0, 0);
         }
 
-        if (c->dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS)) {
+        // tc_src is resolved here from cmd->tev.stages[s].tex_coord; gate
+        // includes DIRTY_TEXTURES so the deferred-upload patch path (which
+        // sets DIRTY_TEXTURES alone) refreshes tc_src.
+        if (c->dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | PC_GX_DIRTY_KONST | PC_GX_DIRTY_TEXTURES)) {
             int rn = c->tev.num_stages;
             if (rn > PC_GX_MAX_TEV_STAGES) rn = PC_GX_MAX_TEV_STAGES;
             int r_matches = last_resolve_valid && rn == last_resolve_num &&
@@ -1072,32 +1075,48 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & PC_GX_DIRTY_TEV_STAGES) {
-                {
-                    loc = UL(num_tev_stages); if (loc >= 0) UNI1I(cmd->tev.num_stages);
-                    for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
-                        PCGXTevStage* ts = &cmd->tev.stages[s];
-                        loc = UL(tev_color_in[s]); if (loc >= 0) UNI4I(ts->color_a, ts->color_b, ts->color_c, ts->color_d);
-                        loc = UL(tev_alpha_in[s]); if (loc >= 0) UNI4I(ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
-                        loc = UL(tev_color_op[s]); if (loc >= 0) UNI1I(ts->color_op);
-                        loc = UL(tev_alpha_op[s]); if (loc >= 0) UNI1I(ts->alpha_op);
-                        loc = UL(tev_bsc[s]);  if (loc >= 0) UNI4I(ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
-                        loc = UL(tev_out[s]);  if (loc >= 0) UNI4I(ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
-                        loc = UL(tev_swap[s]); if (loc >= 0) UNI2I(ts->ras_swap, ts->tex_swap);
-                    }
-                    for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
-                        loc = UL(tev_tc_src[s]); if (loc >= 0) UNI1I(cmd->tev.tc_src[s]);
-                    }
-                    for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
-                        loc = UL(tev_ca[s]); if (loc >= 0) DFVN(loc, cmd->tev.ca[s], 12);
-                        loc = UL(tev_cb[s]); if (loc >= 0) DFVN(loc, cmd->tev.cb[s], 12);
-                        loc = UL(tev_cc[s]); if (loc >= 0) DFVN(loc, cmd->tev.cc[s], 12);
-                        loc = UL(tev_cd[s]); if (loc >= 0) DFVN(loc, cmd->tev.cd[s], 12);
-                        loc = UL(tev_aval[s]); if (loc >= 0) DFVN(loc, cmd->tev.aval[s], 16);
-                        loc = UL(tev_csrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.csrc[s], 16);
-                        loc = UL(tev_asrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.asrc[s], 16);
-                        loc = UL(tev_param[s]); if (loc >= 0) DFVN(loc, cmd->tev.param[s], 16);
-                        loc = UL(tev_aparam[s]); if (loc >= 0) DFVN(loc, cmd->tev.aparam[s], 8);
-                    }
+                loc = UL(num_tev_stages); if (loc >= 0) UNI1I(cmd->tev.num_stages);
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
+                    PCGXTevStage* ts = &cmd->tev.stages[s];
+                    loc = UL(tev_color_in[s]); if (loc >= 0) UNI4I(ts->color_a, ts->color_b, ts->color_c, ts->color_d);
+                    loc = UL(tev_alpha_in[s]); if (loc >= 0) UNI4I(ts->alpha_a, ts->alpha_b, ts->alpha_c, ts->alpha_d);
+                    loc = UL(tev_color_op[s]); if (loc >= 0) UNI1I(ts->color_op);
+                    loc = UL(tev_alpha_op[s]); if (loc >= 0) UNI1I(ts->alpha_op);
+                    loc = UL(tev_bsc[s]);  if (loc >= 0) UNI4I(ts->color_bias, ts->color_scale, ts->alpha_bias, ts->alpha_scale);
+                    loc = UL(tev_out[s]);  if (loc >= 0) UNI4I(ts->color_clamp, ts->alpha_clamp, ts->color_out, ts->alpha_out);
+                    loc = UL(tev_swap[s]); if (loc >= 0) UNI2I(ts->ras_swap, ts->tex_swap);
+                }
+            }
+            // upload tev_tc_src on TEV_STAGES OR TEXTURES so the deferred-
+            // upload patch path (DIRTY_TEXTURES alone) refreshes it.
+            if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES)) {
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES; s++) {
+                    loc = UL(tev_tc_src[s]); if (loc >= 0) UNI1I(cmd->tev.tc_src[s]);
+                }
+            }
+            // Pre-resolved TEV input values (ca/cb/cc/cd/aval/...) depend
+            // on register colors, KONST, AND stage config. The resolve at
+            // the top of this function (line ~93) re-runs whenever any
+            // of those dirty bits fire — but the upload below was gated
+            // on TEV_STAGES alone, so a primitive_color change between
+            // two cfg22 draws (same stages, different C1) would silently
+            // re-resolve cb[1] on the cmd side without ever pushing it
+            // to the GPU uniform. The shader kept the previous draw's
+            // primitive color, which is exactly the post office "POST
+            // OFFICE" / Nookway-class invisibility bug. Match this gate
+            // to the resolve gate so any time the resolved values
+            // change, the GPU sees the new values.
+            if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | PC_GX_DIRTY_KONST)) {
+                for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
+                    loc = UL(tev_ca[s]); if (loc >= 0) DFVN(loc, cmd->tev.ca[s], 12);
+                    loc = UL(tev_cb[s]); if (loc >= 0) DFVN(loc, cmd->tev.cb[s], 12);
+                    loc = UL(tev_cc[s]); if (loc >= 0) DFVN(loc, cmd->tev.cc[s], 12);
+                    loc = UL(tev_cd[s]); if (loc >= 0) DFVN(loc, cmd->tev.cd[s], 12);
+                    loc = UL(tev_aval[s]); if (loc >= 0) DFVN(loc, cmd->tev.aval[s], 16);
+                    loc = UL(tev_csrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.csrc[s], 16);
+                    loc = UL(tev_asrc[s]); if (loc >= 0) DFVN(loc, cmd->tev.asrc[s], 16);
+                    loc = UL(tev_param[s]); if (loc >= 0) DFVN(loc, cmd->tev.param[s], 16);
+                    loc = UL(tev_aparam[s]); if (loc >= 0) DFVN(loc, cmd->tev.aparam[s], 8);
                 }
             }
 
@@ -1903,15 +1922,15 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
             // values from a different frame's cmd that reused this slot.
             memcpy(cmd->tev.colors, g_gx.tev_colors, sizeof(cmd->tev.colors));
             memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
-            // cfg20 tex remap bit handed to core 2. vita_tev_tex_remap is
-            // a per-draw flag set during shader selection in flush.
-            cmd->tev_tex_remap = vita_tev_tex_remap ? 1 : 0;
-        } else {
-            cmd->tev_tex_remap = 0;
         }
-    } else {
-        cmd->tev_tex_remap = 0;
     }
+    // cfg20/cfg48 tex remap bit. captured UNCONDITIONALLY: gating it on
+    // DIRTY_TEV_STAGES/COLORS would zero the flag for cfg48 draws whose
+    // TEV state is identical to the prior draw (no dirty bits) or that
+    // only changed textures, silently dropping the swizzle and breaking
+    // Nookway/post office sign rendering. The global is set by shader
+    // selection (pc_gx_tev_get_shader) which always runs before this.
+    cmd->tev_tex_remap = vita_tev_tex_remap ? 1 : 0;
 
 #ifdef VITA_DEBUG
     unsigned int _state_phase_t0 = sceKernelGetProcessTimeLow();
@@ -2026,8 +2045,16 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
                 }
             }
         }
-        // cfg20 tex remap
-        if (vita_tev_tex_remap) {
+        // cfg20/cfg48 tex remap. read the per-cmd snapshot, not the
+        // global: the global is reset at the top of every shader match
+        // (pc_gx_tev.c:1034) and re-set only if the matched cfg wants
+        // remap. between shader selection and this snapshot block, the
+        // shader-match cache fast path can restore a stale cached
+        // value, so by the time we're here the global may be 0 even
+        // though THIS draw needs the swizzle. cmd->tev_tex_remap is
+        // captured at line 1908 right after shader selection, so it's
+        // the authoritative per-draw value.
+        if (cmd->tev_tex_remap) {
             cmd->textures.obj_stage[0] = cmd->textures.obj_stage[1];
             cmd->textures.use_stage[0] = cmd->textures.use_stage[1];
             cmd->textures.deferred_idx[0] = cmd->textures.deferred_idx[1];

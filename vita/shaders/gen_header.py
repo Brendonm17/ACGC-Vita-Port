@@ -793,7 +793,8 @@ with open(OUT_FILE, "w") as f:
                        (47, "(C2+C1*tex)*ras color + A2 alpha"),
                        (48, "lerp(ras,C1,A0)*tex color + tex.a alpha"),
                        (49, "C2*ras color + A2*tex.a alpha"),
-                       (50, "tex*C1*ras color + A_reg*tex.a alpha (UBER3+UBER4)")]:
+                       (50, "tex*C1*ras color + A_reg*tex.a alpha (UBER3+UBER4)"),
+                       (51, "post office text / tex_edge_alpha=32 overlay (cfg22+u_tev_reg1)")]:
         cfg_exists = os.path.exists(os.path.join(SHADER_DIR, f"cfg{cfgn}_v0.gxp"))
         if cfg_exists:
             for i in range(8):

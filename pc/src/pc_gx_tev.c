@@ -12,7 +12,7 @@ static const int vita_force_uber = 0;
 int vita_force_uber = 0;
 #endif
 
-// set bit N to disable cfgN, falls through to uber
+// set bit N to disable cfgN, falls through to uber.
 static unsigned long long vita_cfg_disable = 0;
 #define VITA_CFG_DISABLED(n) (vita_cfg_disable & (1ULL << (n)))
 
@@ -308,6 +308,9 @@ typedef struct {
 #ifndef VITA_HAS_CFG49
 #define VITA_HAS_CFG49 0
 #endif
+#ifndef VITA_HAS_CFG51
+#define VITA_HAS_CFG51 0
+#endif
 
 // dummy data for unavailable configs
 static const unsigned char* vita_gxp_dummy_variants[8] = {0};
@@ -394,6 +397,10 @@ static const unsigned int vita_gxp_dummy_sizes[8] = {0};
 #define gxp_cfg50_variants vita_gxp_dummy_variants
 #define gxp_cfg50_variant_sizes vita_gxp_dummy_sizes
 #endif
+#if !VITA_HAS_CFG51
+#define gxp_cfg51_variants vita_gxp_dummy_variants
+#define gxp_cfg51_variant_sizes vita_gxp_dummy_sizes
+#endif
 
 #define CFG_ENTRY(n, avail) { "CFG" #n, {0}, \
     avail ? (const unsigned char**)gxp_cfg##n##_variants : vita_gxp_dummy_variants, \
@@ -451,6 +458,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
     CFG_ENTRY(48, VITA_HAS_CFG48),
     CFG_ENTRY(49, VITA_HAS_CFG49),
     CFG_ENTRY(50, VITA_HAS_CFG50),
+    CFG_ENTRY(51, VITA_HAS_CFG51),
 };
 
 // map old vita_cfgN[] names to table entries
@@ -504,6 +512,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg48 vita_cfgs[47].programs
 #define vita_cfg49 vita_cfgs[48].programs
 #define vita_cfg50 vita_cfgs[49].programs
+#define vita_cfg51 vita_cfgs[50].programs
 
 // hash-based fast lookup for fully-literal TEV configs. replaces the
 // linear if/else cascade for the worker-thread per-draw shader match,
@@ -611,7 +620,7 @@ static void tev_lit_build(void) {
     // 2-stage literal configs
     TEV_INS_2(15,8,10,15, 7,7,7,4,    15,4,0,15, 7,7,7,0,  vita_cfg0,  0xFF, 0);
     TEV_INS_2(15,15,15,6, 7,4,5,7,    15,15,15,0, 7,4,5,0, vita_cfg44, 44,  0);
-    TEV_INS_2(15,15,15,8, 7,7,7,4,    15,4,0,15, 7,7,7,0,  vita_cfg22, 0xFF, 0);
+    TEV_INS_2(15,15,15,8, 7,7,7,4,    15,4,0,15, 7,7,7,0,  vita_cfg22, 22,  0);
     TEV_INS_2(15,15,15,8, 7,7,7,7,    15,15,15,0, 7,7,7,4, vita_cfg23, 0xFF, 0);
     TEV_INS_2(10,8,3,15,  7,4,2,7,    6,4,0,15,  7,7,7,0,  vita_cfg2,  0xFF, 0);
     TEV_INS_2(6,4,8,15,   7,4,1,2,    15,10,0,8, 7,4,1,0,  vita_cfg10, 0xFF, 0);
@@ -632,11 +641,12 @@ static void tev_lit_build(void) {
     // cfg49: C2*ras color, A2*tex.a alpha
     TEV_INS_2(15,15,15,6, 7,4,3,7,    15,0,10,15, 7,7,7,0, vita_cfg49, 49, 0);
 
-    // cfg50 covers both UBER3 and UBER4. final output is the same
-    // (TEX*C1*RAS, A_reg*TEXA); the CPU resolves A1 vs A2 into
-    // u_tev0_aval.z so one shader handles both, just with two
-    // matcher entries for the different raw stage inputs.
-    TEV_INS_2(15,8,4,15,  7,4,2,7,    15,0,10,15, 7,7,7,0, vita_cfg50, 50, 0);
+    // cfg50: TEX*C1*RAS color, TEXA*A2 alpha. only variant 2 keeps
+    // C1 in stage 1 B (where the shader reads u_tev1_cb); the original
+    // variant 1 entry put C1 in stage 0 C and used CPREV for stage 1 B,
+    // which the shared shader misreads as C1 and produces black /
+    // discarded output (post office text, Nook signs). fall back to
+    // uber for that variant.
     TEV_INS_2(15,8,10,15, 7,4,3,7,    15,4,0,15,  7,7,7,0, vita_cfg50, 50, 0);
 
     // 3-stage literal configs
@@ -944,6 +954,7 @@ void vita_dump_tev_configs(void) {
     tev_hash_logged = 1;
 }
 
+
 // performance counters for shader draw classification
 int vita_tev_specialized_draws = 0;
 int vita_tev_complex_draws = 0;
@@ -1053,7 +1064,15 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
             !state->z_update_enable &&
             (state->blend_src == GX_BL_SRCALPHA || state->blend_src == GX_BL_DSTALPHA) &&
             (state->blend_dst == GX_BL_INVSRCALPHA || state->blend_dst == GX_BL_INVDSTALPHA));
-        if (!blended_no_zwrite && eff_ref > 4.0f/255.0f) key |= VITA_VF_ALPHA_TEST;
+        // gDPSetTexEdgeAlpha(32) is a soft anti-aliased edge threshold,
+        // not a binary alpha key. with N64 RGB5A3 the lowest non-zero
+        // alpha step is 36, which sits just above 32, and on Vita the
+        // half-precision rounding can drop it under the gate. raising
+        // the gate to 33/255 lets all tex_edge_alpha=32 draws skip the
+        // discard so anti-aliased letters (post office "POST OFFICE",
+        // and similar neon overlays) survive. real alpha keys still
+        // engage at the typical 64/128 thresholds.
+        if (!blended_no_zwrite && eff_ref > 33.0f/255.0f) key |= VITA_VF_ALPHA_TEST;
     }
     int lfa = key & 0x7; // L/F/A bits
     int fa = lfa & ~VITA_VF_LIGHTING; // F/A only, VS handles LIGHTING
@@ -1125,6 +1144,16 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
             // honor runtime VITA_CFG_DISABLED toggle
             if (he->cfg_id == 0xFF || !(vita_cfg_disable & (1ULL << he->cfg_id))) {
                 if (he->is_ocean) vita_tev_is_ocean = 1;
+                // cfg51 takeover: cfg22 TEV pattern + alpha_ref1==32
+                // (gDPSetTexEdgeAlpha(32) signature) routes to cfg51 which
+                // applies in-shader mirror wrap for the post office awning
+                // text decals.
+                if (he->programs == vita_cfg22 && state->alpha_ref1 == 32 &&
+                    state->num_tev_stages == 2 &&
+                    vita_cfg51[fa] && !VITA_CFG_DISABLED(51)) {
+                    vita_tev_specialized_draws++;
+                    return vita_cfg51[fa];
+                }
                 vita_tev_specialized_draws++;
                 return he->programs[fa];
             }
@@ -1212,12 +1241,25 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
                 return vita_cfg44[fa];
             }
 
+            // CFG51: same TEV as cfg22, but alpha_ref1==32 (the
+            // gDPSetTexEdgeAlpha(32) signature). cfg51 applies in-shader
+            // mirror wrap for the post office awning text decals. Must
+            // come BEFORE cfg22 since it's the more specific match.
+            if (state->alpha_ref1 == 32 &&
+                s0->color_a==15 && s0->color_b==15 && s0->color_c==15 && s0->color_d==8 &&
+                s0->alpha_a==7  && s0->alpha_b==7  && s0->alpha_c==7  && s0->alpha_d==4 &&
+                s1->color_a==15 && s1->color_b==4  && s1->color_c==0  && s1->color_d==15 &&
+                s1->alpha_a==7  && s1->alpha_b==7  && s1->alpha_c==7  && s1->alpha_d==0 &&
+                vita_cfg51[fa] && !VITA_CFG_DISABLED(51)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg51[fa];
+            }
             // CFG22: tex*register color + TEXA alpha (no RASC)
             if (s0->color_a==15 && s0->color_b==15 && s0->color_c==15 && s0->color_d==8 &&
                 s0->alpha_a==7  && s0->alpha_b==7  && s0->alpha_c==7  && s0->alpha_d==4 &&
                 s1->color_a==15 && s1->color_b==4  && s1->color_c==0  && s1->color_d==15 &&
                 s1->alpha_a==7  && s1->alpha_b==7  && s1->alpha_c==7  && s1->alpha_d==0 &&
-                vita_cfg22[fa]) {
+                vita_cfg22[fa] && !VITA_CFG_DISABLED(22)) {
                 vita_tev_specialized_draws++;
                 return vita_cfg22[fa];
             }
@@ -1709,6 +1751,7 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
         }
 
         // CFG48: lerp(ras,C1,A0)*tex color + tex.a alpha
+        // stage 0 has no TEXC; stage 1's texture is at TEXMAP1 -> u_texture1
         if (w0->color_a==10 && w0->color_b==4  && w0->color_c==3  && w0->color_d==15 &&
             w0->alpha_a==7  && w0->alpha_b==7  && w0->alpha_c==7  && w0->alpha_d==7 &&
             w1->color_a==15 && w1->color_b==0  && w1->color_c==8  && w1->color_d==15 &&

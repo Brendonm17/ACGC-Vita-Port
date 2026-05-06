@@ -1,0 +1,56 @@
+// cfg51_f.cg - post office text / tex_edge_alpha=32 overlay shader.
+//
+// Same TEV as cfg22 (S0 c(15,15,15,8) a(7,7,7,4), S1 c(15,4,0,15) a(7,7,7,0)
+// = tex passthrough then tex*C1) but matched only when alpha_ref1==32
+// (gDPSetTexEdgeAlpha signature). Reads C1 directly from u_tev_reg1.
+//
+// Mirror wrap is applied in-shader because GL_MIRRORED_REPEAT set via
+// glTexParameteri does not propagate to the SceGxmTexture sampler when
+// bound via sceGxmSetFragmentTexture. Without the manual wrap, the post
+// office mesh's UVs (which span [0, ~1.97] in t for the t1 tile) clamp
+// at the bottom-edge transparent palette entry instead of mirroring back
+// to show the banner content.
+//
+// Compile variants: -DLIGHTING -DFOG -DALPHA_TEST
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half4 u_tev_reg1,
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    float2 tc;
+    tc.x = abs(frac(v_texcoord0.x * 0.5 + 0.5) - 0.5) * 2.0;
+    tc.y = abs(frac(v_texcoord0.y * 0.5 + 0.5) - 0.5) * 2.0;
+    half4 tex0 = (half4)tex2D(u_texture0, tc);
+
+    half3 prev_c = tex0.rgb * u_tev_reg1.rgb;
+    half prev_a = tex0.a;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

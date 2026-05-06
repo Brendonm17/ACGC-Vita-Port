@@ -1222,7 +1222,12 @@ void GXLoadTexObj(void* obj, u32 id) {
                 }
             }
         }
-        int is_efb = (efb_tex != 0) || efb_pending_this_frame || efb_known;
+        // Match PC behavior: route to EFB only when a capture actually
+        // exists or is pending this frame. Including efb_known here would
+        // force ROM-asset textures whose image_ptr collides with a known-
+        // EFB ptr through the empty-texture EFB path.
+        int is_efb = (efb_tex != 0) || efb_pending_this_frame;
+        (void)efb_known;
         if (is_efb && id >= 0 && id < 8) {
             g_gx.efb_src_ptr[id] = efb_dest_ptr;
         }
