@@ -25,6 +25,7 @@ PCSettings g_pc_settings = {
     .auto_save     = 0,
     .time_sync     = 0,
     .free_cam      = 0,
+    .boot_logo     = 1,
 #endif
 };
 
@@ -67,7 +68,10 @@ static const char* DEFAULT_SETTINGS =
     "time_sync = 0\n"
     "\n"
     "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n"
-    "free_cam = 0\n";
+    "free_cam = 0\n"
+    "\n"
+    "# boot_logo: 0 = skip the in-game Nintendo logo, 1 = show it on boot\n"
+    "boot_logo = 1\n";
 #else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
@@ -164,6 +168,8 @@ static void apply_setting(const char* key, const char* value) {
         g_pc_settings.time_sync = (val != 0) ? 1 : 0;
     } else if (strcmp(key, "free_cam") == 0) {
         g_pc_settings.free_cam = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "boot_logo") == 0) {
+        g_pc_settings.boot_logo = (val != 0) ? 1 : 0;
     }
 #endif
 }
@@ -202,7 +208,9 @@ void pc_settings_save(void) {
     fprintf(f, "# time_sync: 0 = off, 1 = re-anchor in-game clock to Vita RTC after sleep/home menu\n");
     fprintf(f, "time_sync = %d\n\n", g_pc_settings.time_sync);
     fprintf(f, "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n");
-    fprintf(f, "free_cam = %d\n", g_pc_settings.free_cam);
+    fprintf(f, "free_cam = %d\n\n", g_pc_settings.free_cam);
+    fprintf(f, "# boot_logo: 0 = skip the in-game Nintendo logo, 1 = show it on boot\n");
+    fprintf(f, "boot_logo = %d\n", g_pc_settings.boot_logo);
 #else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");

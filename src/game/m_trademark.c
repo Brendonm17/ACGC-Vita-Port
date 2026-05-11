@@ -31,6 +31,9 @@
 #include "libc64/qrand.h"
 #include "m_common_data.h"
 #include "m_play.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static int mTR_first_flag = TRUE;
 
@@ -341,6 +344,14 @@ extern void trademark_init(GAME* game) {
     trademark->unused_25a67 = 0;
     trademark->cancel = FALSE;
     trademark->check = FALSE;
+
+#ifdef TARGET_VITA
+    // vita has no GC bios intro; honor settings.ini to decide whether to play
+    // the in-game nintendo logo on first boot
+    if (g_pc_settings.boot_logo) {
+        mTR_first_flag = FALSE;
+    }
+#endif
 
     if (mTR_first_flag) {
         trademark->stage = 5;
