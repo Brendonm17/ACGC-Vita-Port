@@ -1,0 +1,217 @@
+// m_player_vita_dpad.c_inc
+// outdoor d-pad tool cycling with stash/takeout animations
+
+typedef enum {
+    VITA_DPAD_IDLE,
+    VITA_DPAD_PUTIN_REQUESTED,
+    VITA_DPAD_PUTIN_RUNNING,
+} VitaDpadState;
+
+// putin+wait+takeout runs ~90 frames; 5s is generous slack so save/load mid-stash
+// or an unexpected interrupt can't permanently block d-pad input
+#define VITA_DPAD_PENDING_TIMEOUT_FRAMES 300
+
+static VitaDpadState g_vita_dpad_state          = VITA_DPAD_IDLE;
+static mActor_name_t g_vita_pending_eq          = EMPTY_NO;
+static mActor_name_t g_vita_pending_pocket_item = EMPTY_NO;
+static int           g_vita_pending_pocket_slot = -1;
+static int           g_vita_pending_takeout     = FALSE;
+static int           g_vita_pending_frames      = 0;
+
+static mActor_name_t g_vita_last_tool   = EMPTY_NO;
+static int           g_vita_anchor_slot = -1;
+
+static int Vita_DPad_IsOutdoor(void) {
+    return mFI_GET_TYPE(mFI_GetFieldId()) == mFI_TYPE(mFI_FIELDTYPE_FG);
+}
+
+static int Vita_DPad_IsTool(mActor_name_t itemNo) {
+    s8 kind;
+    if (itemNo == EMPTY_NO) return FALSE;
+    kind = mPlib_Get_ItemNoToItemKind(itemNo);
+    return mPlayer_ITEM_IS_AXE(kind) || mPlayer_ITEM_IS_NET(kind) ||
+           mPlayer_ITEM_IS_ROD(kind) || mPlayer_ITEM_IS_SHOVEL(kind);
+}
+
+// putin's generic putaway anim looks wrong for balloons/fans/pinwheels
+// (player mimes stashing an axe while a balloon floats). only tools and
+// umbrellas have purpose-built putin visuals
+static int Vita_DPad_HasNiceStashAnim(mActor_name_t itemNo) {
+    s8 kind;
+    if (itemNo == EMPTY_NO) return FALSE;
+    kind = mPlib_Get_ItemNoToItemKind(itemNo);
+    return mPlayer_ITEM_IS_AXE(kind) || mPlayer_ITEM_IS_NET(kind) ||
+           mPlayer_ITEM_IS_ROD(kind) || mPlayer_ITEM_IS_SHOVEL(kind) ||
+           mPlayer_ITEM_IS_UMBRELLA(kind);
+}
+
+static int Vita_DPad_NextToolSlot(int anchor, int dir) {
+    int base = (anchor >= 0) ? anchor : ((dir > 0) ? -1 : mPr_POCKETS_SLOT_COUNT);
+    int i;
+    for (i = 1; i <= mPr_POCKETS_SLOT_COUNT; i++) {
+        int idx = ((base + dir * i) % mPr_POCKETS_SLOT_COUNT + mPr_POCKETS_SLOT_COUNT)
+                  % mPr_POCKETS_SLOT_COUNT;
+        if (Vita_DPad_IsTool(Now_Private->inventory.pockets[idx])) {
+            return idx;
+        }
+    }
+    return -1;
+}
+
+static int Vita_DPad_FindSlot(mActor_name_t itemNo) {
+    int i;
+    if (itemNo == EMPTY_NO) return -1;
+    for (i = 0; i < mPr_POCKETS_SLOT_COUNT; i++) {
+        if (Now_Private->inventory.pockets[i] == itemNo) return i;
+    }
+    return -1;
+}
+
+static void Vita_DPad_ClearPending(void) {
+    g_vita_dpad_state          = VITA_DPAD_IDLE;
+    g_vita_pending_eq          = EMPTY_NO;
+    g_vita_pending_pocket_item = EMPTY_NO;
+    g_vita_pending_pocket_slot = -1;
+    g_vita_pending_takeout     = FALSE;
+    g_vita_pending_frames      = 0;
+}
+
+static void Vita_DPad_BeginStash(GAME* game,
+                                 mActor_name_t target_eq,
+                                 mActor_name_t pocket_item,
+                                 int pocket_slot,
+                                 int needs_takeout) {
+    g_vita_pending_eq          = target_eq;
+    g_vita_pending_pocket_item = pocket_item;
+    g_vita_pending_pocket_slot = pocket_slot;
+    g_vita_pending_takeout     = needs_takeout;
+    g_vita_pending_frames      = 0;
+    g_vita_dpad_state          = VITA_DPAD_PUTIN_REQUESTED;
+
+    Player_actor_request_main_putin_item(game, mPlayer_REQUEST_PRIORITY_37);
+}
+
+static int Vita_DPad_IsFreeState(int main_index) {
+    return main_index == mPlayer_INDEX_WAIT ||
+           main_index == mPlayer_INDEX_WALK ||
+           main_index == mPlayer_INDEX_RUN  ||
+           main_index == mPlayer_INDEX_DASH ||
+           main_index == mPlayer_INDEX_WADE;
+}
+
+static void Vita_DPad_TickPending(ACTOR* actor, GAME* game) {
+    PLAYER_ACTOR* player = (PLAYER_ACTOR*)actor;
+
+    if (g_vita_dpad_state == VITA_DPAD_IDLE) return;
+
+    if (++g_vita_pending_frames > VITA_DPAD_PENDING_TIMEOUT_FRAMES) {
+        Vita_DPad_ClearPending();
+        return;
+    }
+
+    if (g_vita_dpad_state == VITA_DPAD_PUTIN_REQUESTED) {
+        if (player->now_main_index == mPlayer_INDEX_PUTIN_ITEM) {
+            // putin setup just captured player->item_kind for the animation, so
+            // we can mutate equipment without affecting the visual mid-anim
+            if (g_vita_pending_pocket_slot >= 0) {
+                mPr_SetPossessionItem(Now_Private, g_vita_pending_pocket_slot,
+                                      g_vita_pending_pocket_item, mPr_ITEM_COND_NORMAL);
+            }
+            Now_Private->equipment = g_vita_pending_eq;
+            g_vita_dpad_state = VITA_DPAD_PUTIN_RUNNING;
+        } else if (player->requested_main_index != mPlayer_INDEX_PUTIN_ITEM) {
+            Vita_DPad_ClearPending();
+        }
+        return;
+    }
+
+    if (g_vita_dpad_state == VITA_DPAD_PUTIN_RUNNING) {
+        if (player->now_main_index == mPlayer_INDEX_PUTIN_ITEM) return;
+
+        // skip takeout if putin got interrupted by a door/talk/etc; takeout
+        // snapshots requested_main_index, which already points at the post-putin
+        // state (wait/walk), so no extra wait queue needed
+        if (g_vita_pending_takeout &&
+            Now_Private->equipment != EMPTY_NO &&
+            Vita_DPad_IsFreeState(player->now_main_index)) {
+            Player_actor_request_main_takeout_item(game, mPlayer_REQUEST_PRIORITY_37);
+        }
+        Vita_DPad_ClearPending();
+    }
+}
+
+static void Vita_DPad_PutAway(GAME* game) {
+    mActor_name_t held = Now_Private->equipment;
+    int slot;
+    if (held == EMPTY_NO) return;
+
+    slot = mPr_GetPossessionItemIdxWithCond(Now_Private, EMPTY_NO, mPr_ITEM_COND_NORMAL);
+    if (slot < 0) return;
+
+    if (Vita_DPad_IsTool(held)) {
+        g_vita_last_tool   = held;
+        g_vita_anchor_slot = slot;
+    }
+
+    if (Vita_DPad_HasNiceStashAnim(held)) {
+        Vita_DPad_BeginStash(game, EMPTY_NO, held, slot, FALSE);
+    } else {
+        mPr_SetPossessionItem(Now_Private, slot, held, mPr_ITEM_COND_NORMAL);
+        Now_Private->equipment = EMPTY_NO;
+        mPlib_request_main_wait_from_submenu();
+    }
+}
+
+static void Vita_DPad_Cycle(GAME* game, int dir) {
+    mActor_name_t held = Now_Private->equipment;
+    int next_slot;
+
+    if (held == EMPTY_NO) {
+        next_slot = Vita_DPad_FindSlot(g_vita_last_tool);
+        if (next_slot < 0) {
+            next_slot = Vita_DPad_NextToolSlot(g_vita_anchor_slot, dir);
+        }
+        if (next_slot < 0) return;
+
+        Now_Private->equipment = Now_Private->inventory.pockets[next_slot];
+        mPr_SetPossessionItem(Now_Private, next_slot, EMPTY_NO, mPr_ITEM_COND_NORMAL);
+        g_vita_last_tool   = Now_Private->equipment;
+        g_vita_anchor_slot = next_slot;
+        Player_actor_request_main_takeout_item(game, mPlayer_REQUEST_PRIORITY_37);
+        return;
+    }
+
+    if (!Vita_DPad_IsTool(held)) return;
+
+    next_slot = Vita_DPad_NextToolSlot(g_vita_anchor_slot, dir);
+    if (next_slot < 0) return;
+
+    {
+        mActor_name_t new_tool = Now_Private->inventory.pockets[next_slot];
+        g_vita_last_tool   = new_tool;
+        g_vita_anchor_slot = next_slot;
+        Vita_DPad_BeginStash(game, new_tool, held, next_slot, TRUE);
+    }
+}
+
+static void Vita_Handle_DPad_ToolCycle(ACTOR* actor, GAME* game) {
+    Vita_DPad_TickPending(actor, game);
+
+    if (!Vita_DPad_IsOutdoor()) return;
+    if (!mEv_IsNotTitleDemo()) return;
+    if (mPlib_check_player_warp_forEvent()) return;
+    if (mPlib_Check_SetOrderSubmenu()) return;
+    if (g_vita_dpad_state != VITA_DPAD_IDLE) return;
+
+    // submenu's gate guarantees no animation interrupts (fishing/talking/etc all
+    // run at higher priority and would fail this check)
+    if (!mPlib_able_submenu_type1(game)) return;
+
+    if (chkTrigger(BUTTON_DDOWN)) {
+        Vita_DPad_PutAway(game);
+    } else if (chkTrigger(BUTTON_DRIGHT)) {
+        Vita_DPad_Cycle(game, +1);
+    } else if (chkTrigger(BUTTON_DLEFT)) {
+        Vita_DPad_Cycle(game, -1);
+    }
+}

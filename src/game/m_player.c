@@ -364,6 +364,9 @@ static int Player_actor_request_main_demo_getoff_boat_all(GAME* game, const xyz_
 #include "../src/game/m_player_vibration.c_inc"
 #include "../src/game/m_player_common.c_inc"
 #include "../src/game/m_player_sound.c_inc"
+#ifdef TARGET_VITA
+#include "../src/game/m_player_vita_dpad.c_inc"
+#endif
 #include "../src/game/m_player_other_func.c_inc"
 
 /* Item */

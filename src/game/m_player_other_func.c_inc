@@ -259,6 +259,9 @@ static void Player_actor_move_other_func2(ACTOR* actor, GAME* game) {
     Player_actor_set_eye_PositionAndAngle(actor);
     Player_actor_sound_SetStatus(actor);
     Player_actor_Set_Indoor_Camera_Index(actor, game);
+#ifdef TARGET_VITA
+    Vita_Handle_DPad_ToolCycle(actor, game);
+#endif
     Player_actor_check_forward(actor, game);
     mFI_SetPlayerWade(game);
     Player_actor_check_little_shake_tree(actor, game);
