@@ -312,12 +312,38 @@ static void vtc_loaded_evict_oldest(void) {
     victim->key = 0;
 }
 
-void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vram_bytes) {
-    // Enforce vRAM budget. Evict LRU entries until we fit.
+static int g_vtc_vram_skips = 0;      // bookkeeping budget refused
+static int g_vtc_vram_real_skips = 0; // real CDRAM margin refused
+
+// evict unreferenced LRU entries until we fit, or fail. returns 0 when
+// every entry is currently held by a tex_cache (ref_count > 0)
+static int vtc_make_room_within_budget(int vram_bytes) {
     while (g_vtc_vram_used + vram_bytes > VTC_VRAM_BUDGET) {
         int before = g_vtc_vram_used;
         vtc_loaded_evict_oldest();
-        if (g_vtc_vram_used == before) break; // nothing evictable (all referenced)
+        if (g_vtc_vram_used == before) return 0;
+    }
+    return 1;
+}
+
+// the bookkeeping budget is a soft cap on our HD textures; this is the
+// hard cap against actual CDRAM exhaustion from FBO/vbo/GC/fragmentation
+#define VTC_REAL_VRAM_MARGIN (12 * 1024 * 1024)
+
+static int vtc_check_real_vram_ok(int vram_bytes) {
+    (void)vram_bytes; // already allocated by io thread's prepare, just check margin
+    size_t free_vram = vglMemFree(VGL_MEM_VRAM);
+    return free_vram >= (size_t)VTC_REAL_VRAM_MARGIN;
+}
+
+void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vram_bytes) {
+    // budget enforcement: prior versions broke out of the eviction loop and
+    // continued inserting, silently overshooting. that accumulated and
+    // eventually exhausted real CDRAM
+    if (!vtc_make_room_within_budget(vram_bytes)) {
+        vita_defer_tex_delete(tex);
+        g_vtc_vram_skips++;
+        return;
     }
 
     // two-pass insert. first pass scans the probe chain for a live
@@ -535,10 +561,11 @@ void vita_vtc_init(void) {
 
 void vita_vtc_shutdown(void) {
     if (g_vtc_active) {
-        printf("[VTC] Stats: %d lookups, %d hits, %d loaded, %d cache hits, %d neg skips, %d evictions, %dKB vRAM\n",
+        printf("[VTC] Stats: %d lookups, %d hits, %d loaded, %d cache hits, %d neg skips, %d evictions, %dKB vRAM, %d budget-skips, %d real-vram-skips\n",
                g_vtc_stat_lookups, g_vtc_stat_hits, g_vtc_stat_loaded,
                g_vtc_stat_cache_hits, g_vtc_stat_neg_hits,
-               g_vtc_evictions, g_vtc_vram_used / 1024);
+               g_vtc_evictions, g_vtc_vram_used / 1024,
+               g_vtc_vram_skips, g_vtc_vram_real_skips);
     }
 
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
@@ -827,6 +854,20 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             int hd_w = g_vtc_io_slots[si].hd_w;
             int hd_h = g_vtc_io_slots[si].hd_h;
             unsigned char slot_fmt = g_vtc_io_slots[si].dxt_format;
+
+            // preflight both caps. releasing the slot frees the io
+            // thread's pending texture (already allocated cdram)
+            int vram_needed = vtc_estimate_vram(hd_w, hd_h, slot_fmt);
+            if (!vtc_make_room_within_budget(vram_needed)) {
+                g_vtc_vram_skips++;
+                vita_vtc_release_slot(si);
+                return 0;
+            }
+            if (!vtc_check_real_vram_ok(vram_needed)) {
+                g_vtc_vram_real_skips++;
+                vita_vtc_release_slot(si);
+                return 0;
+            }
 
             GLuint tex;
             glGenTextures(1, &tex);

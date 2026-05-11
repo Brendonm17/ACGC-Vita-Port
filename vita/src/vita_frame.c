@@ -14,8 +14,8 @@
 static int vita_first_frame = 1;
 static int vita_worker_pending = 0;
 
-// single-mode swaps at frame bottom; the next threaded frame's top-swap
-// would undo it. set when leaving the dual-write window; cleared on use.
+// single mode swaps at the bottom; the next threaded frame's top swap
+// would undo it. armed when leaving the dual-write window
 static int vita_skip_next_top_swap = 0;
 
 static int vita_perf_log_init_done = 0;
@@ -290,6 +290,9 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
 #endif
     cmd_write = 1 - cmd_write;
     emu64_cleanup();
+    // vglSwapBuffers can queue an in-flight FBO for display before the
+    // GPU finishes writing it; flash during the title->intro fade
+    glFinish();
     JW_EndFrame();
 #ifdef VITA_DEBUG
     vita_perf_log_frame();
@@ -299,23 +302,30 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
 void vita_frame_run(ucode_info* ucode, void* gfx_list) {
     int worker_active = vita_emu64_worker_active();
     extern int g_pc_gx_dual_write_frames;
-    // dual-write window: drain the worker, then run single-mode so submit
+    int mode = (worker_active && g_pc_gx_dual_write_frames > 0) ? 2 :
+               worker_active ? 1 : 0;
+    // dual-write: drain the worker and run single-mode inline so submit
     // reads the cmd queue we just wrote (no 2-frame display lag during
-    // wipe / fade transitions).
-    if (worker_active && g_pc_gx_dual_write_frames > 0) {
+    // wipe/fade/menu transitions)
+    if (mode == 2) {
         g_pc_gx_dual_write_frames--;
         if (vita_worker_pending) {
             vita_emu64_wait_done();
             emu64_cleanup();
             vita_worker_pending = 0;
         }
+        // worker dispatches prededup before signaling done, so the core 2
+        // thread can still be running when we reach here. without this
+        // wait, single mode's inline prededup races it on shared state
+        extern void vita_wait_prededup(void);
+        vita_wait_prededup();
         vita_frame_run_single(ucode, gfx_list);
         if (g_pc_gx_dual_write_frames == 0) {
             vita_skip_next_top_swap = 1;
         }
         return;
     }
-    if (worker_active) {
+    if (mode == 1) {
         vita_frame_run_threaded(ucode, gfx_list);
     } else {
         vita_frame_run_single(ucode, gfx_list);

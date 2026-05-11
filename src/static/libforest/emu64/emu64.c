@@ -466,13 +466,9 @@ static void texture_cache_list_clear() {
 
 extern void emu64_refresh() {
     texture_cache_list_clear();
-#ifdef TARGET_PC
-    // Flush the GL texture cache: when the N64 texture mapping is cleared,
-    // old GL textures become orphaned in VRAM (unreferenced but never freed).
-    // Without this, repeated scene transitions exhaust the 32MB VRAM pool
-    // causing a GPU hang on Vita (~65 seconds after first transition).
-    pc_gx_texture_cache_invalidate();
-#endif
+    // GL texture cache invalidate used to live here but emu64_refresh
+    // also fires on dialog open/close. mid-frame wipe flashed for one
+    // frame. moved to play_init and graph.c game_ct.
 }
 
 static u16 cvtN64ToDol(int n64_fmt, int n64_bpp) {

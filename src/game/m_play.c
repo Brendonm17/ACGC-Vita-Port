@@ -415,11 +415,16 @@ extern void play_init(GAME* game) {
     u32 size;
 
 #ifdef TARGET_VITA
-    // wipe stale gx state inherited from the old scene. without this,
-    // worker prededup caches and gl_cache leak across scene changes
-    // and the new scene's first cmd renders with stale matrices/TEV.
+    // wipe gx state inherited from the old scene; without this, worker
+    // prededup and gl_cache leak across and the first cmd of the new
+    // scene renders with stale matrices/tev
     extern void pc_gx_invalidate_all_state(void);
     pc_gx_invalidate_all_state();
+    // free orphaned GL textures from the prior scene. moved out of
+    // emu64_refresh (which also fires on dialog open/close, where wiping
+    // mid-frame caused a 1-frame flash on every NPC convo)
+    extern void pc_gx_texture_cache_invalidate(void);
+    pc_gx_texture_cache_invalidate();
 #endif
 
     game_resize_hyral(game, -Game_play_HYRAL_SIZE); // reserve bytes from gamealloc
@@ -699,10 +704,10 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
             play->fb_mode, play->fb_wipe_mode, play->submenu.mode);
 
 #ifdef TARGET_VITA
-    // dual-write while the wipe/fade state machine reports a transition.
-    // refreshed per-frame, so the window covers the exact transition
-    // duration (no magic frame counts). 4 frames trails after the
-    // transition ends to cover the threaded pipeline's 2-frame lag.
+    // force single-mode for the transition window so the threaded 2-frame
+    // display lag doesn't expose pre-fade content. refreshed per frame
+    // while the state machine reports a transition; the 4-frame trail
+    // covers pipeline drain after the last fade frame
     if (play->fb_wipe_mode != WIPE_MODE_NONE ||
         play->fb_mode != FBDEMO_MODE_NONE ||
         (play->fb_fade_type != FADE_TYPE_NONE &&
@@ -767,8 +772,8 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
     }
 
 #if defined(TARGET_VITA)
-    // snapshot/restore GX state around the menu's prerender window so
-    // menu draws don't pollute world state.
+    // snapshot gx state around the menu prerender so menu draws don't
+    // pollute the world rendering state when the menu closes
     {
         static int s_prev_submenu_mode = 0;
         int prev_active = (s_prev_submenu_mode == mSM_MODE_PRERENDER_INIT ||
@@ -780,26 +785,16 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
         if (!prev_active && curr_active) {
             extern void pc_gx_save_world_state(void);
             pc_gx_save_world_state();
-            // pre-allocate prbuf's gl tex id on main before the worker
-            // ever reads s_efb_captures, so the worker's find can't race
-            // a half-inserted entry and snapshot obj_stage=0 (random
-            // black flash). capture replay later fills the same id.
+            // pre-allocate the prbuf gl tex on main so the worker's
+            // s_efb_captures lookup can't race a half-inserted entry
             extern unsigned int pc_gx_efb_capture_get_or_create(unsigned int dest_ptr);
             pc_gx_efb_capture_get_or_create((unsigned int)(uintptr_t)&prbuf[0]);
-            // do NOT enable dual-write on open: single-mode runs emu64
-            // synchronously, so GXCopyTex would copy the cleared FBO
-            // (no draws rendered yet) into prbuf. threaded mode runs
-            // capture replay after draws and works correctly.
         } else if (prev_active && !curr_active) {
             extern void pc_gx_restore_world_state(void);
             pc_gx_restore_world_state();
             Gfx* poly = NOW_POLY_OPA_DISP;
             gDPNoOpTag(poly++, PC_NOOP_FULL_STATE_INVALIDATE);
             SET_POLY_OPA_DISP(poly);
-            // dual-write the world's first frame so the lagged display
-            // can't show it with stale uniforms (roof color flash).
-            extern int g_pc_gx_dual_write_frames;
-            if (g_pc_gx_dual_write_frames < 3) g_pc_gx_dual_write_frames = 3;
         }
         s_prev_submenu_mode = play->submenu.mode;
     }

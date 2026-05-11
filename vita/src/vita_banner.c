@@ -237,4 +237,79 @@ void banner_draw_bars(void) {
     glEnable(GL_CULL_FACE);
 }
 
+// draw an EFB-captured texture fullscreen using the simple shader.
+// dedicated vbo so we don't clobber the game's zero-copy cmd_verts_db
+void vita_efb_draw_fullscreen(GLuint tex) {
+    if (!tex) return;
+    GLuint prog = vita_get_simple_shader();
+    if (!prog) return;
+
+    static GLuint s_efb_quad_vbo = 0;
+    if (!s_efb_quad_vbo) glGenBuffers(1, &s_efb_quad_vbo);
+
+    PCGXVertex verts[6];
+    memset(verts, 0, sizeof(verts));
+
+    #define BV(i, px,py, u,v) do { \
+        verts[i].position[0]=px; verts[i].position[1]=py; verts[i].position[2]=0; \
+        verts[i].normal[2]=1.0f; \
+        verts[i].color0[0]=255; verts[i].color0[1]=255; verts[i].color0[2]=255; verts[i].color0[3]=255; \
+        verts[i].texcoord[0][0]=u; verts[i].texcoord[0][1]=v; \
+    } while(0)
+
+    // v-flipped uv to match vitaGL's glCopyTexImage2D output
+    BV(0,  -1,-1, 0,0); BV(1,  1,-1, 1,0); BV(2,  1,1, 1,1);
+    BV(3,  -1,-1, 0,0); BV(4,  1,1, 1,1); BV(5,  -1,1, 0,1);
+    #undef BV
+
+    glBindBuffer(GL_ARRAY_BUFFER, s_efb_quad_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
+    vita_set_vertex_attrib_pointers();
+
+    glUseProgram(prog);
+
+    static struct {
+        GLuint shader;
+        GLint proj, mv, use_tex, tc_src, nchans, tmtx, tgsrc, tex0;
+    } s_uloc;
+
+    if (s_uloc.shader != prog) {
+        s_uloc.shader  = prog;
+        s_uloc.proj    = glGetUniformLocation(prog, "u_projection");
+        s_uloc.mv      = glGetUniformLocation(prog, "u_modelview");
+        s_uloc.use_tex = glGetUniformLocation(prog, "u_use_texture0");
+        s_uloc.tc_src  = glGetUniformLocation(prog, "u_tev0_tc_src");
+        s_uloc.nchans  = glGetUniformLocation(prog, "u_num_chans");
+        s_uloc.tmtx    = glGetUniformLocation(prog, "u_texmtx_enable");
+        s_uloc.tgsrc   = glGetUniformLocation(prog, "u_texgen_src0");
+        s_uloc.tex0    = glGetUniformLocation(prog, "u_texture0");
+    }
+
+    float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    if (s_uloc.proj >= 0) glUniformMatrix4fv(s_uloc.proj, 1, GL_FALSE, ident);
+    if (s_uloc.mv >= 0) glUniformMatrix4fv(s_uloc.mv, 1, GL_FALSE, ident);
+    if (s_uloc.use_tex >= 0) glUniform1f(s_uloc.use_tex, 1.0f);
+    if (s_uloc.tc_src >= 0) glUniform1f(s_uloc.tc_src, 0.0f);
+    if (s_uloc.nchans >= 0) glUniform1f(s_uloc.nchans, 0.0f);
+    if (s_uloc.tmtx >= 0) glUniform1f(s_uloc.tmtx, 0.0f);
+    if (s_uloc.tgsrc >= 0) glUniform1f(s_uloc.tgsrc, 0.0f);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    if (s_uloc.tex0 >= 0) glUniform1i(s_uloc.tex0, 0);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    glDepthMask(GL_FALSE);
+    glViewport(0, 0, g_pc_window_w, g_pc_window_h);
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+}
+
 #endif // TARGET_VITA

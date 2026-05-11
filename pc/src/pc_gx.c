@@ -2203,11 +2203,10 @@ void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
     g_gx.clear_color[2] = clear_clr.b / 255.0f;
     g_gx.clear_color[3] = clear_clr.a / 255.0f;
     g_gx.clear_depth = clear_z / (float)0x00FFFFFF;
-    // post-copy calls are setting up for the next frame
-    if (g_gx.copy_disp_done) {
-        memcpy(g_gx.latched_clear_color, g_gx.clear_color, sizeof(g_gx.latched_clear_color));
-        g_gx.latched_clear_depth = g_gx.clear_depth;
-    }
+    // previous copy_disp_done gating was dead (only ever 0), so latched
+    // stayed at (0,0,0) and any partial-coverage frame flashed black
+    memcpy(g_gx.latched_clear_color, g_gx.clear_color, sizeof(g_gx.latched_clear_color));
+    g_gx.latched_clear_depth = g_gx.clear_depth;
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
@@ -2298,44 +2297,20 @@ static void pc_gx_copy_tex_execute(void* dest, GXBool clear) {
     if (gl_y < 0) return;
 
 #ifdef TARGET_VITA
-    if (vita_on_worker_thread) {
-        // queue EFB capture for replay in submit_frame (after preceding draws)
-        if (efb_capture_count < EFB_CAPTURE_MAX) {
-            PCGXEfbCapture* cap = &efb_captures[efb_capture_count++];
-            cap->after_draw_idx = (cmd_queue_count > 0) ? cmd_queue_count - 1 : 0;
-            cap->dest_ptr = (u32)(uintptr_t)dest;
-            cap->src_left = read_left;
-            cap->src_top = read_top;
-            cap->src_w = read_wd;
-            cap->src_h = read_ht;
-            cap->clear_after = 0; // skip mid-frame clear on vita; next frame init clears anyway
-        }
-        // remember the dest_ptr here so the worker's own subsequent
-        // GXLoadTexObj calls treat it as EFB-sourced, even on first use.
-        // without this, the first capture of a new dest races main's
-        // replay: the next frame's worker pipeline snapshots GXLoadTexObj
-        // before main has run the capture, falls through to the tex_cache
-        // path, and decodes uninitialized framebuffer data (black flash).
-        pc_gx_efb_remember_ptr((u32)(uintptr_t)dest);
-        return;
+    // queue for replay during submit. capturing immediately would copy
+    // the FBO before submit has rendered the queued world draws into it
+    if (efb_capture_count < EFB_CAPTURE_MAX) {
+        PCGXEfbCapture* cap = &efb_captures[efb_capture_count++];
+        cap->after_draw_idx = (cmd_queue_count > 0) ? cmd_queue_count - 1 : 0;
+        cap->dest_ptr = (u32)(uintptr_t)dest;
+        cap->src_left = read_left;
+        cap->src_top = read_top;
+        cap->src_w = read_wd;
+        cap->src_h = read_ht;
+        // next frame init clears anyway
+        cap->clear_after = 0;
     }
-    // GPU-only copy via glCopyTexImage2D to avoid a slow glReadPixels
-    // readback. uses a persistent GL texture per dest_ptr so repeated
-    // captures overwrite the same id, matching the worker/replay path.
-    {
-        GLuint efb_tex = pc_gx_efb_capture_get_or_create((u32)(uintptr_t)dest);
-        if (efb_tex) {
-            glActiveTexture(GL_TEXTURE7);
-            glBindTexture(GL_TEXTURE_2D, efb_tex);
-            glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, read_left, gl_y, read_wd, read_ht, 0);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glActiveTexture(GL_TEXTURE0);
-        }
-    }
-    // skip mid-frame clear on vita; next frame init clears anyway
+    pc_gx_efb_remember_ptr((u32)(uintptr_t)dest);
     return;
 #else
     size_t rgba_size = (size_t)read_wd * (size_t)read_ht * 4;

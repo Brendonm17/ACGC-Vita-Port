@@ -444,6 +444,12 @@ extern void graph_proc(void* arg) {
         game_ct(game, dlftbl->init, __graph);
         OSReport("[PC] graph_proc: game_ct done, calling emu64_refresh\n");
         emu64_refresh();
+#ifdef TARGET_VITA
+        // free orphaned GL textures from the prior game state. moved out
+        // of emu64_refresh which also fires on dialog open/close
+        extern void pc_gx_texture_cache_invalidate(void);
+        pc_gx_texture_cache_invalidate();
+#endif
         GRAPH_SET_DOING_POINT(__graph, GAME_CT_FINISHED);
         OSReport("[PC] graph_proc: entering main loop\n");
 

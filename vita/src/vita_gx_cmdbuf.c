@@ -829,6 +829,41 @@ void pc_gx_submit_frame(void) {
         return;
     }
 
+    // the cfg shader path renders the prbuf invisibly on vita, causing
+    // intermittent black flashes on menu open. draw the efb tex with the
+    // simple shader instead. pure-prbuf frames skip the cmd loop; mixed
+    // frames run it on top. skipped when a capture is pending in the
+    // cmd loop since the tex won't be filled yet
+    if (rd_efb_count == 0) {
+        GLuint pre_efb_tex = 0;
+        int pre_normal_count = 0;
+        for (int i = 0; i < rd_count; i++) {
+            PCGXDrawCmd* c = &cmd_queue_db[rd][i];
+            if (c->shader == 0) continue;
+            if (c->textures.efb_src_ptr[0] != 0) {
+                if (!pre_efb_tex) pre_efb_tex = c->textures.obj_stage[0];
+            } else {
+                pre_normal_count++;
+            }
+        }
+        if (pre_efb_tex) {
+            extern void vita_efb_draw_fullscreen(GLuint tex);
+            vita_efb_draw_fullscreen(pre_efb_tex);
+            if (pre_normal_count == 0) {
+                cmd_queue_count_db[rd] = 0;
+                cmd_vert_count_db[rd] = 0;
+                cmd_last_shader_db[rd] = 0;
+                efb_capture_count_db[rd] = 0;
+                return;
+            }
+            // restore the game's vbo after the manual draw's dedicated vbo,
+            // and invalidate the gl_cache state the manual draw mutated
+            glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+            gl_cache.blend = -1;
+            gl_cache.scissor_test_enabled = -1;
+        }
+    }
+
     // zero-copy vertex upload: cmd_verts_db lives in GPU-mapped memory
     // (vglMalloc at init), so vglBufferData just points GL at our buffer.
     // 2 buffers is enough because cmd_write flips once per frame and
@@ -928,6 +963,12 @@ void pc_gx_submit_frame(void) {
     if (g_vita_force_state_resync) {
         gl_cache_reset();
         gl_cache_reset_textures();
+        // force the first cmd to refresh all uniforms, the per-cmd dirty
+        // bits can leave projection/etc stale
+        if (rd_count > 0) {
+            cmd_queue_db[rd][0].dirty = (unsigned int)-1;
+            cmd_queue_db[rd][0].shader_changed = 1;
+        }
         g_vita_force_state_resync = 0;
     }
 
