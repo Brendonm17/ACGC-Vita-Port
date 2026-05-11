@@ -31,12 +31,13 @@ PCKeybindings g_pc_keybindings = {
     .dpad_right = SDL_SCANCODE_L,
 };
 
-#ifdef TARGET_VITA
-/* Vita has no keyboard -keybindings are less relevant but still loaded for
- * SDL2 GameController mapping compatibility */
-static const char* KEYBINDINGS_FILE = "ux0:data/AnimalCrossing/keybindings.ini";
-#else
+#ifndef TARGET_VITA
 static const char* KEYBINDINGS_FILE = "keybindings.ini";
+#endif
+
+#ifdef TARGET_VITA
+// stale stub written by older builds; controls.ini supersedes it
+static const char* LEGACY_VITA_KEYBINDINGS_FILE = "ux0:data/AnimalCrossing/keybindings.ini";
 #endif
 
 /* mapping table: ini key name -> offset into PCKeybindings */
@@ -144,30 +145,11 @@ static void apply_keybind(const char* key, const char* value) {
     printf("[Keybindings] WARNING: unknown binding '%s'\n", key);
 }
 
+#ifndef TARGET_VITA
 static void write_defaults(const char* path) {
     FILE* f = fopen(path, "w");
     if (!f) return;
 
-#ifdef TARGET_VITA
-    fprintf(f, "# Animal Crossing Vita - Button Mapping\n");
-    fprintf(f, "#\n");
-    fprintf(f, "# PS Vita → GameCube button mapping (handled by SDL2 GameController)\n");
-    fprintf(f, "# This file is for reference. The mapping is built into SDL2.\n");
-    fprintf(f, "#\n");
-    fprintf(f, "# Vita Button    → GameCube Button\n");
-    fprintf(f, "# ──────────────────────────────────\n");
-    fprintf(f, "# Cross (X)      → A (confirm/interact)\n");
-    fprintf(f, "# Circle (O)     → B (cancel/run)\n");
-    fprintf(f, "# Square         → X\n");
-    fprintf(f, "# Triangle       → Y\n");
-    fprintf(f, "# Start          → Start (pause/menu)\n");
-    fprintf(f, "# Select         → Z (inventory)\n");
-    fprintf(f, "# L Trigger      → L\n");
-    fprintf(f, "# R Trigger      → R\n");
-    fprintf(f, "# D-Pad          → D-Pad\n");
-    fprintf(f, "# Left Stick     → Control Stick (movement)\n");
-    fprintf(f, "# Right Stick    → C-Stick (camera)\n");
-#else
     fprintf(f, "[Keyboard]\n");
     fprintf(f, "# Key names use SDL2 scancode names.\n");
     fprintf(f, "# Common names: Space, Left Shift, Right Shift, Left Ctrl, Right Ctrl,\n");
@@ -187,12 +169,18 @@ static void write_defaults(const char* path) {
         if (i == 11) fprintf(f, "\n# C-Stick (Camera)\n");
         if (i == 15) fprintf(f, "\n# D-Pad\n");
     }
-#endif
 
     fclose(f);
 }
+#endif
 
 void pc_keybindings_load(void) {
+#ifdef TARGET_VITA
+    // controls.ini fully replaces the keyboard map on vita; remove the
+    // comment-only stub older builds left behind
+    remove(LEGACY_VITA_KEYBINDINGS_FILE);
+    return;
+#else
     FILE* f = fopen(KEYBINDINGS_FILE, "r");
     if (!f) {
         write_defaults(KEYBINDINGS_FILE);
@@ -221,4 +209,5 @@ void pc_keybindings_load(void) {
     }
     fclose(f);
     printf("[Keybindings] Loaded %s\n", KEYBINDINGS_FILE);
+#endif
 }
