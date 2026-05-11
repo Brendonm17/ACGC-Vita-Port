@@ -351,6 +351,7 @@ int main(int argc, char* argv[]) {
     SDL_SetMainReady();
     pc_settings_load();
     pc_keybindings_load();
+    pc_controls_load();
     pc_platform_init();
     pc_disc_init();
     pc_assets_init();

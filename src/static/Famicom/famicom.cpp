@@ -3,6 +3,7 @@
 
 #ifdef TARGET_PC
 #include <stdio.h>
+#include "pc_controls.h"
 extern "C" {
     void pc_fixnes_init(unsigned char* ines_data, int ines_size);
     void pc_fixnes_set_input(unsigned char buttons);
@@ -20,6 +21,9 @@ extern "C" {
 
     /* Card slot for current town (A=0 home, B=1 visiting) */
     int mCD_GetThisLandSlotNo(void);
+
+    // raw vita button bitmap, populated each frame by pc_pad.c
+    extern uint8_t g_pc_vita_pressed[PCV_COUNT];
 }
 
 static const char* pc_nes_save_dir(void) {
@@ -2373,26 +2377,25 @@ static int ksnes_thread_exec(u32 flags) {
 #ifdef TARGET_PC
     /* On PC, use fixNES emulator for NES rendering + audio */
     {
-        /* Convert AC pad format to fixNES format.
-         * AC pads[0] bits: 31=A, 30=B, 29=Select, 28=Start, 27=Up, 26=Down, 25=Left, 24=Right
-         * fixNES expects:  bit0=A, bit1=B, bit2=Select, ..., bit7=Right */
         static unsigned int turbo_counter = 0;
         turbo_counter++;
+        int turbo_phase = (turbo_counter & 2) ? 1 : 0;
+
+        unsigned char buttons;
+#ifdef TARGET_VITA
+        // controls.ini [Controls.NES] drives the mapping
+        buttons = pc_controls_apply_nes(g_pc_vita_pressed, turbo_phase);
+#else
+        // pc keyboard goes through pc_keybindings -> pads[0] -> bit-reversed nes
         unsigned int pad = famicomCommon.wp->pads[0];
         unsigned char raw = (unsigned char)((pad >> 24) & 0xFF);
-        /* Reverse bit order */
-        unsigned char buttons = 0;
+        buttons = 0;
         for (int b = 0; b < 8; b++)
             buttons |= ((raw >> (7 - b)) & 1) << b;
-        /* GC X → turbo A, GC Y → turbo B (read from raw InputData) */
-        {
-            unsigned int raw_input = InputValid[0] ? InputData[0] : 0;
-            /* GC X = bit 10, GC Y = bit 11 */
-            if ((raw_input & (1 << 10)) && (turbo_counter & 2))
-                buttons |= 1; /* turbo A (bit 0) */
-            if ((raw_input & (1 << 11)) && (turbo_counter & 2))
-                buttons |= 2; /* turbo B (bit 1) */
-        }
+        unsigned int raw_input = InputValid[0] ? InputData[0] : 0;
+        if ((raw_input & (1 << 10)) && turbo_phase) buttons |= 1; // gc x -> turbo a
+        if ((raw_input & (1 << 11)) && turbo_phase) buttons |= 2; // gc y -> turbo b
+#endif
         pc_fixnes_set_input(buttons);
         unsigned short* fb = pc_fixnes_frame();
         pc_fixnes_render_frame(fb);

@@ -195,6 +195,7 @@ set(VITA_SOURCES
     ${DECOMP_ROOT}/pc/src/pc_disc.c
     ${DECOMP_ROOT}/pc/src/pc_pad.c
     ${DECOMP_ROOT}/pc/src/pc_keybindings.c
+    ${DECOMP_ROOT}/pc/src/pc_controls.c
     ${DECOMP_ROOT}/src/static/dolphin/pad/Padclamp.c
     ${DECOMP_ROOT}/pc/lib/stb_image.c
 )
@@ -283,6 +284,7 @@ set_source_files_properties(
     "${DECOMP_ROOT}/pc/src/pc_disc.c"
     "${DECOMP_ROOT}/pc/src/pc_pad.c"
     "${DECOMP_ROOT}/pc/src/pc_keybindings.c"
+    "${DECOMP_ROOT}/pc/src/pc_controls.c"
     PROPERTIES COMPILE_OPTIONS "-O2;-w"
 )
 

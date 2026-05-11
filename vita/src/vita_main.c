@@ -29,6 +29,7 @@ int main(int argc, char* argv[]) {
     pc_settings_load();
     banner_scan_folder();
     pc_keybindings_load();
+    pc_controls_load();
     pc_platform_init();
     pc_texture_pack_init();
     extern void vita_vtc_io_init(void);
