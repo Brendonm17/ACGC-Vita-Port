@@ -132,6 +132,17 @@ static void mTD_game_end_init(GAME_PLAY* play) {
 
 extern void title_demo_move(GAME_PLAY* play) {
     if (mEv_IsTitleDemo()) {
+#ifdef PC_ENHANCEMENTS
+        // pause the demo while the title-screen options menu is open so the
+        // scene transition doesn't fire and destroy the actor underneath it.
+        // also zero the demo player input so the character doesn't keep
+        // running in whatever direction was last fed in.
+        extern int g_aAL_options_menu_open;
+        if (g_aAL_options_menu_open) {
+            mPlib_SetData1_controller_data_for_title_demo(0, 0, 0.0f, 0.0f);
+            return;
+        }
+#endif
         set_player_demo_keydata(S_tdemo_frame);
         S_tdemo_frame++;
 

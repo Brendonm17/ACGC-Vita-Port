@@ -69,6 +69,13 @@ static void aAL_actor_dt(ACTOR* actor, GAME* game);
 static void aAL_actor_move(ACTOR* actor, GAME* game);
 static void aAL_actor_draw(ACTOR* actor, GAME* game);
 
+#ifdef PC_ENHANCEMENTS
+// mirrors actor->pc_options_open so title_demo_move can pause the demo
+// frame counter while the options menu is up (otherwise the demo would
+// transition out and destroy the actor)
+int g_aAL_options_menu_open = 0;
+#endif
+
 ACTOR_PROFILE Animal_Logo_Profile = {
   mAc_PROFILE_ANIMAL_LOGO,
   ACTOR_PART_BG,
@@ -126,6 +133,11 @@ static void aAL_actor_ct(ACTOR* actor, GAME* game) {
 
 static void aAL_actor_dt(ACTOR* actor, GAME* game) {
   ANIMAL_LOGO_ACTOR* logo_actor = (ANIMAL_LOGO_ACTOR*)actor;
+
+#ifdef PC_ENHANCEMENTS
+  // defensive: clear in case the actor died with the menu still up
+  g_aAL_options_menu_open = 0;
+#endif
 
   if (Common_Get(clip.animal_logo_clip) != NULL) {
     zelda_free(Common_Get(clip.animal_logo_clip));
@@ -364,6 +376,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       pc_settings_apply();
       g_pc_options_baseline = g_pc_settings;
       actor->pc_options_open = 0;
+      g_aAL_options_menu_open = 0;
       actor->pc_cursor_cooldown = 10;
       return;
     }
@@ -372,6 +385,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     if (on_btn & BUTTON_B) {
       pc_settings_load();
       actor->pc_options_open = 0;
+      g_aAL_options_menu_open = 0;
       actor->pc_cursor_cooldown = 10;
       return;
     }
@@ -563,6 +577,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     } else {
       // options
       actor->pc_options_open = 1;
+      g_aAL_options_menu_open = 1;
       actor->pc_cursor_cooldown = 10;
       g_pc_options_baseline = g_pc_settings;
 #ifdef TARGET_VITA
