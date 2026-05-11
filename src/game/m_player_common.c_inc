@@ -8455,6 +8455,24 @@ static int Player_actor_check_able_change_camera_normal_index(ACTOR* actorx) {
         int main_index = player->now_main_index;
 
         if (mPlayer_MAIN_INDEX_VALID(main_index) != FALSE) {
+#ifdef TARGET_VITA
+            // Vita QOL: free camera while wading and during all rod (fishing) states
+            switch (main_index) {
+                case mPlayer_INDEX_WADE:
+                case mPlayer_INDEX_READY_ROD:
+                case mPlayer_INDEX_CAST_ROD:
+                case mPlayer_INDEX_AIR_ROD:
+                case mPlayer_INDEX_RELAX_ROD:
+                case mPlayer_INDEX_COLLECT_ROD:
+                case mPlayer_INDEX_VIB_ROD:
+                case mPlayer_INDEX_FLY_ROD:
+                case mPlayer_INDEX_NOTICE_ROD:
+                case mPlayer_INDEX_PUTAWAY_ROD:
+                    return TRUE;
+                default:
+                    break;
+            }
+#endif
             // clang-format off
             static const s8 data[] = {
                 FALSE,
