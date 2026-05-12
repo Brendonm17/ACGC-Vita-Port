@@ -392,18 +392,21 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
 
 #ifdef TARGET_VITA
     // order: Resolution, Aspect, [Banner if 4:3], MSAA, Tex Pack,
-    //        NES Aspect, Disable Resetti, Auto Save, Time Sync, Free Cam
+    //        NES Aspect, Disable Resetti, Auto Save, Time Sync, Free Cam,
+    //        Text Speed, Boot Logo
     {
       int has_banner = g_pc_settings.aspect_mode;
       int banner_idx = 2;
-      int msaa_idx     = has_banner ? 3 : 2;
-      int texpack_idx  = msaa_idx + 1;
-      int nesasp_idx   = texpack_idx + 1;
-      int resetti_idx  = nesasp_idx + 1;
-      int autosave_idx = resetti_idx + 1;
-      int timesync_idx = autosave_idx + 1;
-      int freecam_idx  = timesync_idx + 1;
-      int max_sel = freecam_idx;
+      int msaa_idx      = has_banner ? 3 : 2;
+      int texpack_idx   = msaa_idx + 1;
+      int nesasp_idx    = texpack_idx + 1;
+      int resetti_idx   = nesasp_idx + 1;
+      int autosave_idx  = resetti_idx + 1;
+      int timesync_idx  = autosave_idx + 1;
+      int freecam_idx   = timesync_idx + 1;
+      int textspeed_idx = freecam_idx + 1;
+      int bootlogo_idx  = textspeed_idx + 1;
+      int max_sel = bootlogo_idx;
       if (actor->pc_options_sel > max_sel) actor->pc_options_sel = max_sel;
 
       if (actor->pc_cursor_cooldown == 0) {
@@ -479,6 +482,14 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
             g_pc_settings.time_sync = !g_pc_settings.time_sync;
           } else if (s == freecam_idx) { // Free Cam
             g_pc_settings.free_cam = !g_pc_settings.free_cam;
+          } else if (s == textspeed_idx) { // Text Speed
+            if (do_right) {
+              if (g_pc_settings.text_speed < 2) g_pc_settings.text_speed++;
+            } else {
+              if (g_pc_settings.text_speed > 0) g_pc_settings.text_speed--;
+            }
+          } else if (s == bootlogo_idx) { // Boot Logo
+            g_pc_settings.boot_logo = !g_pc_settings.boot_logo;
           }
         }
       }
@@ -1105,6 +1116,20 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     len = sprintf(buf, "< %s >", g_pc_settings.free_cam ? "On" : "Off");
     { static u8 lbl[] = { 'F', 'r', 'e', 'e', ' ', 'C', 'a', 'm' };
       DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.free_cam != B->free_cam); }
+
+    // Text Speed
+    {
+      const char* ts = g_pc_settings.text_speed == 0 ? "Slow" :
+                       g_pc_settings.text_speed == 1 ? "Normal" : "Fast";
+      len = sprintf(buf, "< %s >", ts);
+    }
+    { static u8 lbl[] = { 'T', 'e', 'x', 't', ' ', 'S', 'p', 'e', 'e', 'd' };
+      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.text_speed != B->text_speed); }
+
+    // Boot Logo
+    len = sprintf(buf, "< %s >", g_pc_settings.boot_logo ? "On" : "Off");
+    { static u8 lbl[] = { 'B', 'o', 'o', 't', ' ', 'L', 'o', 'g', 'o' };
+      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.boot_logo != B->boot_logo); }
 
     y += line_h * 0.6f;
 

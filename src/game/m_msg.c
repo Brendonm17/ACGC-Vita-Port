@@ -12,6 +12,9 @@
 #ifdef TARGET_PC
 #include "pc_bswap.h"
 #endif
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 static u32 Msg_table_rom_start = 0;
 static u32 Msg_rom_start = 0;

@@ -347,9 +347,11 @@ extern void trademark_init(GAME* game) {
 
 #ifdef TARGET_VITA
     // vita has no GC bios intro; honor settings.ini to decide whether to play
-    // the in-game nintendo logo on first boot
+    // the in-game nintendo logo (both on first boot and on demo transitions)
     if (g_pc_settings.boot_logo) {
         mTR_first_flag = FALSE;
+    } else {
+        trademark->stage = 5;
     }
 #endif
 

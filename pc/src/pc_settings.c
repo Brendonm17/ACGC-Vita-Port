@@ -26,6 +26,7 @@ PCSettings g_pc_settings = {
     .time_sync     = 0,
     .free_cam      = 0,
     .boot_logo     = 1,
+    .text_speed    = 1,
 #endif
 };
 
@@ -71,7 +72,10 @@ static const char* DEFAULT_SETTINGS =
     "free_cam = 0\n"
     "\n"
     "# boot_logo: 0 = skip the in-game Nintendo logo, 1 = show it on boot\n"
-    "boot_logo = 1\n";
+    "boot_logo = 1\n"
+    "\n"
+    "# text_speed: 0 = slow, 1 = normal (vanilla), 2 = fast\n"
+    "text_speed = 1\n";
 #else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
@@ -170,6 +174,8 @@ static void apply_setting(const char* key, const char* value) {
         g_pc_settings.free_cam = (val != 0) ? 1 : 0;
     } else if (strcmp(key, "boot_logo") == 0) {
         g_pc_settings.boot_logo = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "text_speed") == 0) {
+        if (val >= 0 && val <= 2) g_pc_settings.text_speed = val;
     }
 #endif
 }
@@ -210,7 +216,9 @@ void pc_settings_save(void) {
     fprintf(f, "# free_cam: 0 = classic acre transitions, 1 = seamless movement (no acre pauses)\n");
     fprintf(f, "free_cam = %d\n\n", g_pc_settings.free_cam);
     fprintf(f, "# boot_logo: 0 = skip the in-game Nintendo logo, 1 = show it on boot\n");
-    fprintf(f, "boot_logo = %d\n", g_pc_settings.boot_logo);
+    fprintf(f, "boot_logo = %d\n\n", g_pc_settings.boot_logo);
+    fprintf(f, "# text_speed: 0 = slow, 1 = normal (vanilla), 2 = fast\n");
+    fprintf(f, "text_speed = %d\n", g_pc_settings.text_speed);
 #else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");

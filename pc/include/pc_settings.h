@@ -34,6 +34,7 @@ typedef struct {
     int time_sync;        // 0=off, 1=resync in-game clock to RTC on resume from suspend
     int free_cam;         // 0=classic acre transitions, 1=seamless movement
     int boot_logo;        // 0=skip in-game nintendo logo on boot, 1=show it
+    int text_speed;       // 0=slow (~half), 1=normal (vanilla), 2=fast (1 char/frame)
 #endif
 } PCSettings;
 

@@ -1172,6 +1172,41 @@ static int mMsg_Main_Cursol_ControlCursol(mMsg_Window_c* msg_p) {
       else {
         int cur_idx = idx;
 
+#ifdef TARGET_VITA
+        // Vita text-speed matrix:
+        //   slow,   no B = 1 char / 4 frames
+        //   slow,   B    = 1 char / 2 frames (= vanilla normal)
+        //   normal, no B = 1 char / 2 frames (vanilla)
+        //   normal, B    = 1 char / 1 frame  (vanilla fast text)
+        //   fast,   no B = 1 char / 1 frame
+        //   fast,   B    = 2 chars / 1 frame (extra ControlCursol pass in mMsg_Main_Cursol)
+        {
+          int v_speed = g_pc_settings.text_speed;
+          int v_fast_held = (msg_p->status_flags & mMsg_STATUS_FLAG_FAST_TEXT) != 0;
+          int v_cursol_just = (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) != 0;
+
+          if (v_cursol_just) {
+            mMsg_sound_MessageSpeedClear(2);
+          } else if (v_speed == 0 && !v_fast_held) {
+            // slow: inject two extra pause frames so the 1-in-2 cadence becomes 1-in-4
+            static int slow_extra_pause = 0;
+            if (slow_extra_pause > 0) {
+              slow_extra_pause--;
+              msg_p->status_flags |= mMsg_STATUS_FLAG_NOT_PAUSE_FRAME;
+            } else if ((msg_p->status_flags & mMsg_STATUS_FLAG_NOT_PAUSE_FRAME) == 0) {
+              slow_extra_pause = 2;
+            }
+            mMsg_sound_MessageSpeedClear(2);
+          } else if ((v_speed == 1 && v_fast_held) || (v_speed == 2)) {
+            // 1 char / frame: clear pause flag every call
+            msg_p->status_flags &= ~mMsg_STATUS_FLAG_NOT_PAUSE_FRAME;
+            mMsg_sound_MessageSpeedClear(1);
+          } else {
+            // normal/no-B and slow/B both run the vanilla 1-in-2 toggle untouched
+            mMsg_sound_MessageSpeedClear(2);
+          }
+        }
+#else
         if ((msg_p->status_flags & mMsg_STATUS_FLAG_FAST_TEXT) != 0 && (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) == 0) {
           mMsg_sound_MessageSpeedClear(1);
           msg_p->status_flags &= ~mMsg_STATUS_FLAG_NOT_PAUSE_FRAME;
@@ -1179,6 +1214,7 @@ static int mMsg_Main_Cursol_ControlCursol(mMsg_Window_c* msg_p) {
         else {
           mMsg_sound_MessageSpeedClear(2);
         }
+#endif
 
         /* Only move on to the next character every other frame unless forced */
         if ((msg_p->status_flags & mMsg_STATUS_FLAG_NOT_PAUSE_FRAME) == 0) {
@@ -1223,7 +1259,16 @@ static void mMsg_request_main_index_fromCursol(mMsg_Window_c* msg_p, int process
 
 static void mMsg_Main_Cursol(mMsg_Window_c* msg_p, GAME* game) {
   int processing = mMsg_Main_Cursol_ControlCursol(msg_p);
-  
+
+#ifdef TARGET_VITA
+  // fast + B held -> double up to 2 chars / frame (caps the matrix above)
+  if (processing && g_pc_settings.text_speed == 2 &&
+      (msg_p->status_flags & mMsg_STATUS_FLAG_FAST_TEXT) != 0 &&
+      (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) == 0) {
+    mMsg_Main_Cursol_ControlCursol(msg_p);
+  }
+#endif
+
   mMsg_request_main_index_fromCursol(msg_p, processing);
   mMsg_MainSetup_Window(msg_p, game);
 
