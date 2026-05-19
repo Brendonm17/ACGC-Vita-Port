@@ -652,9 +652,9 @@ void vita_vtc_init(void) {
     g_vtc_count = count;
     g_vtc_active = 1;
 
-    // Access logger setup. 256 KB buffer covers a worst-case session
-    // (16k * 8B) so no mid-frame flush is needed; a flush would block on
-    // SD while the IO thread is reading.
+#ifdef VITA_DEBUG
+    // build-tool input: first-touch keys reorder the pack by access order.
+    // release builds skip this so end users don't get a stray file.
     g_vtc_access_log = fopen("ux0:data/AnimalCrossing/vtc_access.log", "wb");
     if (g_vtc_access_log) {
         setvbuf(g_vtc_access_log, NULL, _IOFBF, 256 * 1024);
@@ -668,6 +668,7 @@ void vita_vtc_init(void) {
                      g_vtc_count, bitmap_bytes);
         }
     }
+#endif
     // intentionally no printf, stdout doesn't work on Vita
 }
 
