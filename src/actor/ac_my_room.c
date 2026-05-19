@@ -2020,6 +2020,11 @@ static void My_Room_Actor_dt(ACTOR* actorx, GAME* game) {
     }
 }
 
+#ifdef TARGET_VITA
+// must be visible to My_Room_Actor_move (defined in ac_my_room_move.c_inc).
+static int s_vita_nes_picker_ftrID = -1;
+#endif
+
 #include "../src/actor/ac_my_room_melody.c_inc"
 #include "../src/actor/ac_my_room_move.c_inc"
 #include "../src/actor/ac_my_room_draw.c_inc"
@@ -2051,6 +2056,21 @@ static void aMR_RequestStartEmu(MY_ROOM_ACTOR* my_room, FTR_ACTOR* ftr_actor, in
 
 static void aMR_RequestStartEmu_MemoryC(MY_ROOM_ACTOR* my_room, FTR_ACTOR* ftr_actor, int game_idx) {
     if (my_room->emu_info.request_flag == FALSE && mMsg_Check_MainHide(mMsg_Get_base_window_p())) {
+#ifdef TARGET_VITA
+        // Vita has no memcard. If the user has roms in ux0:data/AnimalCrossing/rom/nes,
+        // open the in-room picker overlay. Confirmation flips the emu_info flags from
+        // My_Room_Actor_move so msg_ctrl calls goto_emu_game(rom_no--) on the next
+        // frame; rom_no = -1 becomes current_famicom_rom = -2, caught by famicom_emu_init.
+        {
+            extern int vita_nes_scan_roms(void);
+            extern void vita_nes_picker_open(void);
+            if (vita_nes_scan_roms() > 0) {
+                vita_nes_picker_open();
+                s_vita_nes_picker_ftrID = ftr_actor->id;
+                return;
+            }
+        }
+#endif
         int card_count = aMR_GetCardFamicomCount();
 
         my_room->emu_info.card_famicom_count = card_count;

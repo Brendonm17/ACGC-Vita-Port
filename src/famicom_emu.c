@@ -197,14 +197,13 @@ extern void famicom_emu_init(GAME* game) {
 #endif
 
 #ifdef TARGET_VITA
-    // empty NES console: scan ux0 for custom ROMs, show picker
-    if (rom_id == 0) {
-        extern int vita_nes_scan_roms(void);
-        extern int vita_nes_show_picker(void);
-        if (vita_nes_scan_roms() > 0) {
-            if (vita_nes_show_picker() >= 0)
-                rom_id = 1;
-        }
+    // empty NES console: the my_room picker has already run and set
+    // g_custom_rom_selected (or left it -1 if cancelled). force rom_id=1 so
+    // famicom_init takes the > 0 path with cluclu as scaffolding; pc_fixnes_init
+    // then overwrites the buffer with the picked rom.
+    if (rom_id <= 0) {
+        extern int g_custom_rom_selected;
+        if (g_custom_rom_selected >= 0) rom_id = 1;
     }
 #endif
 

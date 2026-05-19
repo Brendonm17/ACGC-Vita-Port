@@ -375,4 +375,12 @@ static void My_Room_Actor_draw(ACTOR* actorx, GAME* game) {
     aMR_DrawFurniture(my_room, play, FALSE, FTR_TAK_TOUDAI); /* lighthouse model */
     aMR_DrawFurniture(my_room, play, TRUE, FTR_TAK_TOUDAI);  /* lighthouse model */
     aMR_DrawLeaf(my_room, play);
+
+#ifdef TARGET_VITA
+    {
+        extern int vita_nes_picker_is_active(void);
+        extern void vita_nes_picker_draw(GAME* game);
+        if (vita_nes_picker_is_active()) vita_nes_picker_draw(game);
+    }
+#endif
 }

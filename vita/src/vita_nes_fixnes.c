@@ -28,7 +28,7 @@ uint8_t *emuPrgRAM = NULL;
 uint32_t emuPrgRAMsize = 0;
 
 static int fixnes_initialized = 0;
-static int g_custom_rom_selected = -1;
+int g_custom_rom_selected = -1;
 static int vita_nes_load_custom_rom(uint8_t *buf, int buf_size);
 static GLuint fixnes_texture = 0;
 static int fixnes_frame_ready = 0;
@@ -141,8 +141,9 @@ void pc_fixnes_init(uint8_t *ines_data, int ines_size) {
     fixnes_initialized = 0;
 
     if (g_custom_rom_selected >= 0) {
-        if (!vita_nes_load_custom_rom(ines_data, ines_size))
-            return;
+        // on failure the buffer is left untouched so nofrendo can fall back
+        // to the built-in cluclu rom that famicom_rom_load preloaded.
+        vita_nes_load_custom_rom(ines_data, ines_size);
     }
 
     s_rom_data = ines_data;
@@ -357,8 +358,26 @@ static int str_ends_nes(const char* s) {
             (s[len-2]=='e'||s[len-2]=='E') && (s[len-1]=='s'||s[len-1]=='S'));
 }
 
+// accessors used by the my_room picker overlay (separate file so it can
+// include game headers without colliding with nofrendo's BUTTON_A et al.)
+int vita_nes_get_rom_count(void) { return g_custom_rom_count; }
+
+const char* vita_nes_get_rom_name(int idx) {
+    if (idx < 0 || idx >= g_custom_rom_count) return "";
+    return g_custom_rom_names[idx];
+}
+
+void vita_nes_set_selected(int idx) {
+    if (idx >= 0 && idx < g_custom_rom_count) g_custom_rom_selected = idx;
+}
+
+void vita_nes_sort_roms(void);  // forward decl, defined below
+
 int vita_nes_scan_roms(void) {
     g_custom_rom_count = 0;
+    // belt-and-suspenders: vita_platform.c creates the first two on boot, but
+    // defend against init order changes. errors (incl. already-exists) ignored.
+    sceIoMkdir("ux0:data/AnimalCrossing", 0777);
     sceIoMkdir("ux0:data/AnimalCrossing/rom", 0777);
     sceIoMkdir(VITA_NES_ROM_DIR, 0777);
 
@@ -379,7 +398,7 @@ int vita_nes_scan_roms(void) {
     return g_custom_rom_count;
 }
 
-static void sort_rom_list(void) {
+void vita_nes_sort_roms(void) {
     for (int i = 0; i < g_custom_rom_count - 1; i++) {
         for (int j = i + 1; j < g_custom_rom_count; j++) {
             if (strcasecmp(g_custom_rom_names[i], g_custom_rom_names[j]) > 0) {
@@ -395,76 +414,49 @@ static void sort_rom_list(void) {
     }
 }
 
-int vita_nes_show_picker(void) {
-    if (g_custom_rom_count <= 0) return -1;
-    if (g_custom_rom_count == 1) { g_custom_rom_selected = 0; return 0; }
-
-    sort_rom_list();
-    int sel = 0, scroll = 0, max_visible = 16;
-
-    SceCtrlData ctrl, prev_ctrl;
-    sceCtrlPeekBufferPositive(0, &prev_ctrl, 1);
-
-    while (1) {
-        sceCtrlPeekBufferPositive(0, &ctrl, 1);
-        u32 pressed = ctrl.buttons & ~prev_ctrl.buttons;
-        prev_ctrl = ctrl;
-
-        if (pressed & SCE_CTRL_CROSS) { g_custom_rom_selected = sel; return sel; }
-        if (pressed & SCE_CTRL_CIRCLE) { g_custom_rom_selected = -1; return -1; }
-        if (pressed & SCE_CTRL_UP) { if (sel > 0) sel--; if (sel < scroll) scroll = sel; }
-        if (pressed & SCE_CTRL_DOWN) { if (sel < g_custom_rom_count-1) sel++; if (sel >= scroll+max_visible) scroll = sel-max_visible+1; }
-
-        JW_BeginFrame();
-
-        GXSetNumChans(1);
-        GXSetNumTexGens(0);
-        GXSetNumTevStages(1);
-        GXSetNumIndStages(0);
-        GXSetTevDirect(GX_TEVSTAGE0);
-        GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
-        GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
-        GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_REG, GX_SRC_VTX, 0, GX_DF_NONE, GX_AF_NONE);
-        GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP);
-        GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
-        GXClearVtxDesc();
-        GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
-        GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XY, GX_S16, 0);
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-        { Mtx44 ortho; C_MTXOrtho(ortho, 0, -480.f, 0.f, 640.f, 0.f, 100.f); GXSetProjection(ortho, GX_ORTHOGRAPHIC); }
-        GXBegin(GX_QUADS, GX_VTXFMT0, 4);
-        GXPosition2s16(0, 0);       GXColor1u32(0x000000C8);
-        GXPosition2s16(640, 0);     GXColor1u32(0x000000C8);
-        GXPosition2s16(640, -480);  GXColor1u32(0x000000C8);
-        GXPosition2s16(0, -480);    GXColor1u32(0x000000C8);
-        GXEnd();
-
-        JW_JUTReport(20, 40, 1, "NES Game Select");
-        JW_JUTReport(20, 60, 1, "[%d/%d]  Cross: play  Circle: cancel", sel + 1, g_custom_rom_count);
-        for (int i = 0; i < max_visible && scroll + i < g_custom_rom_count; i++) {
-            int idx = scroll + i;
-            JW_JUTReport(30, 90 + i * 22, 1, "%s %s", idx == sel ? "->" : "  ", g_custom_rom_names[idx]);
-        }
-
-        JW_EndFrame();
-        VIWaitForRetrace();
-    }
-}
-
 static int vita_nes_load_custom_rom(uint8_t *buf, int buf_size) {
-    if (g_custom_rom_selected < 0 || g_custom_rom_selected >= g_custom_rom_count)
-        return 0;
-    FILE *f = fopen(g_custom_rom_paths[g_custom_rom_selected], "rb");
-    if (!f) return 0;
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (fsize > buf_size || fsize < 16) { fclose(f); return 0; }
-    memset(buf, 0, buf_size);
-    fread(buf, 1, fsize, f);
-    fclose(f);
+    // always clear selection so a failure can't be retried with stale state.
+    int rom_idx = g_custom_rom_selected;
     g_custom_rom_selected = -1;
+
+    if (rom_idx < 0 || rom_idx >= g_custom_rom_count) return 0;
+    if (!buf || buf_size < 16) return 0;
+
+    FILE *f = fopen(g_custom_rom_paths[rom_idx], "rb");
+    if (!f) return 0;
+
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long fsize = ftell(f);
+    if (fsize < 16 || fsize > buf_size) { fclose(f); return 0; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+
+    // validate iNES magic on the file BEFORE writing to buf, so a bad file
+    // leaves the caller's built-in rom intact and fallback works.
+    uint8_t header[16];
+    if (fread(header, 1, 16, f) != 16) { fclose(f); return 0; }
+    if (header[0] != 'N' || header[1] != 'E' || header[2] != 'S' || header[3] != 0x1A) {
+        fclose(f);
+        return 0;
+    }
+
+    // header is valid - commit. write header then rest. on partial read the
+    // buffer is left zero-padded so nofrendo will reject it cleanly rather
+    // than mixing leftover built-in rom bytes into a corrupt cart image.
+    memcpy(buf, header, 16);
+    size_t remaining = (size_t)(fsize - 16);
+    size_t got = fread(buf + 16, 1, remaining, f);
+    fclose(f);
+
+    if (got != remaining) {
+        memset(buf, 0, buf_size);
+        return 0;
+    }
+
+    // clear trailing area so the mapper doesn't see stale built-in rom data
+    // past the new prg+chr regions.
+    if ((size_t)fsize < (size_t)buf_size)
+        memset(buf + fsize, 0, buf_size - fsize);
+
     return 1;
 }
 

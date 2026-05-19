@@ -174,6 +174,7 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_banner.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_texpack.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_fixnes.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_picker.c
 
     ${DECOMP_ROOT}/pc/src/pc_gx.c
     ${DECOMP_ROOT}/pc/src/pc_gx_tev.c
