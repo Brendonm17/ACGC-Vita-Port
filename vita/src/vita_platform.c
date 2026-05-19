@@ -14,7 +14,10 @@
 #include <psp2/kernel/cpu.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
+#include <psp2/message_dialog.h>
+#include <psp2/common_dialog.h>
 #include <vitaGL.h>
+#include <string.h>
 #include <time.h>
 #include <dolphin/os.h>
 
@@ -154,6 +157,38 @@ void pc_crash_set_jmpbuf(jmp_buf* buf) {
 
 unsigned int pc_crash_get_addr(void) {
     return pc_last_crash_addr;
+}
+
+// caller must have vitaGL initialized; the system overlay composites on top
+// of whatever the app last drew, so we swap a black frame each loop.
+void vita_fatal_dialog_and_exit(const char* msg) {
+    fprintf(stderr, "[VITA] FATAL: %s\n", msg ? msg : "(no message)");
+    fflush(stderr);
+
+    if (!msg) sceKernelExitProcess(1);
+
+    SceMsgDialogParam param;
+    sceMsgDialogParamInit(&param);
+    param.mode = SCE_MSG_DIALOG_MODE_USER_MSG;
+
+    SceMsgDialogUserMessageParam userMsg;
+    memset(&userMsg, 0, sizeof(userMsg));
+    userMsg.buttonType = SCE_MSG_DIALOG_BUTTON_TYPE_OK;
+    userMsg.msg = (const SceChar8*)msg;
+    param.userMsgParam = &userMsg;
+
+    if (sceMsgDialogInit(&param) < 0) {
+        sceKernelExitProcess(1);
+    }
+
+    while (sceMsgDialogGetStatus() != SCE_COMMON_DIALOG_STATUS_FINISHED) {
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        vglSwapBuffers(GL_TRUE);
+    }
+
+    sceMsgDialogTerm();
+    sceKernelExitProcess(1);
 }
 
 void vita_init(void) {

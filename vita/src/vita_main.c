@@ -36,7 +36,16 @@ int main(int argc, char* argv[]) {
     vita_vtc_io_init();
     vita_input_init();
 
-    pc_disc_init();
+    // surface the missing-rom case up front; pc_assets_init crashes later
+    // without a disc image and the user has no idea why.
+    if (!pc_disc_init()) {
+        extern void vita_fatal_dialog_and_exit(const char* msg);
+        vita_fatal_dialog_and_exit(
+            "Animal Crossing ROM not found.\n\n"
+            "Please place an Animal Crossing (USA) disc image\n"
+            "(.iso, .ciso, or .gcm) at:\n\n"
+            "ux0:data/AnimalCrossing/rom/");
+    }
     pc_assets_init();
 
     printf("[VITA] Initialization complete, entering game...\n");

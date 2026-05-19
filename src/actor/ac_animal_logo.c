@@ -1770,12 +1770,17 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       }
       footer_y += line_h + 4.0f;
       {
-        static u8 str_unsaved[] = { '*', ' ', '=', ' ', 'u', 'n', 's', 'a', 'v', 'e', 'd',
-                                    ' ', 'c', 'h', 'a', 'n', 'g', 'e' };
-        f32 uw = (f32)mFont_GetStringWidth(str_unsaved, sizeof(str_unsaved), TRUE);
-        mFont_SetLineStrings(game, str_unsaved, sizeof(str_unsaved),
+#ifdef TARGET_VITA
+        // Vita restarts on save so the brief black screen doesn't look like a crash.
+        static u8 str_unsaved[] = "* = unsaved change.  Save restarts game.";
+#else
+        static u8 str_unsaved[] = "* = unsaved change";
+#endif
+        f32 uscale = 0.85f;
+        f32 uw = (f32)mFont_GetStringWidth(str_unsaved, sizeof(str_unsaved) - 1, TRUE) * uscale;
+        mFont_SetLineStrings(game, str_unsaved, sizeof(str_unsaved) - 1,
           (SCREEN_WIDTH_F - uw) * 0.5f, footer_y,
-          170, 170, 170, 140, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+          170, 170, 170, 140, FALSE, TRUE, uscale, uscale, mFont_MODE_FONT);
       }
     }
 
