@@ -2141,6 +2141,17 @@ static void mSM_make_trigger_data(Submenu* submenu) {
         trigger |= add_trigger[angle / DEG2SHORT_ANGLE2(90.0f)];
     }
 
+    // D-pad mirrors the C-stick for menu nav. Tool cycling
+    // (m_player_vita_dpad.c_inc) is gated by mPlib_able_submenu_type1 which
+    // fails while a submenu is up, so no conflict.
+    {
+        u16 raw = getButton();
+        if (raw & BUTTON_DRIGHT) trigger |= BUTTON_CRIGHT;
+        if (raw & BUTTON_DLEFT)  trigger |= BUTTON_CLEFT;
+        if (raw & BUTTON_DDOWN)  trigger |= BUTTON_CDOWN;
+        if (raw & BUTTON_DUP)    trigger |= BUTTON_CUP;
+    }
+
     if (trigger == control->last_trigger) {
         if (control->repeat_timer > 0) {
             control->repeat_timer--;
