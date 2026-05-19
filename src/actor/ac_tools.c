@@ -8,7 +8,7 @@
 static void aTOL_actor_ct(ACTOR* actor, GAME* play);
 static void aTOL_actor_dt(ACTOR*, GAME*);
 static void aTOL_init_clip_area(GAME* play);
-static void aTOL_free_clip_area();
+static void aTOL_free_clip_area(void);
 
 ACTOR_PROFILE Tools_Profile = {
     mAc_PROFILE_TOOLS,
@@ -30,7 +30,7 @@ static void aTOL_actor_ct(ACTOR* actor, GAME* game) {
     aTOL_init_clip_area(game);
 }
 
-static void aTOL_actor_dt(ACTOR*, GAME*) {
+static void aTOL_actor_dt(ACTOR* _p8, GAME* _p7) {
     aTOL_free_clip_area();
 }
 
@@ -132,7 +132,7 @@ static void aTOL_init_clip_area(GAME* game) {
     }
 }
 
-static void aTOL_free_clip_area() {
+static void aTOL_free_clip_area(void) {
     if (Common_Get(clip.tools_clip) != NULL) {
         Common_Set(clip.tools_clip, NULL);
     }

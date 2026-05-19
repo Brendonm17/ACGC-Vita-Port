@@ -4,10 +4,13 @@
 Decodes all DDS files (BC7/BC3/BC1/RGBA) -> RGBA -> DXT1/DXT5 -> VTC cache.
 Opaque textures use DXT1 (4 bpp), alpha textures use DXT5 (8 bpp).
 
-Usage:
-    python build_vita_texcache.py <texture_pack_dir> [output_file]
+V3 (default): pre-swizzled GXM Morton layout. Vita memcpys directly to vram.
+V2 (--v2): linear DXT. Vita swizzles on a worker thread.
 
-Output should be copied to: ux0:data/AnimalCrossing/texture_pack/vita_texcache.vtc
+Usage:
+    python build_vita_texcache.py [--v2] <texture_pack_dir> [output_file]
+
+Output should be copied to: ux0:data/AnimalCrossing/texture_packs/<name>.vtc
 """
 
 import struct
@@ -27,10 +30,64 @@ except ImportError:
     print("ERROR: pip install etcpak"); sys.exit(1)
 
 # --- VTC format constants ---
-VTC_MAGIC    = 0x56544331  # "VTC1"
-VTC_VERSION  = 2
-FMT_DXT1     = 1
-FMT_DXT5     = 5
+VTC_MAGIC      = 0x56544331  # "VTC1"
+VTC_VERSION_V2 = 2  # linear DXT, swizzled on Vita
+VTC_VERSION_V3 = 3  # pre-swizzled DXT, direct memcpy on Vita
+FMT_DXT1       = 1
+FMT_DXT5       = 5
+
+
+# --- Morton (Z-order) swizzle for V3 ---
+# Mirrors SwizzleTexData1x1 in vitaGL fork (source/utils/texture_swizzler.cpp).
+# Convention: morton_pos(x, y) = (Part1By1(x) << 1) + Part1By1(y), y at LSB.
+
+def _part1by1(x):
+    x &= 0xFFFFFFFF
+    x &= 0x0000FFFF
+    x = (x ^ (x << 8)) & 0x00FF00FF
+    x = (x ^ (x << 4)) & 0x0F0F0F0F
+    x = (x ^ (x << 2)) & 0x33333333
+    x = (x ^ (x << 1)) & 0x55555555
+    return x & 0xFFFFFFFF
+
+def _nearest_po2(v):
+    if v <= 1:
+        return 1
+    return 1 << (v - 1).bit_length()
+
+def swizzle_dxt_blocks(linear_blocks, bw_lin, bh_lin, bw_pot, bh_pot, block_bytes):
+    """Swizzle linear DXT blocks to GXM Morton order, sized to POT.
+
+    POT-padding blocks stay zero; the GPU never samples them since the
+    descriptor uses the logical dimensions.
+    """
+    tile_size = min(bw_pot, bh_pot)
+    x_mask = (0xAAAAAAAA | (~((tile_size * tile_size) - 1) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    y_mask = (0x55555555 | (~((tile_size * tile_size) - 1) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    x_origin = (_part1by1(0) << 1) & 0xFFFFFFFF
+    y_origin = _part1by1(0)
+
+    out = bytearray(bw_pot * bh_pot * block_bytes)
+    x_tw = x_origin
+    y_tw = y_origin
+    for y_pos in range(bh_lin):
+        for x_pos in range(bw_lin):
+            src = (y_pos * bw_lin + x_pos) * block_bytes
+            dst = (x_tw + y_tw) * block_bytes
+            out[dst:dst + block_bytes] = linear_blocks[src:src + block_bytes]
+            x_tw = (x_tw - x_mask) & x_mask
+        x_tw = x_origin
+        y_tw = (y_tw - y_mask) & y_mask
+    return bytes(out)
+
+
+def pot_swizzled_size(orig_w, orig_h, block_bytes):
+    """POT-rounded swizzled byte size for an orig_w x orig_h texture."""
+    pot_w = _nearest_po2(orig_w)
+    pot_h = _nearest_po2(orig_h)
+    bw_pot = (pot_w + 3) // 4
+    bh_pot = (pot_h + 3) // 4
+    return bw_pot * bh_pot * block_bytes
 
 # --- Cache key (must match loaded_cache_key in pc_texture_pack.c) ---
 def loaded_cache_key(data_hash, tlut_hash, fmt, w, h):
@@ -146,7 +203,11 @@ def has_meaningful_alpha(rgba_bytes):
 
 # --- DXT encoding ---
 def encode_dxt(rgba_bytes, w, h, use_dxt5):
-    """Encode RGBA to DXT1 or DXT5 using etcpak. Returns (dxt_bytes, format_id)."""
+    """Encode RGBA to DXT1 or DXT5. Returns (dxt_bytes, fmt, pad_w, pad_h).
+
+    pad_w/pad_h are the dims rounded up to a multiple of 4 (etcpak requirement).
+    Caller needs them to size POT swizzle buffers when w/h aren't mult-of-4.
+    """
     # etcpak requires dimensions to be multiples of 4
     pad_w = (w + 3) & ~3
     pad_h = (h + 3) & ~3
@@ -166,21 +227,48 @@ def encode_dxt(rgba_bytes, w, h, use_dxt5):
                 for col in range(w, pad_w):
                     padded[dst_off + col * 4:dst_off + col * 4 + 4] = edge_pixel
         rgba_bytes = bytes(padded)
-        w, h = pad_w, pad_h
 
     if use_dxt5:
-        return (etcpak.compress_to_dxt5(rgba_bytes, w, h), FMT_DXT5)
+        return (etcpak.compress_to_dxt5(rgba_bytes, pad_w, pad_h), FMT_DXT5, pad_w, pad_h)
     else:
-        return (etcpak.compress_to_dxt1(rgba_bytes, w, h), FMT_DXT1)
+        return (etcpak.compress_to_dxt1(rgba_bytes, pad_w, pad_h), FMT_DXT1, pad_w, pad_h)
+
+
+def swizzle_for_v3(linear_dxt, orig_w, orig_h, pad_w, pad_h, fmt_id):
+    """Swizzle (pad_w x pad_h) linear DXT into a POT-sized Morton buffer."""
+    block_bytes = 16 if fmt_id == FMT_DXT5 else 8
+    bw_lin = pad_w // 4
+    bh_lin = pad_h // 4
+    pot_w = _nearest_po2(orig_w)
+    pot_h = _nearest_po2(orig_h)
+    bw_pot = (pot_w + 3) // 4
+    bh_pot = (pot_h + 3) // 4
+    return swizzle_dxt_blocks(linear_dxt, bw_lin, bh_lin, bw_pot, bh_pot, block_bytes)
 
 # --- Main ---
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <texture_pack_dir> [output_file]")
+    # Parse args: optional --v2 flag selects legacy linear layout.
+    write_v3 = True
+    positional = []
+    for a in sys.argv[1:]:
+        if a == "--v2":
+            write_v3 = False
+        elif a == "--v3":
+            write_v3 = True
+        else:
+            positional.append(a)
+
+    if not positional:
+        print(f"Usage: {sys.argv[0]} [--v2|--v3] <texture_pack_dir> [output_file]")
+        print("  --v3 (default): pre-swizzled blocks, zero-CPU-cost on Vita")
+        print("  --v2:           legacy linear blocks (Vita swizzles at runtime)")
         sys.exit(1)
 
-    pack_dir = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else os.path.join(pack_dir, "vita_texcache.vtc")
+    pack_dir = positional[0]
+    output_file = positional[1] if len(positional) > 1 else os.path.join(pack_dir, "vita_texcache.vtc")
+
+    vtc_version = VTC_VERSION_V3 if write_v3 else VTC_VERSION_V2
+    print(f"Building VTC v{vtc_version} ({'pre-swizzled' if write_v3 else 'linear'} layout)")
 
     if not os.path.isdir(pack_dir):
         print(f"ERROR: {pack_dir} is not a directory"); sys.exit(1)
@@ -232,7 +320,10 @@ def main():
 
         hd_w, hd_h, rgba = result
         use_alpha = has_meaningful_alpha(rgba)
-        comp_data, fmt_id = encode_dxt(rgba, hd_w, hd_h, use_alpha)
+        comp_data, fmt_id, pad_w, pad_h = encode_dxt(rgba, hd_w, hd_h, use_alpha)
+
+        if write_v3:
+            comp_data = swizzle_for_v3(comp_data, hd_w, hd_h, pad_w, pad_h, fmt_id)
 
         if fmt_id == FMT_DXT1: dxt1_count += 1
         else: dxt5_count += 1
@@ -267,7 +358,7 @@ def main():
 
     with open(output_file, 'wb') as f:
         # Header
-        f.write(struct.pack('<IIII', VTC_MAGIC, VTC_VERSION, count, 0))
+        f.write(struct.pack('<IIII', VTC_MAGIC, vtc_version, count, 0))
 
         # Build index table (need to compute offsets first)
         offsets = []

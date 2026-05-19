@@ -7,6 +7,10 @@
 #include "dolphin/os/OSUtil.h"
 #include "dolphin/os.h"
 
+#ifdef TARGET_VITA
+#include <cstdlib>  // malloc/free fallback for pre-JKRHeap allocs
+#endif
+
 JKRHeap* JKRHeap::sSystemHeap;
 JKRHeap* JKRHeap::sCurrentHeap;
 JKRHeap* JKRHeap::sRootHeap;
@@ -297,20 +301,38 @@ bool JKRHeap::isSubHeap(JKRHeap* heap) const {
 }
 
 void* operator new(u32 byteCount) {
-    return JKRHeap::alloc(byteCount, 4, nullptr);
+    void* mem = JKRHeap::alloc(byteCount, 4, nullptr);
+#ifdef TARGET_VITA
+    // fall back to newlib heap when JKR isn't ready (pre-main VitaGL globals)
+    // or the fixed arena is full (runtime shader preprocessor allocs).
+    if (!mem) mem = malloc(byteCount);
+#endif
+    return mem;
 }
 void* operator new(u32 byteCount, int alignment) {
-    return JKRHeap::alloc(byteCount, alignment, nullptr);
+    void* mem = JKRHeap::alloc(byteCount, alignment, nullptr);
+#ifdef TARGET_VITA
+    if (!mem) mem = malloc(byteCount);
+#endif
+    return mem;
 }
 void* operator new(u32 byteCount, JKRHeap* heap, int alignment) {
     return JKRHeap::alloc(byteCount, alignment, heap);
 }
 
 void* operator new[](u32 byteCount) {
-    return JKRHeap::alloc(byteCount, 4, nullptr);
+    void* mem = JKRHeap::alloc(byteCount, 4, nullptr);
+#ifdef TARGET_VITA
+    if (!mem) mem = malloc(byteCount);
+#endif
+    return mem;
 }
 void* operator new[](u32 byteCount, int alignment) {
-    return JKRHeap::alloc(byteCount, alignment, nullptr);
+    void* mem = JKRHeap::alloc(byteCount, alignment, nullptr);
+#ifdef TARGET_VITA
+    if (!mem) mem = malloc(byteCount);
+#endif
+    return mem;
 }
 void* operator new[](u32 byteCount, JKRHeap* heap, int alignment) {
     return JKRHeap::alloc(byteCount, alignment, heap);
@@ -318,19 +340,36 @@ void* operator new[](u32 byteCount, JKRHeap* heap, int alignment) {
 
 // this is not needed without the other pragma and asm bs
 void operator delete(void* memory) {
+#ifdef TARGET_VITA
+    if (!memory) return;
+    // route non-JKR pointers (malloc fallback above, or anything outside the
+    // arena) to free(). findFromRoot returns NULL pre-init too.
+    if (!JKRHeap::findFromRoot(memory)) { free(memory); return; }
+#endif
     JKRHeap::free(memory, nullptr);
 }
 void operator delete[](void* memory) {
+#ifdef TARGET_VITA
+    if (!memory) return;
+    if (!JKRHeap::findFromRoot(memory)) { free(memory); return; }
+#endif
     JKRHeap::free(memory, nullptr);
 }
-#ifdef TARGET_PC
-/* C++14 sized deallocation - GCC 15 generates calls to these by default.
-   Without these, sized delete falls through to CRT free() which crashes
-   on pointers from the JKR heap (inside the game's arena memory). */
+#if defined(TARGET_PC) || defined(TARGET_VITA)
+// C++14 sized deallocation. GCC emits calls to these; without them sized
+// delete falls through to CRT free() and crashes on JKR arena pointers.
 void operator delete(void* memory, size_t) {
+#ifdef TARGET_VITA
+    if (!memory) return;
+    if (!JKRHeap::findFromRoot(memory)) { free(memory); return; }
+#endif
     JKRHeap::free(memory, nullptr);
 }
 void operator delete[](void* memory, size_t) {
+#ifdef TARGET_VITA
+    if (!memory) return;
+    if (!JKRHeap::findFromRoot(memory)) { free(memory); return; }
+#endif
     JKRHeap::free(memory, nullptr);
 }
 #endif

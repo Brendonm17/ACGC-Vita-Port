@@ -207,6 +207,12 @@ static s32 zurumode_update() {
 }
 
 static void zurumode_callback(void* param) {
+#ifdef TARGET_VITA
+    // Vita has one controller; zurumode reads pad[1] which is uninit.
+    // the 11-step cheat code is unreachable anyway, skip to avoid stale reads.
+    APPNMI_ZURUMODE_CLR();
+    return;
+#else
     zerucheck_key_check(&zuruKeyCheck, (u32)(((padmgr*)param)->cur_pads[1].button));
     if (APPNMI_DEBUGMODE_GET() || (APPNMI_TESTMODE_GET() && (padmgr_isConnectedController(1) != 0)) ||
         (zuruKeyCheck.zurumode_enabled != 0)) {
@@ -219,6 +225,7 @@ static void zurumode_callback(void* param) {
     }
 
     zurumode_update();
+#endif
 }
 
 extern void zurumode_init(void) {

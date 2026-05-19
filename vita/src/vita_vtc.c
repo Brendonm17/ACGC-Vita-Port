@@ -10,12 +10,21 @@
 #include <string.h>
 #include <vitaGL.h>
 
+// OSReport is the only reliable path to error.log; freopen(stderr) drops
+// through newlib on Vita. See pc_os.c:pc_log_open.
+extern void OSReport(const char* fmt, ...);
+
 // VTC file format
-#define VTC_MAGIC   0x56544331  // "VTC1"
-#define VTC_VERSION 2
+#define VTC_MAGIC          0x56544331  // "VTC1"
+#define VTC_VERSION_V2     2  // linear DXT, swizzled on Vita
+#define VTC_VERSION_V3     3  // pre-swizzled DXT, direct memcpy on Vita
+#define VTC_VERSION_LATEST VTC_VERSION_V3
 
 // Resolved VTC path from settings (built once at init, shared by both file handles)
 static char g_vtc_path[128] = "";
+// Active pack version (v2 linear or v3 pre-swizzled). Picks the io-thread
+// upload path and gates the raw glCompressedTexImage2D fallback (v2 only).
+static int g_vtc_format_version = 0;
 #define VTC_FMT_DXT1    1
 #define VTC_FMT_DXT5    5
 
@@ -104,6 +113,57 @@ typedef struct {
 } VtcKeyCacheEntry;
 static VtcKeyCacheEntry g_vtc_key_cache[VTC_KEY_CACHE_SIZE];
 
+// kc_cache spinlock. Without it, the main-thread invalidator can race a
+// worker mid-lookup and produce a stale hit (long-session wrong-HD swap).
+static volatile int g_vtc_kc_lock = 0;
+static inline void vtc_kc_lock(void) {
+    while (__sync_lock_test_and_set(&g_vtc_kc_lock, 1)) { }
+}
+static inline void vtc_kc_unlock(void) {
+    __sync_lock_release(&g_vtc_kc_lock);
+}
+
+// loaded_cache spinlock. Without it, worker reads can see torn inserts/
+// evicts and pick up a stale key bound to the wrong gl_tex.
+static volatile int g_vtc_loaded_lock = 0;
+static inline void vtc_loaded_lock(void) {
+    while (__sync_lock_test_and_set(&g_vtc_loaded_lock, 1)) { }
+}
+static inline void vtc_loaded_unlock(void) {
+    __sync_lock_release(&g_vtc_loaded_lock);
+}
+
+// prefetch queue spinlock. requeue runs on main thread, drain runs on
+// worker; without sync the count++ can lose updates or exceed bounds.
+static volatile int g_vtc_prefetch_lock = 0;
+static inline void vtc_prefetch_lock(void) {
+    while (__sync_lock_test_and_set(&g_vtc_prefetch_lock, 1)) { }
+}
+static inline void vtc_prefetch_unlock(void) {
+    __sync_lock_release(&g_vtc_prefetch_lock);
+}
+
+// Drop kc_cache entries for a recycled data_ptr. The cached fnv only
+// samples 256+256 bytes so different content at the same address can
+// collide; without invalidation the long-session symptom is wrong HD
+// textures swapping in as buffers cycle through the same addresses.
+void vita_vtc_invalidate_compute_cache_for_ptr(unsigned int data_ptr) {
+    vtc_kc_lock();
+    for (int i = 0; i < VTC_KEY_CACHE_SIZE; i++) {
+        if (g_vtc_key_cache[i].occupied && g_vtc_key_cache[i].data_ptr == data_ptr) {
+            g_vtc_key_cache[i].occupied = 0;
+        }
+    }
+    vtc_kc_unlock();
+}
+
+// Wipe kc_cache on whole-tex_cache invalidation (scene change, soft reset).
+void vita_vtc_invalidate_all_compute_cache(void) {
+    vtc_kc_lock();
+    memset(g_vtc_key_cache, 0, sizeof(g_vtc_key_cache));
+    vtc_kc_unlock();
+}
+
 static unsigned int vtc_key_cache_slot(unsigned int data_ptr, unsigned int data_hash_fnv) {
     unsigned int h = data_ptr ^ (data_hash_fnv * 0x9E3779B1u);
     h ^= h >> 16;
@@ -133,10 +193,26 @@ int vita_vtc_upgrade_count = 0;
 int vita_vtc_requeue_count = 0;
 unsigned int vita_vtc_prefetch_us = 0;  // accumulated prefetch I/O time (worker idle)
 
+// IO thread phase timing (us). Dumped+reset every N uploads.
+static volatile unsigned int g_io_fread_us = 0;
+static volatile unsigned int g_io_alloc_us = 0;
+static volatile unsigned int g_io_finalize_us = 0;
+static volatile unsigned int g_io_bytes_read = 0;
+static volatile int g_io_phase_count = 0;
+
+// Access logger: stream of first-touch cache_keys to vtc_access.log so
+// the build tool can reorder the pack by access order. Truncated on launch.
+static FILE* g_vtc_access_log = NULL;
+static unsigned char* g_vtc_access_logged = NULL; // 1 bit per entry index
+static int g_vtc_access_inflight = 0;
+static int g_vtc_access_total = 0;
+
 // Prefetch pending queue
 // Populated by vita_vtc_compute_key (worker thread),
 // drained by vita_vtc_prefetch (worker thread idle time after signal done)
-#define VTC_PREFETCH_MAX 64
+// 128 holds transition bursts; 64 dropped overflow on area changes and
+// HD versions only landed once the slow upgrade-scan requeued them.
+#define VTC_PREFETCH_MAX 128
 static unsigned long long g_vtc_prefetch_keys[VTC_PREFETCH_MAX];
 static volatile int g_vtc_prefetch_count = 0;
 
@@ -336,7 +412,9 @@ static int vtc_check_real_vram_ok(int vram_bytes) {
     return free_vram >= (size_t)VTC_REAL_VRAM_MARGIN;
 }
 
-void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vram_bytes) {
+// Insert with loaded_lock already held, so callers can bracket insert
+// + ref bump under one window.
+void vtc_loaded_insert_locked(unsigned long long key, GLuint tex, int w, int h, int vram_bytes) {
     // budget enforcement: prior versions broke out of the eviction loop and
     // continued inserting, silently overshooting. that accumulated and
     // eventually exhausted real CDRAM
@@ -406,9 +484,18 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
     vita_defer_tex_delete(tex);
 }
 
+// Public insert. Symbol kept for older fallback callers.
+void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vram_bytes) {
+    vtc_loaded_lock();
+    vtc_loaded_insert_locked(key, tex, w, h, vram_bytes);
+    vtc_loaded_unlock();
+}
+
 // Call once per frame to advance LRU counter
 void vita_vtc_tick_frame(void) {
     g_vtc_frame++;
+    // No mid-frame flush: 256 KB stdio buffer holds the session, and any
+    // main-thread fflush blocks on the SD driver while IO is reading.
 }
 
 // Negative cache ops
@@ -519,11 +606,19 @@ void vita_vtc_init(void) {
         fclose(init_file);
         return;
     }
-    if (header[0] != VTC_MAGIC || header[1] != VTC_VERSION) {
-        printf("[VTC] Wrong magic/version: %08X v%d\n", header[0], header[1]);
+    if (header[0] != VTC_MAGIC) {
+        printf("[VTC] Wrong magic: %08X\n", header[0]);
         fclose(init_file);
         return;
     }
+    if (header[1] != VTC_VERSION_V2 && header[1] != VTC_VERSION_V3) {
+        printf("[VTC] Unsupported version: %d (this build supports v2 and v3)\n", header[1]);
+        fclose(init_file);
+        return;
+    }
+    g_vtc_format_version = (int)header[1];
+    // OSReport so the load shows in error.log; printf stdout is dropped.
+    OSReport("[VTC] loaded format v%d: %s\n", g_vtc_format_version, g_vtc_path);
 
     int count = (int)header[2];
     if (count <= 0 || count > 100000) {
@@ -556,7 +651,40 @@ void vita_vtc_init(void) {
 
     g_vtc_count = count;
     g_vtc_active = 1;
+
+    // Access logger setup. 256 KB buffer covers a worst-case session
+    // (16k * 8B) so no mid-frame flush is needed; a flush would block on
+    // SD while the IO thread is reading.
+    g_vtc_access_log = fopen("ux0:data/AnimalCrossing/vtc_access.log", "wb");
+    if (g_vtc_access_log) {
+        setvbuf(g_vtc_access_log, NULL, _IOFBF, 256 * 1024);
+        int bitmap_bytes = (g_vtc_count + 7) / 8;
+        g_vtc_access_logged = (unsigned char*)calloc(1, bitmap_bytes);
+        if (!g_vtc_access_logged) {
+            fclose(g_vtc_access_log);
+            g_vtc_access_log = NULL;
+        } else {
+            OSReport("[VTC] access logger opened (%d entries, %d bitmap bytes, 256 KB stdio buf)\n",
+                     g_vtc_count, bitmap_bytes);
+        }
+    }
     // intentionally no printf, stdout doesn't work on Vita
+}
+
+// First-touch logger. Hot path: never fflush here. fflush blocks on SD
+// while IO is reading and used to push past the compositor watchdog.
+static inline void vtc_access_log_record(VtcIndexEntry* entry, unsigned long long key) {
+    if (!g_vtc_access_log || !g_vtc_access_logged) return;
+    int idx = (int)(entry - g_vtc_index);
+    if (idx < 0 || idx >= g_vtc_count) return;
+    unsigned char bit = (unsigned char)(1u << (idx & 7));
+    unsigned char* byte = &g_vtc_access_logged[idx >> 3];
+    // Benign race: double-write is dedup'd by the build tool.
+    if (*byte & bit) return;
+    *byte |= bit;
+    fwrite(&key, 8, 1, g_vtc_access_log);
+    g_vtc_access_total++;
+    g_vtc_access_inflight++;
 }
 
 void vita_vtc_shutdown(void) {
@@ -577,6 +705,13 @@ void vita_vtc_shutdown(void) {
 
     if (g_vtc_index) { free(g_vtc_index); g_vtc_index = NULL; }
     if (g_vtc_file_worker) { fclose(g_vtc_file_worker); g_vtc_file_worker = NULL; }
+    if (g_vtc_access_log) {
+        fflush(g_vtc_access_log);
+        OSReport("[VTC] access log closed: %d first-touch events recorded\n", g_vtc_access_total);
+        fclose(g_vtc_access_log);
+        g_vtc_access_log = NULL;
+    }
+    if (g_vtc_access_logged) { free(g_vtc_access_logged); g_vtc_access_logged = NULL; }
     g_vtc_count = 0;
     g_vtc_active = 0;
 }
@@ -585,9 +720,11 @@ void vita_vtc_shutdown(void) {
 // vita_vtc_loaded_cache_acquire_key to take ownership after the lookup.
 GLuint vita_vtc_loaded_cache_lookup(unsigned long long key) {
     if (!g_vtc_active || key == 0) return 0;
+    vtc_loaded_lock();
     VtcLoadedEntry* e = vtc_loaded_find(key);
-    if (!e) return 0;
-    return e->gl_tex;
+    GLuint tex = e ? e->gl_tex : 0;
+    vtc_loaded_unlock();
+    return tex;
 }
 
 // increment ref_count for an entry. called when a tex_cache entry
@@ -595,9 +732,10 @@ GLuint vita_vtc_loaded_cache_lookup(unsigned long long key) {
 // must be matched by a release_key call when the reference is dropped.
 void vita_vtc_loaded_cache_acquire_key(unsigned long long key) {
     if (!g_vtc_active || key == 0) return;
+    vtc_loaded_lock();
     VtcLoadedEntry* e = vtc_loaded_find(key);
-    if (!e) return;
-    e->ref_count++;
+    if (e) e->ref_count++;
+    vtc_loaded_unlock();
 }
 
 // decrement ref_count for an entry. called when a tex_cache entry that
@@ -606,9 +744,10 @@ void vita_vtc_loaded_cache_acquire_key(unsigned long long key) {
 // vtc_loaded_insert that exceeds the vram budget.
 void vita_vtc_loaded_cache_release_key(unsigned long long key) {
     if (!g_vtc_active || key == 0) return;
+    vtc_loaded_lock();
     VtcLoadedEntry* e = vtc_loaded_find(key);
-    if (!e) return;
-    if (e->ref_count > 0) e->ref_count--;
+    if (e && e->ref_count > 0) e->ref_count--;
+    vtc_loaded_unlock();
 }
 
 // legacy no-op kept for compatibility with any older call sites.
@@ -620,7 +759,10 @@ void vita_vtc_loaded_cache_unclaim_all(void) {
 void vita_vtc_requeue_prefetch(unsigned long long key) {
     if (!g_vtc_active || key == 0) return;
     // Skip if already in loaded_cache
-    if (vtc_loaded_find(key)) return;
+    vtc_loaded_lock();
+    int in_loaded = (vtc_loaded_find(key) != NULL);
+    vtc_loaded_unlock();
+    if (in_loaded) return;
     // Skip if already in an I/O slot
     for (int si = 0; si < VTC_IO_SLOTS; si++) {
         if (g_vtc_io_slots[si].key == key && g_vtc_io_slots[si].state != VTC_SLOT_FREE)
@@ -629,22 +771,32 @@ void vita_vtc_requeue_prefetch(unsigned long long key) {
     // Skip if not in VTC index
     if (!vtc_find(key)) return;
     // Queue for prefetch (worker thread will read during next idle window)
+    vtc_prefetch_lock();
     if (g_vtc_prefetch_count < VTC_PREFETCH_MAX) {
         g_vtc_prefetch_keys[g_vtc_prefetch_count++] = key;
     }
+    vtc_prefetch_unlock();
 }
 
 int vita_vtc_active(void) {
     return g_vtc_active;
 }
 
-// Main thread lookup: check loaded_cache only, NO file I/O.
-// Returns HD texture from loaded_cache if available, 0 otherwise.
-// File reads happen exclusively on the worker thread via prefetch.
+// 2=linear, 3=pre-swizzled (Morton). 0=no pack. V3 raw bytes are NOT
+// safe for glCompressedTexImage2D (it would re-swizzle them).
+int vita_vtc_format_version(void) {
+    return g_vtc_format_version;
+}
+
+// Main-thread lookup. loaded_cache only, no I/O (worker handles reads).
+// On hit, acquires a ref and returns the matched cache_key via out_key
+// so the caller can release it on eviction. Without the ref, LRU can free
+// a tex while tex_cache still holds the GL id (long-session wrong-tex).
 GLuint vita_vtc_lookup(const void* data, int data_size,
                         int w, int h, unsigned int fmt,
                         const void* tlut_data, int tlut_entries, int tlut_is_be,
-                        int* out_w, int* out_h) {
+                        int* out_w, int* out_h, unsigned long long* out_key) {
+    if (out_key) *out_key = 0;
     if (!g_vtc_active || !data || data_size <= 0) return 0;
 
     // Compute hashes
@@ -655,18 +807,28 @@ GLuint vita_vtc_lookup(const void* data, int data_size,
 
     unsigned long long key = vtc_cache_key(data_hash, tlut_hash, fmt, (unsigned int)w, (unsigned int)h);
 
-    // Loaded cache: check exact key then wildcard
+    // Snapshot under lock so the entry stays valid through the ref bump.
+    vtc_loaded_lock();
     VtcLoadedEntry* loaded = vtc_loaded_find(key);
+    unsigned long long matched_key = key;
     if (!loaded && tlut_hash != 0) {
         unsigned long long wc_key = vtc_cache_key(data_hash, 0, fmt, (unsigned int)w, (unsigned int)h);
         loaded = vtc_loaded_find(wc_key);
+        if (loaded) matched_key = wc_key;
     }
     if (loaded) {
+        int snap_w = loaded->tex_w;
+        int snap_h = loaded->tex_h;
+        GLuint snap_tex = loaded->gl_tex;
+        loaded->ref_count++; // caller takes ownership of this ref
+        vtc_loaded_unlock();
         g_vtc_stat_cache_hits++;
-        if (out_w) *out_w = loaded->tex_w;
-        if (out_h) *out_h = loaded->tex_h;
-        return loaded->gl_tex;
+        if (out_w) *out_w = snap_w;
+        if (out_h) *out_h = snap_h;
+        if (out_key) *out_key = matched_key;
+        return snap_tex;
     }
+    vtc_loaded_unlock();
 
     // Not in loaded_cache. Return 0, let worker thread handle via prefetch.
     return 0;
@@ -747,8 +909,12 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
     g_vtc_compute_calls++;
     if (!g_vtc_active || !data || data_size <= 0) return 0;
 
-    // Check XXHash64 result cache
+    // XXHash64 result cache. Snapshot under lock so a main-thread
+    // invalidate can't tear our matched-read of vtc_key.
     unsigned int kc_slot = vtc_key_cache_slot(data_ptr, data_hash_fnv);
+    unsigned long long cached_key = 0;
+    int kc_hit = 0;
+    vtc_kc_lock();
     for (int i = 0; i < 4; i++) { // linear probe up to 4 slots
         unsigned int idx = (kc_slot + i) & VTC_KEY_CACHE_MASK;
         VtcKeyCacheEntry* kc = &g_vtc_key_cache[idx];
@@ -756,16 +922,30 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
         if (kc->data_ptr == data_ptr && kc->data_hash_fnv == data_hash_fnv &&
             kc->tlut_hash_fnv == tlut_hash_fnv && kc->w == (unsigned short)w &&
             kc->h == (unsigned short)h && kc->fmt == fmt) {
-            g_vtc_keycache_hits++;
-            unsigned long long cached_key = kc->vtc_key;
-            if (cached_key != 0) {
-                // Re-queue for prefetch in case it was evicted from loaded_cache
-                if (!vtc_loaded_find(cached_key) && g_vtc_prefetch_count < VTC_PREFETCH_MAX) {
+            cached_key = kc->vtc_key;
+            kc_hit = 1;
+            break;
+        }
+    }
+    vtc_kc_unlock();
+    if (kc_hit) {
+        g_vtc_keycache_hits++;
+        if (cached_key != 0) {
+            VtcIndexEntry* logged_entry = vtc_find(cached_key);
+            if (logged_entry) vtc_access_log_record(logged_entry, cached_key);
+            // Re-queue for prefetch in case it was evicted from loaded_cache
+            vtc_loaded_lock();
+            int in_loaded = (vtc_loaded_find(cached_key) != NULL);
+            vtc_loaded_unlock();
+            if (!in_loaded) {
+                vtc_prefetch_lock();
+                if (g_vtc_prefetch_count < VTC_PREFETCH_MAX) {
                     g_vtc_prefetch_keys[g_vtc_prefetch_count++] = cached_key;
                 }
+                vtc_prefetch_unlock();
             }
-            return cached_key;
         }
+        return cached_key;
     }
 
     // Cache miss: compute XXHash64 inline (first encounter only)
@@ -777,7 +957,10 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
 
     unsigned long long result_key = 0; // default: not in VTC
 
-    if (vtc_loaded_find(key)) {
+    vtc_loaded_lock();
+    int loaded_hit = (vtc_loaded_find(key) != NULL);
+    vtc_loaded_unlock();
+    if (loaded_hit) {
         result_key = key;
     } else {
         VtcIndexEntry* entry = NULL;
@@ -787,7 +970,10 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
         // Wildcard fallback for CI textures: retry with tlut_hash=0
         if (!entry && tlut_hash != 0) {
             unsigned long long wc_key = vtc_cache_key(data_hash, 0, fmt, (unsigned int)w, (unsigned int)h);
-            if (vtc_loaded_find(wc_key)) {
+            vtc_loaded_lock();
+            int wc_hit = (vtc_loaded_find(wc_key) != NULL);
+            vtc_loaded_unlock();
+            if (wc_hit) {
                 result_key = wc_key;
             } else if (!vtc_neg_check(wc_key)) {
                 entry = vtc_find(wc_key);
@@ -802,7 +988,9 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
         }
     }
 
-    // Store in XXHash64 result cache
+    // Publish to kc_cache under lock so the invalidator can't see a
+    // half-written entry.
+    vtc_kc_lock();
     for (int i = 0; i < 4; i++) {
         unsigned int idx = (kc_slot + i) & VTC_KEY_CACHE_MASK;
         VtcKeyCacheEntry* kc = &g_vtc_key_cache[idx];
@@ -814,17 +1002,25 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
             kc->h = (unsigned short)h;
             kc->fmt = fmt;
             kc->vtc_key = result_key;
+            // publish occupied last so a racing invalidate sees either
+            // 0 (skip) or 1 with all fields written.
+            __sync_synchronize();
             kc->occupied = 1;
             break;
         }
     }
+    vtc_kc_unlock();
 
     if (result_key != 0) {
         g_vtc_compute_hits++;
+        VtcIndexEntry* logged_entry = vtc_find(result_key);
+        if (logged_entry) vtc_access_log_record(logged_entry, result_key);
         // Queue for prefetch. Worker thread will read VTC data during idle time.
+        vtc_prefetch_lock();
         if (g_vtc_prefetch_count < VTC_PREFETCH_MAX) {
             g_vtc_prefetch_keys[g_vtc_prefetch_count++] = result_key;
         }
+        vtc_prefetch_unlock();
     }
     return result_key;
 }
@@ -837,18 +1033,28 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
 GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
     if (!g_vtc_active || key == 0) return 0;
 
-    // 1. Check loaded cache (instant, no I/O)
+    // 1. Loaded cache (no I/O). Snapshot under lock so eviction can't
+    // free the gl_tex between find and ref bump.
+    vtc_loaded_lock();
     VtcLoadedEntry* loaded = vtc_loaded_find(key);
     if (loaded) {
-        if (out_w) *out_w = loaded->tex_w;
-        if (out_h) *out_h = loaded->tex_h;
+        int snap_w = loaded->tex_w;
+        int snap_h = loaded->tex_h;
+        GLuint snap_tex = loaded->gl_tex;
         loaded->ref_count++; // caller takes ownership
-        return loaded->gl_tex;
+        vtc_loaded_unlock();
+        if (out_w) *out_w = snap_w;
+        if (out_h) *out_h = snap_h;
+        return snap_tex;
     }
+    vtc_loaded_unlock();
 
     // 2. Check I/O thread pre-read slots (worker thread queued these last frame)
     for (int si = 0; si < VTC_IO_SLOTS; si++) {
         if (g_vtc_io_slots[si].key == key && g_vtc_io_slots[si].state == VTC_SLOT_READY) {
+            // Acquire barrier paired with the io-thread READY store; without
+            // it ARM can reorder pending/buffer loads ahead of state.
+            __sync_synchronize();
             // I/O thread already read this. Zero file I/O on main thread.
             g_vtc_io_preread_hits++;
             int hd_w = g_vtc_io_slots[si].hd_w;
@@ -880,8 +1086,16 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             if (pending) {
                 g_vtc_io_slots[si].pending = NULL;
                 vglCommitPendingTexture(pending);
+            } else if (g_vtc_format_version == VTC_VERSION_V3) {
+                // v3 bytes are pre-swizzled; uploading them via the linear
+                // path would re-swizzle and produce garbage. Drop and let
+                // the next compute_key requeue.
+                glDeleteTextures(1, &tex);
+                vita_vtc_release_slot(si);
+                return 0;
             } else {
-                // fallback if prepare couldn't allocate on the io thread
+                // v2 fallback: linear DXT can upload directly. Only hit
+                // when vglPrepareCompressedTexture2D failed to allocate.
                 unsigned char* dxt = g_vtc_io_slots[si].buffer;
                 int dxt_size = g_vtc_io_slots[si].dxt_size;
                 GLenum gl_fmt = vtc_fmt_to_gl(slot_fmt);
@@ -904,10 +1118,12 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             }
 
             int vram = vtc_estimate_vram(hd_w, hd_h, slot_fmt);
-            vtc_loaded_insert(key, tex, hd_w, hd_h, vram);
-            // increment ref_count for the caller's tex_cache entry.
+            // insert + ref-bump under one lock so LRU can't evict between.
+            vtc_loaded_lock();
+            vtc_loaded_insert_locked(key, tex, hd_w, hd_h, vram);
             VtcLoadedEntry* inserted = vtc_loaded_find(key);
             if (inserted) inserted->ref_count++;
+            vtc_loaded_unlock();
 
             if (out_w) *out_w = hd_w;
             if (out_h) *out_h = hd_h;
@@ -934,34 +1150,95 @@ static int vtc_io_thread_func(SceSize args, void* argp) {
 
             VtcIoSlot* slot = &g_vtc_io_slots[i];
             slot->state = VTC_SLOT_READING;
+            GLenum gl_fmt = vtc_fmt_to_gl(slot->dxt_format);
 
-            // Determine buffer
-            unsigned char* buf;
-            if (slot->dxt_size <= VTC_IO_BUF_SIZE) {
-                buf = slot->buffer; // pre-allocated pool buffer
-                slot->malloc_buf = NULL;
+            if (g_vtc_format_version == VTC_VERSION_V3) {
+                // Direct path: fread straight into GPU memory.
+                unsigned int _t_alloc = sceKernelGetProcessTimeLow();
+                slot->pending = vglPrepareEmptyCompressedTexture2D(
+                    gl_fmt, slot->hd_w, slot->hd_h);
+                g_io_alloc_us += sceKernelGetProcessTimeLow() - _t_alloc;
+                if (!slot->pending) {
+                    slot->state = VTC_SLOT_FREE;
+                    continue;
+                }
+                void* gpu_buf = vglGetPendingTextureBuffer(slot->pending);
+                uint32_t expected = vglGetPendingTextureSize(slot->pending);
+                if (gpu_buf && expected == (uint32_t)slot->dxt_size) {
+                    unsigned int _t_read = sceKernelGetProcessTimeLow();
+                    fseek(g_vtc_file_io, slot->file_offset, SEEK_SET);
+                    size_t got = fread(gpu_buf, 1, slot->dxt_size, g_vtc_file_io);
+                    g_io_fread_us += sceKernelGetProcessTimeLow() - _t_read;
+                    g_io_bytes_read += slot->dxt_size;
+                    g_io_phase_count++;
+                    if (got == (size_t)slot->dxt_size) {
+                        slot->buffer = NULL; // v3 direct: no raw fallback
+                        slot->malloc_buf = NULL;
+                        // Publish READY after metadata writes; ARM otherwise
+                        // reorders state ahead of pending/buffer.
+                        __sync_synchronize();
+                        slot->state = VTC_SLOT_READY;
+                        g_vtc_io_completed++;
+                    } else {
+                        vglFreePendingTexture(slot->pending);
+                        slot->pending = NULL;
+                        slot->state = VTC_SLOT_FREE;
+                    }
+                } else {
+                    vglFreePendingTexture(slot->pending);
+                    slot->pending = NULL;
+                    slot->state = VTC_SLOT_FREE;
+                }
             } else {
-                buf = (unsigned char*)malloc(slot->dxt_size);
-                slot->malloc_buf = buf;
-                if (!buf) { slot->state = VTC_SLOT_FREE; continue; }
+                // V2 staging path: pool or malloc, fread, CPU swizzle.
+                unsigned char* buf;
+                if (slot->dxt_size <= VTC_IO_BUF_SIZE) {
+                    buf = slot->buffer; // pre-allocated pool buffer
+                    slot->malloc_buf = NULL;
+                } else {
+                    buf = (unsigned char*)malloc(slot->dxt_size);
+                    slot->malloc_buf = buf;
+                    if (!buf) { slot->state = VTC_SLOT_FREE; continue; }
+                }
+                unsigned int _t_read = sceKernelGetProcessTimeLow();
+                fseek(g_vtc_file_io, slot->file_offset, SEEK_SET);
+                size_t got = fread(buf, 1, slot->dxt_size, g_vtc_file_io);
+                g_io_fread_us += sceKernelGetProcessTimeLow() - _t_read;
+                g_io_bytes_read += slot->dxt_size;
+                g_io_phase_count++;
+                if (got == (size_t)slot->dxt_size) {
+                    slot->buffer = buf;
+                    unsigned int _t_fin = sceKernelGetProcessTimeLow();
+                    slot->pending = vglPrepareCompressedTexture2D(
+                        gl_fmt, slot->hd_w, slot->hd_h, buf, slot->dxt_size);
+                    g_io_finalize_us += sceKernelGetProcessTimeLow() - _t_fin;
+                    // barrier before READY publish; see v3 note above.
+                    __sync_synchronize();
+                    slot->state = VTC_SLOT_READY;
+                    g_vtc_io_completed++;
+                } else {
+                    if (slot->malloc_buf) free(slot->malloc_buf);
+                    slot->malloc_buf = NULL;
+                    slot->pending = NULL;
+                    slot->state = VTC_SLOT_FREE;
+                }
             }
-
-            // Read from VTC file
-            fseek(g_vtc_file_io, slot->file_offset, SEEK_SET);
-            if (fread(buf, 1, slot->dxt_size, g_vtc_file_io) == (size_t)slot->dxt_size) {
-                slot->buffer = buf;
-                // swizzle here so main only has to commit the descriptor.
-                // raw buffer remains the fallback if prepare returns null.
-                GLenum gl_fmt = vtc_fmt_to_gl(slot->dxt_format);
-                slot->pending = vglPrepareCompressedTexture2D(
-                    gl_fmt, slot->hd_w, slot->hd_h, buf, slot->dxt_size);
-                slot->state = VTC_SLOT_READY;
-                g_vtc_io_completed++;
-            } else {
-                if (slot->malloc_buf) free(slot->malloc_buf);
-                slot->malloc_buf = NULL;
-                slot->pending = NULL;
-                slot->state = VTC_SLOT_FREE;
+            // Dump io phase breakdown every 64 uploads to error.log.
+            if (g_io_phase_count >= 64) {
+                // integer fixed-point: %f pulls in newlib's FP stdio.
+                unsigned int kb_avg_x10 = g_io_phase_count
+                    ? (g_io_bytes_read * 10u) / (g_io_phase_count * 1024u) : 0;
+                unsigned int mbs_x10 = g_io_fread_us
+                    ? (g_io_bytes_read * 10u) / g_io_fread_us : 0; // bytes/us ~= MB/s
+                OSReport(
+                    "[VTC IO] %d uploads: fread=%u us alloc=%u us finalize=%u us bytes=%u avg=%u.%u KB mbs=%u.%u\n",
+                    g_io_phase_count, g_io_fread_us, g_io_alloc_us, g_io_finalize_us, g_io_bytes_read,
+                    kb_avg_x10 / 10, kb_avg_x10 % 10, mbs_x10 / 10, mbs_x10 % 10);
+                g_io_phase_count = 0;
+                g_io_fread_us = 0;
+                g_io_alloc_us = 0;
+                g_io_finalize_us = 0;
+                g_io_bytes_read = 0;
             }
             // Don't break. Drain ALL queued slots in one wake cycle.
         }
@@ -1013,8 +1290,15 @@ void vita_vtc_io_init(void) {
 void vita_vtc_prefetch(void) {
     if (!g_vtc_active || !g_vtc_io_pool) return;
 
-    int count = g_vtc_prefetch_count;
+    // Snapshot under lock so writers don't tear the copy.
+    unsigned long long local_keys[VTC_PREFETCH_MAX];
+    int count;
+    vtc_prefetch_lock();
+    count = g_vtc_prefetch_count;
+    if (count > VTC_PREFETCH_MAX) count = VTC_PREFETCH_MAX;
+    if (count > 0) memcpy(local_keys, g_vtc_prefetch_keys, count * sizeof(local_keys[0]));
     g_vtc_prefetch_count = 0;
+    vtc_prefetch_unlock();
 
     if (count == 0) return;
 
@@ -1028,7 +1312,7 @@ void vita_vtc_prefetch(void) {
     int pending_count = 0;
 
     for (int qi = 0; qi < count; qi++) {
-        unsigned long long key = g_vtc_prefetch_keys[qi];
+        unsigned long long key = local_keys[qi];
 
         int already = 0;
         for (int si = 0; si < VTC_IO_SLOTS; si++) {
@@ -1038,7 +1322,10 @@ void vita_vtc_prefetch(void) {
             }
         }
         if (already) continue;
-        if (vtc_loaded_find(key)) continue;
+        vtc_loaded_lock();
+        int in_loaded = (vtc_loaded_find(key) != NULL);
+        vtc_loaded_unlock();
+        if (in_loaded) continue;
 
         VtcIndexEntry* entry = vtc_find(key);
         if (!entry) continue;
@@ -1089,24 +1376,57 @@ void vita_vtc_prefetch(void) {
         } else {
             // Fallback: inline read on worker thread
             slot->state = VTC_SLOT_READING;
-            unsigned char* buf;
-            if (slot->dxt_size <= VTC_IO_BUF_SIZE) {
-                buf = slot->buffer;
-                slot->malloc_buf = NULL;
+            GLenum gl_fmt = vtc_fmt_to_gl(slot->dxt_format);
+            if (g_vtc_format_version == VTC_VERSION_V3) {
+                // Direct path: fread into GPU memory.
+                slot->pending = vglPrepareEmptyCompressedTexture2D(
+                    gl_fmt, slot->hd_w, slot->hd_h);
+                if (!slot->pending) {
+                    slot->state = VTC_SLOT_FREE;
+                    continue;
+                }
+                void* gpu_buf = vglGetPendingTextureBuffer(slot->pending);
+                uint32_t expected = vglGetPendingTextureSize(slot->pending);
+                if (gpu_buf && expected == (uint32_t)slot->dxt_size) {
+                    fseek(g_vtc_file_worker, slot->file_offset, SEEK_SET);
+                    if (fread(gpu_buf, 1, slot->dxt_size, g_vtc_file_worker) == (size_t)slot->dxt_size) {
+                        slot->buffer = NULL;
+                        slot->malloc_buf = NULL;
+                        slot->state = VTC_SLOT_READY;
+                        g_vtc_io_completed++;
+                    } else {
+                        vglFreePendingTexture(slot->pending);
+                        slot->pending = NULL;
+                        slot->state = VTC_SLOT_FREE;
+                    }
+                } else {
+                    vglFreePendingTexture(slot->pending);
+                    slot->pending = NULL;
+                    slot->state = VTC_SLOT_FREE;
+                }
             } else {
-                buf = (unsigned char*)malloc(slot->dxt_size);
-                slot->malloc_buf = buf;
-                if (!buf) { slot->state = VTC_SLOT_FREE; continue; }
-            }
-            fseek(g_vtc_file_worker, slot->file_offset, SEEK_SET);
-            if (fread(buf, 1, slot->dxt_size, g_vtc_file_worker) == (size_t)slot->dxt_size) {
-                slot->buffer = buf;
-                slot->state = VTC_SLOT_READY;
-                g_vtc_io_completed++;
-            } else {
-                if (slot->malloc_buf) free(slot->malloc_buf);
-                slot->malloc_buf = NULL;
-                slot->state = VTC_SLOT_FREE;
+                // V2 staging path
+                unsigned char* buf;
+                if (slot->dxt_size <= VTC_IO_BUF_SIZE) {
+                    buf = slot->buffer;
+                    slot->malloc_buf = NULL;
+                } else {
+                    buf = (unsigned char*)malloc(slot->dxt_size);
+                    slot->malloc_buf = buf;
+                    if (!buf) { slot->state = VTC_SLOT_FREE; continue; }
+                }
+                fseek(g_vtc_file_worker, slot->file_offset, SEEK_SET);
+                if (fread(buf, 1, slot->dxt_size, g_vtc_file_worker) == (size_t)slot->dxt_size) {
+                    slot->buffer = buf;
+                    slot->pending = vglPrepareCompressedTexture2D(
+                        gl_fmt, slot->hd_w, slot->hd_h, buf, slot->dxt_size);
+                    slot->state = VTC_SLOT_READY;
+                    g_vtc_io_completed++;
+                } else {
+                    if (slot->malloc_buf) free(slot->malloc_buf);
+                    slot->malloc_buf = NULL;
+                    slot->state = VTC_SLOT_FREE;
+                }
             }
         }
     }

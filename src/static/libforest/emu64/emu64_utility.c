@@ -13,6 +13,7 @@ extern "C" unsigned int pc_image_end;
 extern "C" unsigned char* pc_arena_base;
 extern "C" unsigned char* pc_arena_end;
 
+#if defined(_WIN32)
 /* Page-granularity cache for VirtualQuery results.
  * Avoids repeated syscalls for addresses in the same page. */
 #define SEG2K0_PAGE_CACHE_SIZE 32
@@ -38,6 +39,13 @@ static int seg2k0_is_committed(u32 addr) {
     seg2k0_cache_next = (seg2k0_cache_next + 1) % SEG2K0_PAGE_CACHE_SIZE;
     return committed;
 }
+#else
+// Vita/POSIX userspace is flat; no page-commit check needed.
+static int seg2k0_is_committed(u32 addr) {
+    (void)addr;
+    return 1;
+}
+#endif
 
 u32 emu64::seg2k0(u32 segadr) {
     /* Addresses above the N64 segment range (upper nibble != 0) or below

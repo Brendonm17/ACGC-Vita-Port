@@ -1995,7 +1995,14 @@ extern int Camera2_request_main_simple_fishing(GAME_PLAY* play, const xyz_t* pla
         center.z = player_pos->z * 0.65f + bobber_pos->z * 0.35f;
     }
 
-    return Camera2_request_main_simple(play, &center, &dir, dist * dist_mult, 40, priority);
+    int ret = Camera2_request_main_simple(play, &center, &dir, dist * dist_mult, 40, priority);
+#ifdef TARGET_VITA
+    // mode=2 flags this as fishing so SetPos_Simple applies the player's
+    // zoom/rotation indices each frame; otherwise C-button adjustments are
+    // ignored for the whole cast.
+    if (ret) play->camera.request_data.simple.mode = 2;
+#endif
+    return ret;
 }
 extern int Camera2_request_main_simple_fishing_return(GAME_PLAY* play, const xyz_t* player_pos, int priority) {
     xyz_t center_pos;
@@ -2004,7 +2011,12 @@ extern int Camera2_request_main_simple_fishing_return(GAME_PLAY* play, const xyz
 
     Camera2_main_Normal_SetEndCenterPos_fromPlayer(play, &center_pos);
     Camera2_main_Simple_AngleDistStd(play, &dir, &dist);
-    return Camera2_request_main_simple(play, &center_pos, &dir, dist, 30, priority);
+    int ret = Camera2_request_main_simple(play, &center_pos, &dir, dist, 30, priority);
+#ifdef TARGET_VITA
+    // keep player offsets applied during fishing-return morph
+    if (ret) play->camera.request_data.simple.mode = 2;
+#endif
+    return ret;
 }
 
 extern int Camera2_request_main_simple(GAME_PLAY* play, const xyz_t* pos, const s_xyz* dir, f32 dist, int morph_counter,
@@ -2094,10 +2106,25 @@ static void Camera2_Simple_AngleCalc(GAME_PLAY* play, const s_xyz* goal_angle, i
 static void Camera2_SetPos_Simple(GAME_PLAY* play) {
     int morph_counter = play->camera.main_data.simple.morph_counter;
     f32 goal_dist = play->camera.main_data.simple.distance;
+    s_xyz goal_angle = play->camera.main_data.simple.angle;
+
+#ifdef TARGET_VITA
+    // mode=2 (fishing) tracks the player's zoom/rotation indices each
+    // frame so C-buttons work mid-cast; morph below smooths the change.
+    if (play->camera.main_data.simple.mode == 2) {
+        int add_dist_idx = play->camera.indoor_distance_addition_idx;
+        int add_dir_idx = play->camera.indoor_direction_addition_idx;
+        if (add_dist_idx >= 0 && add_dist_idx < 3 && add_dir_idx >= 0 && add_dir_idx < 3) {
+            goal_dist += add_distance_array[add_dist_idx];
+            goal_angle.y += add_directionY_array[add_dir_idx];
+            goal_angle.x += add_directionX_array[add_dist_idx];
+        }
+    }
+#endif
 
     Camera2_Lock_SetCenterPos(play, &play->camera.main_data.simple.center_pos, morph_counter);
     Camera2_Simple_MorphDistance(play, goal_dist, morph_counter);
-    Camera2_Simple_AngleCalc(play, &play->camera.main_data.simple.angle, morph_counter);
+    Camera2_Simple_AngleCalc(play, &goal_angle, morph_counter);
     Camera2_SetEyePos_fromCenterPos(play);
     Camera2_SetView(play);
 }

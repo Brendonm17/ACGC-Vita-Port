@@ -20,7 +20,11 @@ extern int ScreenHeight;
 extern OSThread graphThread;
 extern u8 SegmentBaseAddress[0x40];
 
+#ifdef __cplusplus
+int main(void);   // C++ requires int return
+#else
 void main(void);
+#endif
 extern void mainproc(void* val);
 
 #ifdef __cplusplus

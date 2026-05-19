@@ -29,26 +29,26 @@ void __osContGetInitData(u8* p, OSContStatus* s){
         npad = JC_JUTGamePad_getPadStatus(i);
 
         if (npad.err == -3) {
-            s->errno = 0;
+            s->cont_errno = 0;
         }
         else {
             switch(npad.err){
                 case -1:
-                s->errno = 8;
+                s->cont_errno = 8;
                 break;
                 case -2:
-                s->errno = 8;
+                s->cont_errno = 8;
                 break;
                 case -3:
-                s->errno = 4;
+                s->cont_errno = 4;
                 break;
                 default:
-                s->errno = 0;
+                s->cont_errno = 0;
                 break;
             }
         }
     
-        if(s->errno == 0){
+        if(s->cont_errno == 0){
             s->type = 5;
             s->status = 1;
             success |= 1 << i;

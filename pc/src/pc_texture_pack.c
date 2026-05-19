@@ -1502,7 +1502,10 @@ int pc_texture_pack_active(void) {
 GLuint pc_texture_pack_lookup(const void* data, int data_size,
                               int w, int h, unsigned int fmt,
                               const void* tlut_data, int tlut_entries, int tlut_is_be,
-                              int* out_w, int* out_h) {
+                              int* out_w, int* out_h,
+                              unsigned long long* out_key) {
+    // PC has no loaded_cache ref tracking
+    if (out_key) *out_key = 0;
     if (!g_texpack_active || !data || data_size <= 0) return 0;
 
     int hash_size = gc_texture_data_size(w, h, fmt);

@@ -109,7 +109,7 @@ extern void StreamMain(void) {
             break;
 
         case JSTREAM_STATE_CANCELLED:
-        case JSTREAM_STATE_FADEOUT:
+        case JSTREAM_STATE_FADEOUT: {
             u32 streamed_samples = AIGetStreamSampleCount();
             if (J_STREAM.fadeout_timer != 0 && (J_STREAM.total_samples - streamed_samples) != 0) {
                 f32 vol = -J_STREAM.stream_vol;
@@ -123,6 +123,7 @@ extern void StreamMain(void) {
                 J_STREAM.state = JSTREAM_STATE_STOP;
             }
             break;
+        }
 
         case JSTREAM_STATE_STOP:
             if (DVDGetDriveStatus() == DVD_STATE_END) {

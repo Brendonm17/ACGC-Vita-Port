@@ -64,9 +64,10 @@ struct actor_animal_logo_s {
 #ifdef PC_ENHANCEMENTS
   int pc_menu_sel;         /* 0=Start Game, 1=Options */
   int pc_options_open;     /* options sub-menu visible */
-  int pc_options_sel;      /* highlighted option (unused for now) */
+  int pc_options_sel;      /* highlighted option within current page */
   int pc_cursor_cooldown;  /* stick debounce timer */
-  int pc_unused[2];
+  int pc_options_page;     // PC_PAGE_*
+  int pc_options_focus;    // 0=list, 1=main tab bar, 2=sub tab bar
 #else
   int unused_56C[6];
 #endif

@@ -82,18 +82,23 @@ extern int vita_vtc_active(void);
 extern GLuint vita_vtc_lookup(const void* data, int data_size,
                                int w, int h, unsigned int fmt,
                                const void* tlut_data, int tlut_entries, int tlut_is_be,
-                               int* out_w, int* out_h);
+                               int* out_w, int* out_h,
+                               unsigned long long* out_key);
 
 void pc_texture_pack_init(void) { vita_vtc_init(); }
 void pc_texture_pack_preload_all(void) {}
 void pc_texture_pack_shutdown(void) { vita_vtc_shutdown(); }
 
+// Returns out_key so tex_cache can release the loaded_cache ref on
+// eviction. Without it, LRU can free an HD tex that a tex_cache entry
+// still uses, and the reused GL id ends up sampling wrong content.
 GLuint pc_texture_pack_lookup(const void* data, int data_size,
                               int w, int h, unsigned int fmt,
                               const void* tlut_data, int tlut_entries, int tlut_is_be,
-                              int* out_w, int* out_h) {
+                              int* out_w, int* out_h, unsigned long long* out_key) {
     return vita_vtc_lookup(data, data_size, w, h, fmt,
-                            tlut_data, tlut_entries, tlut_is_be, out_w, out_h);
+                            tlut_data, tlut_entries, tlut_is_be,
+                            out_w, out_h, out_key);
 }
 
 int pc_texture_pack_active(void) { return vita_vtc_active(); }

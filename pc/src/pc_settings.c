@@ -27,6 +27,7 @@ PCSettings g_pc_settings = {
     .free_cam      = 0,
     .boot_logo     = 1,
     .text_speed    = 1,
+    .save_slot     = 0,
 #endif
 };
 
@@ -75,7 +76,13 @@ static const char* DEFAULT_SETTINGS =
     "boot_logo = 1\n"
     "\n"
     "# text_speed: 0 = slow, 1 = normal (vanilla), 2 = fast\n"
-    "text_speed = 1\n";
+    "text_speed = 1\n"
+    "\n"
+    "[Saves]\n"
+    "# save_slot: 0 = home is card_a, Porter visits card_b\n"
+    "#            1 = home is card_b, Porter visits card_a\n"
+    "# Both folders stay put; this just swaps which one is home.\n"
+    "save_slot = 0\n";
 #else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
@@ -176,6 +183,8 @@ static void apply_setting(const char* key, const char* value) {
         g_pc_settings.boot_logo = (val != 0) ? 1 : 0;
     } else if (strcmp(key, "text_speed") == 0) {
         if (val >= 0 && val <= 2) g_pc_settings.text_speed = val;
+    } else if (strcmp(key, "save_slot") == 0) {
+        g_pc_settings.save_slot = (val == 1) ? 1 : 0;
     }
 #endif
 }
@@ -218,7 +227,12 @@ void pc_settings_save(void) {
     fprintf(f, "# boot_logo: 0 = skip the in-game Nintendo logo, 1 = show it on boot\n");
     fprintf(f, "boot_logo = %d\n\n", g_pc_settings.boot_logo);
     fprintf(f, "# text_speed: 0 = slow, 1 = normal (vanilla), 2 = fast\n");
-    fprintf(f, "text_speed = %d\n", g_pc_settings.text_speed);
+    fprintf(f, "text_speed = %d\n\n", g_pc_settings.text_speed);
+    fprintf(f, "[Saves]\n");
+    fprintf(f, "# save_slot: 0 = home is card_a, Porter visits card_b\n");
+    fprintf(f, "#            1 = home is card_b, Porter visits card_a\n");
+    fprintf(f, "# Both folders stay put; this just swaps which one is home.\n");
+    fprintf(f, "save_slot = %d\n", g_pc_settings.save_slot);
 #else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");

@@ -35,6 +35,10 @@ typedef struct {
     int free_cam;         // 0=classic acre transitions, 1=seamless movement
     int boot_logo;        // 0=skip in-game nintendo logo on boot, 1=show it
     int text_speed;       // 0=slow (~half), 1=normal (vanilla), 2=fast (1 char/frame)
+
+    // Which folder is treated as home: 0=card_a (default), 1=card_b. Read
+    // at boot; save+restart to switch.
+    int save_slot;
 #endif
 } PCSettings;
 

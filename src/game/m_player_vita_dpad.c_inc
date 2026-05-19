@@ -33,9 +33,8 @@ static int Vita_DPad_IsTool(mActor_name_t itemNo) {
            mPlayer_ITEM_IS_ROD(kind) || mPlayer_ITEM_IS_SHOVEL(kind);
 }
 
-// putin's generic putaway anim looks wrong for balloons/fans/pinwheels
-// (player mimes stashing an axe while a balloon floats). only tools and
-// umbrellas have purpose-built putin visuals
+// putin's generic anim mimes stashing an axe; only tools and umbrellas
+// have purpose-built stash visuals. balloons/fans/pinwheels get instant swap.
 static int Vita_DPad_HasNiceStashAnim(mActor_name_t itemNo) {
     s8 kind;
     if (itemNo == EMPTY_NO) return FALSE;
@@ -45,13 +44,24 @@ static int Vita_DPad_HasNiceStashAnim(mActor_name_t itemNo) {
            mPlayer_ITEM_IS_UMBRELLA(kind);
 }
 
-static int Vita_DPad_NextToolSlot(int anchor, int dir) {
+// any equippable hand item (tools, umbrellas, balloons, pinwheels, fans)
+static int Vita_DPad_IsHoldable(mActor_name_t itemNo) {
+    s8 kind;
+    if (itemNo == EMPTY_NO) return FALSE;
+    kind = mPlib_Get_ItemNoToItemKind(itemNo);
+    return mPlayer_ITEM_IS_AXE(kind) || mPlayer_ITEM_IS_NET(kind) ||
+           mPlayer_ITEM_IS_ROD(kind) || mPlayer_ITEM_IS_SHOVEL(kind) ||
+           mPlayer_ITEM_IS_UMBRELLA(kind) || mPlayer_ITEM_IS_BALLOON(kind) ||
+           mPlayer_ITEM_IS_WINDMILL(kind) || mPlayer_ITEM_IS_FAN(kind);
+}
+
+static int Vita_DPad_NextHoldableSlot(int anchor, int dir) {
     int base = (anchor >= 0) ? anchor : ((dir > 0) ? -1 : mPr_POCKETS_SLOT_COUNT);
     int i;
     for (i = 1; i <= mPr_POCKETS_SLOT_COUNT; i++) {
         int idx = ((base + dir * i) % mPr_POCKETS_SLOT_COUNT + mPr_POCKETS_SLOT_COUNT)
                   % mPr_POCKETS_SLOT_COUNT;
-        if (Vita_DPad_IsTool(Now_Private->inventory.pockets[idx])) {
+        if (Vita_DPad_IsHoldable(Now_Private->inventory.pockets[idx])) {
             return idx;
         }
     }
@@ -148,7 +158,9 @@ static void Vita_DPad_PutAway(GAME* game) {
     slot = mPr_GetPossessionItemIdxWithCond(Now_Private, EMPTY_NO, mPr_ITEM_COND_NORMAL);
     if (slot < 0) return;
 
-    if (Vita_DPad_IsTool(held)) {
+    // any holdable becomes the new "last item" so dpad-from-empty
+    // re-equips it, not the previous tool
+    if (Vita_DPad_IsHoldable(held)) {
         g_vita_last_tool   = held;
         g_vita_anchor_slot = slot;
     }
@@ -169,7 +181,7 @@ static void Vita_DPad_Cycle(GAME* game, int dir) {
     if (held == EMPTY_NO) {
         next_slot = Vita_DPad_FindSlot(g_vita_last_tool);
         if (next_slot < 0) {
-            next_slot = Vita_DPad_NextToolSlot(g_vita_anchor_slot, dir);
+            next_slot = Vita_DPad_NextHoldableSlot(g_vita_anchor_slot, dir);
         }
         if (next_slot < 0) return;
 
@@ -181,16 +193,23 @@ static void Vita_DPad_Cycle(GAME* game, int dir) {
         return;
     }
 
-    if (!Vita_DPad_IsTool(held)) return;
+    if (!Vita_DPad_IsHoldable(held)) return;
 
-    next_slot = Vita_DPad_NextToolSlot(g_vita_anchor_slot, dir);
+    next_slot = Vita_DPad_NextHoldableSlot(g_vita_anchor_slot, dir);
     if (next_slot < 0) return;
 
     {
-        mActor_name_t new_tool = Now_Private->inventory.pockets[next_slot];
-        g_vita_last_tool   = new_tool;
+        mActor_name_t new_item = Now_Private->inventory.pockets[next_slot];
+        g_vita_last_tool   = new_item;
         g_vita_anchor_slot = next_slot;
-        Vita_DPad_BeginStash(game, new_tool, held, next_slot, TRUE);
+        if (Vita_DPad_HasNiceStashAnim(held)) {
+            Vita_DPad_BeginStash(game, new_item, held, next_slot, TRUE);
+        } else {
+            // no stash anim for this kind: swap instantly, then takeout
+            mPr_SetPossessionItem(Now_Private, next_slot, held, mPr_ITEM_COND_NORMAL);
+            Now_Private->equipment = new_item;
+            Player_actor_request_main_takeout_item(game, mPlayer_REQUEST_PRIORITY_37);
+        }
     }
 }
 

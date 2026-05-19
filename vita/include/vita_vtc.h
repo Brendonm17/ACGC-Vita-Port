@@ -23,10 +23,12 @@ void vita_vtc_io_shutdown(void);
 // call once per frame to process async results
 void vita_vtc_tick_frame(void);
 
-// main-thread texture lookups (no disk I/O, cached only)
+// main-thread lookup, cached only. on hit, acquires a ref on loaded_cache;
+// caller must release via vita_vtc_loaded_cache_release_key(*out_key).
 GLuint vita_vtc_lookup(const void* data, int data_size, int w, int h,
                        unsigned int fmt, const void* tlut_data, int tlut_entries,
-                       int tlut_is_be, int* out_w, int* out_h);
+                       int tlut_is_be, int* out_w, int* out_h,
+                       unsigned long long* out_key);
 
 // pure read of the loaded cache. does not change ref_count. returns
 // the GL tex if the key is loaded, 0 otherwise.

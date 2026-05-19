@@ -3,6 +3,14 @@
 
 #include "types.h"
 #include "string.h"
+#ifdef TARGET_VITA
+// decomp shadow headers can shadow strlen; force-declare for inlines below.
+#include <stddef.h>
+#ifdef __cplusplus
+extern "C"
+#endif
+size_t strlen(const char *);
+#endif
 #include "dolphin/gx.h"
 #include "dolphin/os.h"
 #include "JSystem/JUtility/TColor.h"

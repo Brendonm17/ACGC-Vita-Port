@@ -168,6 +168,7 @@ extern int pc_gx_deferred_tex_uploads;
 
 /* --- Audio --- */
 extern int pc_save_loaded;
+int pc_save_delete_current_town(void);
 int  pc_audio_get_buffer_fill(void);
 int  pc_audio_is_active(void);
 void pc_audio_shutdown(void);

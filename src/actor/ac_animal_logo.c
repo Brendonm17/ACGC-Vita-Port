@@ -23,13 +23,25 @@
 #include "m_flashrom.h"
 #ifdef PC_ENHANCEMENTS
 #include "pc_settings.h"
+#include "pc_controls.h"
 #include "main.h"
+#include "dolphin/pad.h"   // PAD_BUTTON_A etc. for the Controls page tables
 #include <stdio.h>
+
+#ifdef TARGET_VITA
+// raw per-frame Vita button state, written by pc_pad.c. Read by the
+// Controls page during remap capture so we see the physical press, not
+// the post-mapped GC bits.
+extern uint8_t g_pc_vita_pressed[PCV_COUNT];
+extern void pc_controls_save(void);
+#endif
 #endif
 #ifdef TARGET_VITA
 #include "vita_shared.h"
 #include "vita_banner.h"
 #include "vita_texpack.h"
+#include <psp2/kernel/processmgr.h>
+#include <psp2/appmgr.h>
 #endif
 
 #define G_CC_TITLE PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, PRIMITIVE, 0, TEXEL0, 0
@@ -348,6 +360,147 @@ static void aAL_fade_out_start_wait_init(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
 // with an asterisk in the draw routine. updated on save/close, replaced
 // on re-open (revert via B reloads from disk so baseline becomes stale).
 static PCSettings g_pc_options_baseline;
+#ifdef TARGET_VITA
+// Snapshot of g_pc_controls at menu open; restored on B-cancel.
+static PCControls g_pc_controls_baseline;
+
+// Delete Town modal: 0=hidden, 1=No selected, 2=Yes selected.
+static int s_pc_confirm_delete = 0;
+
+// Re-exec ourselves so settings/controls changes take effect without the
+// user manually relaunching from LiveArea.
+static void aAL_pc_restart_app(void) {
+    sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
+    sceKernelExitProcess(0); // fallback if LoadExec ever returns
+}
+
+typedef enum {
+    PC_PAGE_GRAPHICS = 0,
+    PC_PAGE_GAMEPLAY,
+    PC_PAGE_SAVE,
+    PC_PAGE_CONTROLS,
+    PC_PAGE_COUNT
+} PCOptionsPage;
+
+// Controls page rows. HEADER exists but isn't used in the current tables
+// (kept so navigation can still skip headers if they come back).
+typedef enum {
+    CR_HEADER = 0,
+    CR_MAIN_BTN,    // -> main_map
+    CR_GC_AXIS,     // -> main_axis_map (push a Vita stick to bind)
+    CR_NES_BTN,     // -> nes_map
+    CR_NES_TURBO,   // -> nes_turbo_map
+} PCControlsRowKind;
+
+typedef struct {
+    int8_t      kind;
+    uint16_t    bit;   // MAIN: GC bit / GC_AXIS: PCG_AXIS_* / NES_*: NES bit
+    const char* label;
+} PCControlsRow;
+
+typedef enum {
+    PC_SUBPAGE_GAME = 0,
+    PC_SUBPAGE_NES,
+    PC_SUBPAGE_COUNT
+} PCControlsSubPage;
+
+static const PCControlsRow s_controls_game_rows[] = {
+    { CR_MAIN_BTN, PAD_BUTTON_A,       "A (Confirm)" },
+    { CR_MAIN_BTN, PAD_BUTTON_B,       "B (Cancel)" },
+    { CR_MAIN_BTN, PAD_BUTTON_X,       "X" },
+    { CR_MAIN_BTN, PAD_BUTTON_Y,       "Y" },
+    { CR_MAIN_BTN, PAD_BUTTON_START,   "Start" },
+    { CR_MAIN_BTN, PAD_TRIGGER_Z,      "Z (Inventory)" },
+    { CR_MAIN_BTN, PAD_TRIGGER_L,      "L (Camera)" },
+    { CR_MAIN_BTN, PAD_TRIGGER_R,      "R (Camera)" },
+    { CR_MAIN_BTN, PAD_BUTTON_UP,      "D-pad Up" },
+    { CR_MAIN_BTN, PAD_BUTTON_DOWN,    "D-pad Down" },
+    { CR_MAIN_BTN, PAD_BUTTON_LEFT,    "D-pad Left" },
+    { CR_MAIN_BTN, PAD_BUTTON_RIGHT,   "D-pad Right" },
+    { CR_GC_AXIS,  PCG_AXIS_MAIN_X,    "Main X" },
+    { CR_GC_AXIS,  PCG_AXIS_MAIN_Y,    "Main Y" },
+    { CR_GC_AXIS,  PCG_AXIS_CSTICK_X,  "C-stick X" },
+    { CR_GC_AXIS,  PCG_AXIS_CSTICK_Y,  "C-stick Y" },
+};
+static const PCControlsRow s_controls_nes_rows[] = {
+    { CR_NES_BTN,   NES_BIT_A,      "A" },
+    { CR_NES_BTN,   NES_BIT_B,      "B" },
+    { CR_NES_BTN,   NES_BIT_SELECT, "Select" },
+    { CR_NES_BTN,   NES_BIT_START,  "Start" },
+    { CR_NES_BTN,   NES_BIT_UP,     "Up" },
+    { CR_NES_BTN,   NES_BIT_DOWN,   "Down" },
+    { CR_NES_BTN,   NES_BIT_LEFT,   "Left" },
+    { CR_NES_BTN,   NES_BIT_RIGHT,  "Right" },
+    { CR_NES_TURBO, NES_TURBO_A,    "Turbo A" },
+    { CR_NES_TURBO, NES_TURBO_B,    "Turbo B" },
+};
+
+#define N_GAME_ROWS ((int)(sizeof(s_controls_game_rows) / sizeof(s_controls_game_rows[0])))
+#define N_NES_ROWS  ((int)(sizeof(s_controls_nes_rows)  / sizeof(s_controls_nes_rows[0])))
+// 9 rows fit between the sub-tab bar (~y=79) and the footer (y=208) with
+// room for the scroll indicators above and below.
+#define PC_CONTROLS_VISIBLE 9
+
+static int s_controls_subpage = PC_SUBPAGE_GAME;
+
+static const PCControlsRow* aAL_pc_controls_rows(int* out_count) {
+    if (s_controls_subpage == PC_SUBPAGE_NES) {
+        if (out_count) *out_count = N_NES_ROWS;
+        return s_controls_nes_rows;
+    }
+    if (out_count) *out_count = N_GAME_ROWS;
+    return s_controls_game_rows;
+}
+
+// PCV_LSTICK_UP etc. -> PCA_LSTICK_Y etc. -1 for non-stick buttons.
+// Used by the GC_AXIS capture so pushing a stick direction binds the
+// corresponding analog axis.
+static int aAL_pcv_to_pca(int pcv) {
+    switch (pcv) {
+        case PCV_LSTICK_UP:    case PCV_LSTICK_DOWN:  return PCA_LSTICK_Y;
+        case PCV_LSTICK_LEFT:  case PCV_LSTICK_RIGHT: return PCA_LSTICK_X;
+        case PCV_RSTICK_UP:    case PCV_RSTICK_DOWN:  return PCA_RSTICK_Y;
+        case PCV_RSTICK_LEFT:  case PCV_RSTICK_RIGHT: return PCA_RSTICK_X;
+        default: return -1;
+    }
+}
+
+// Walk over CR_HEADER rows in `dir` so the cursor never lands on one.
+static int aAL_pc_skip_headers(int sel, int dir) {
+    int total = 0;
+    const PCControlsRow* rows = aAL_pc_controls_rows(&total);
+    int p = sel;
+    while (p >= 0 && p < total && rows[p].kind == CR_HEADER) p += dir;
+    return p;
+}
+static int aAL_pc_first_selectable(int page) {
+    if (page != PC_PAGE_CONTROLS) return 0;
+    return aAL_pc_skip_headers(0, +1);
+}
+
+// per-page item count. Graphics gains/loses the Banner row based on aspect.
+static int aAL_pc_page_item_count(int page) {
+    if (page == PC_PAGE_GRAPHICS) return g_pc_settings.aspect_mode ? 7 : 6; // Res, Aspect, [Banner], MSAA, Tex Pack, NES Aspect, BootLogo
+    if (page == PC_PAGE_GAMEPLAY) return 4; // Resetti, TimeSync, FreeCam, TextSpeed
+    if (page == PC_PAGE_SAVE)     return 3; // SaveSlot, AutoSave, DeleteTown
+    if (page == PC_PAGE_CONTROLS) {
+        int count = 0;
+        aAL_pc_controls_rows(&count);
+        return count;
+    }
+    return 0;
+}
+
+// Remap capture window. Stays open for the full timeout so the user can
+// press multiple Vita buttons; at commit the binding is REPLACED with
+// the captured set (empty set -> "none").
+static int s_remap_active = 0;
+static int s_remap_apply_kind = 0;       // CR_MAIN_BTN/CR_GC_AXIS/CR_NES_BTN/CR_NES_TURBO
+static int s_remap_bit = 0;              // bit/axis to assign in the target map
+static int s_remap_timeout = 0;          // frames left until commit
+static uint8_t s_remap_prev[PCV_COUNT];  // last frame's pressed state for edge detect
+static unsigned int s_remap_captured;    // bit i = PCV i captured
+#endif
 
 static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   GAME_PLAY* play = (GAME_PLAY*)game;
@@ -370,20 +523,89 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   if (actor->pc_options_open) {
     s8 stick_x = gamePT->pads[PAD0].now.stick_x;
 
-    // START to save and close
+#ifdef TARGET_VITA
+    // Remap capture has to intercept every press; otherwise the button
+    // the user is binding would also fire the menu action under it.
+    if (s_remap_active) {
+      for (int i = 0; i < PCV_COUNT; i++) {
+        if (g_pc_vita_pressed[i] && !s_remap_prev[i]) {
+          s_remap_captured |= (1u << i);
+        }
+      }
+      memcpy(s_remap_prev, g_pc_vita_pressed, sizeof(s_remap_prev));
+
+      if (--s_remap_timeout <= 0) {
+        // Clear the bit from all Vita slots, then OR it onto each captured
+        // slot. Target map depends on the row kind.
+        if (s_remap_apply_kind == CR_NES_BTN) {
+          for (int j = 0; j < PCV_COUNT; j++) g_pc_controls.nes_map[j] &= ~(uint8_t)s_remap_bit;
+          for (int i = 0; i < PCV_COUNT; i++) {
+            if (s_remap_captured & (1u << i)) g_pc_controls.nes_map[i] |= (uint8_t)s_remap_bit;
+          }
+        } else if (s_remap_apply_kind == CR_NES_TURBO) {
+          for (int j = 0; j < PCV_COUNT; j++) g_pc_controls.nes_turbo_map[j] &= ~(uint8_t)s_remap_bit;
+          for (int i = 0; i < PCV_COUNT; i++) {
+            if (s_remap_captured & (1u << i)) g_pc_controls.nes_turbo_map[i] |= (uint8_t)s_remap_bit;
+          }
+        } else if (s_remap_apply_kind == CR_GC_AXIS) {
+          // Stick-direction presses translate to PCA axes. invert resets
+          // to +1; for negative-direction bindings edit controls.ini.
+          uint8_t captured_pca = 0;
+          for (int i = 0; i < PCV_COUNT; i++) {
+            if (!(s_remap_captured & (1u << i))) continue;
+            int p = aAL_pcv_to_pca(i);
+            if (p >= 0) captured_pca |= (1u << p);
+          }
+          for (int p = 0; p < PCA_COUNT; p++) {
+            if (g_pc_controls.main_axis_map[p].target == (PCGCAxis)s_remap_bit) {
+              g_pc_controls.main_axis_map[p].target = PCG_AXIS_NONE;
+              g_pc_controls.main_axis_map[p].invert = +1;
+            }
+          }
+          for (int p = 0; p < PCA_COUNT; p++) {
+            if (captured_pca & (1u << p)) {
+              g_pc_controls.main_axis_map[p].target = (PCGCAxis)s_remap_bit;
+              g_pc_controls.main_axis_map[p].invert = +1;
+            }
+          }
+        } else {
+          // CR_MAIN_BTN
+          for (int j = 0; j < PCV_COUNT; j++) g_pc_controls.main_map[j] &= ~(uint16_t)s_remap_bit;
+          for (int i = 0; i < PCV_COUNT; i++) {
+            if (s_remap_captured & (1u << i)) g_pc_controls.main_map[i] |= (uint16_t)s_remap_bit;
+          }
+        }
+        s_remap_active = 0;
+        actor->pc_cursor_cooldown = 14;
+      }
+      return;
+    }
+#endif
+
+    // Vita restarts the process on save so the new settings take effect
+    // without requiring in-place re-init of render scale, MSAA, etc.
     if (on_btn & BUTTON_START) {
       pc_settings_save();
+#ifdef TARGET_VITA
+      pc_controls_save();
+      aAL_pc_restart_app();
+#else
       pc_settings_apply();
       g_pc_options_baseline = g_pc_settings;
       actor->pc_options_open = 0;
       g_aAL_options_menu_open = 0;
       actor->pc_cursor_cooldown = 10;
+#endif
       return;
     }
 
-    // B to discard and close
+    // B reverts to the open-time snapshot. Nothing was written to disk
+    // before this point, so no reload needed.
     if (on_btn & BUTTON_B) {
-      pc_settings_load();
+      g_pc_settings = g_pc_options_baseline;
+#ifdef TARGET_VITA
+      g_pc_controls = g_pc_controls_baseline;
+#endif
       actor->pc_options_open = 0;
       g_aAL_options_menu_open = 0;
       actor->pc_cursor_cooldown = 10;
@@ -391,56 +613,153 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     }
 
 #ifdef TARGET_VITA
-    // order: Resolution, Aspect, [Banner if 4:3], MSAA, Tex Pack,
-    //        NES Aspect, Disable Resetti, Auto Save, Time Sync, Free Cam,
-    //        Text Speed, Boot Logo
-    {
-      int has_banner = g_pc_settings.aspect_mode;
-      int banner_idx = 2;
-      int msaa_idx      = has_banner ? 3 : 2;
-      int texpack_idx   = msaa_idx + 1;
-      int nesasp_idx    = texpack_idx + 1;
-      int resetti_idx   = nesasp_idx + 1;
-      int autosave_idx  = resetti_idx + 1;
-      int timesync_idx  = autosave_idx + 1;
-      int freecam_idx   = timesync_idx + 1;
-      int textspeed_idx = freecam_idx + 1;
-      int bootlogo_idx  = textspeed_idx + 1;
-      int max_sel = bootlogo_idx;
-      if (actor->pc_options_sel > max_sel) actor->pc_options_sel = max_sel;
+    // Delete Town modal: L/R picks No/Yes, A commits, B cancels.
+    if (s_pc_confirm_delete) {
+      if (actor->pc_cursor_cooldown == 0) {
+        s8 stick_x = gamePT->pads[PAD0].now.stick_x;
+        if (stick_x > 30 || stick_x < -30 || (on_btn & (BUTTON_DLEFT | BUTTON_DRIGHT))) {
+          s_pc_confirm_delete = (s_pc_confirm_delete == 1) ? 2 : 1;
+          actor->pc_cursor_cooldown = 8;
+        }
+      }
+      if (on_btn & BUTTON_A) {
+        if (s_pc_confirm_delete == 2) {
+          pc_save_delete_current_town();
+          aAL_pc_restart_app();
+        }
+        s_pc_confirm_delete = 0;
+        actor->pc_cursor_cooldown = 10;
+      } else if (on_btn & BUTTON_B) {
+        s_pc_confirm_delete = 0;
+        actor->pc_cursor_cooldown = 10;
+      }
+      return;
+    }
 
+    // focus levels: 0=list, 1=main tab bar, 2=sub tab bar (Controls only)
+    {
+      int page = actor->pc_options_page;
+      int item_count = aAL_pc_page_item_count(page);
+      if (item_count <= 0) item_count = 1;
+      if (actor->pc_options_sel >= item_count) actor->pc_options_sel = item_count - 1;
+      if (actor->pc_options_sel < 0) actor->pc_options_sel = 0;
+
+      s8 stick_x = gamePT->pads[PAD0].now.stick_x;
+      int has_subtab = (page == PC_PAGE_CONTROLS);
+
+      if (actor->pc_options_focus == 1) {
+        if (actor->pc_cursor_cooldown == 0) {
+          if (stick_y < -30 || (on_btn & BUTTON_DDOWN)) {
+            // drop into sub tab on Controls, else into the list
+            actor->pc_options_focus = has_subtab ? 2 : 0;
+            if (!has_subtab) actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+            actor->pc_cursor_cooldown = 10;
+          } else if (stick_x < -30 || (on_btn & BUTTON_DLEFT)) {
+            if (actor->pc_options_page > 0) actor->pc_options_page--;
+            else actor->pc_options_page = PC_PAGE_COUNT - 1;
+            actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+            actor->pc_cursor_cooldown = 10;
+          } else if (stick_x > 30 || (on_btn & BUTTON_DRIGHT)) {
+            actor->pc_options_page = (actor->pc_options_page + 1) % PC_PAGE_COUNT;
+            actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+            actor->pc_cursor_cooldown = 10;
+          }
+        }
+        if (on_btn & BUTTON_A) {
+          actor->pc_options_focus = has_subtab ? 2 : 0;
+          if (!has_subtab) actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+          actor->pc_cursor_cooldown = 10;
+        }
+        return;
+      }
+
+      if (actor->pc_options_focus == 2) {
+        if (actor->pc_cursor_cooldown == 0) {
+          if (stick_y < -30 || (on_btn & BUTTON_DDOWN)) {
+            actor->pc_options_focus = 0;
+            actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+            actor->pc_cursor_cooldown = 10;
+          } else if (stick_y > 30 || (on_btn & BUTTON_DUP)) {
+            actor->pc_options_focus = 1;
+            actor->pc_cursor_cooldown = 10;
+          } else if (stick_x < -30 || (on_btn & BUTTON_DLEFT)) {
+            s_controls_subpage = (s_controls_subpage + PC_SUBPAGE_COUNT - 1) % PC_SUBPAGE_COUNT;
+            actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+            actor->pc_cursor_cooldown = 10;
+          } else if (stick_x > 30 || (on_btn & BUTTON_DRIGHT)) {
+            s_controls_subpage = (s_controls_subpage + 1) % PC_SUBPAGE_COUNT;
+            actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+            actor->pc_cursor_cooldown = 10;
+          }
+        }
+        if (on_btn & BUTTON_A) {
+          actor->pc_options_focus = 0;
+          actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
+          actor->pc_cursor_cooldown = 10;
+        }
+        return;
+      }
+
+      // list. Controls page skips header rows so sel never lands on one.
       if (actor->pc_cursor_cooldown == 0) {
         if (stick_y > 30 || (on_btn & BUTTON_DUP)) {
-          if (actor->pc_options_sel > 0) { actor->pc_options_sel--; actor->pc_cursor_cooldown = 8; }
+          int next_sel = actor->pc_options_sel - 1;
+          if (page == PC_PAGE_CONTROLS) next_sel = aAL_pc_skip_headers(next_sel, -1);
+          if (next_sel >= 0) {
+            actor->pc_options_sel = next_sel;
+            actor->pc_cursor_cooldown = 8;
+          } else {
+            // off the top: jump to nearest tab bar
+            actor->pc_options_focus = has_subtab ? 2 : 1;
+            actor->pc_cursor_cooldown = 10;
+          }
         } else if (stick_y < -30 || (on_btn & BUTTON_DDOWN)) {
-          if (actor->pc_options_sel < max_sel) { actor->pc_options_sel++; actor->pc_cursor_cooldown = 8; }
+          int next_sel = actor->pc_options_sel + 1;
+          if (page == PC_PAGE_CONTROLS) next_sel = aAL_pc_skip_headers(next_sel, +1);
+          if (next_sel < item_count) {
+            actor->pc_options_sel = next_sel;
+            actor->pc_cursor_cooldown = 8;
+          }
         }
+      }
 
-        int do_right = (stick_x > 30 || (on_btn & BUTTON_DRIGHT));
-        int do_left  = !do_right && (stick_x < -30 || (on_btn & BUTTON_DLEFT));
+      int do_right = (stick_x > 30 || (on_btn & BUTTON_DRIGHT));
+      int do_left  = !do_right && (stick_x < -30 || (on_btn & BUTTON_DLEFT));
+      int do_a     = (on_btn & BUTTON_A) ? 1 : 0;
 
-        if (do_right || do_left) {
-          actor->pc_cursor_cooldown = 8;
-          int s = actor->pc_options_sel;
+      if ((do_right || do_left || do_a) && actor->pc_cursor_cooldown == 0) {
+        actor->pc_cursor_cooldown = 8;
+        int s = actor->pc_options_sel;
+
+        if (page == PC_PAGE_GRAPHICS) {
+          int has_banner = g_pc_settings.aspect_mode;
+          int banner_idx = has_banner ? 2 : -1;
+          int msaa_idx = has_banner ? 3 : 2;
+          int texpack_idx = msaa_idx + 1;
+          int nesasp_idx = texpack_idx + 1;
+          int bootlogo_idx = nesasp_idx + 1;
 
           if (s == 0) { // Resolution
             if (do_right) {
               if (g_pc_settings.render_scale == 50) g_pc_settings.render_scale = 75;
               else if (g_pc_settings.render_scale == 75) g_pc_settings.render_scale = 100;
-            } else {
+            } else if (do_left) {
               if (g_pc_settings.render_scale == 100) g_pc_settings.render_scale = 75;
               else if (g_pc_settings.render_scale == 75) g_pc_settings.render_scale = 50;
             }
           } else if (s == 1) { // Aspect
-            g_pc_settings.aspect_mode = !g_pc_settings.aspect_mode;
-            if (g_pc_settings.aspect_mode) banner_scan_folder();
-          } else if (has_banner && s == banner_idx) { // Banner
+            if (do_right || do_left || do_a) {
+              g_pc_settings.aspect_mode = !g_pc_settings.aspect_mode;
+              // banner list was scanned on menu open; no need to re-scan
+              // (it'd PNG-decode every banner via stb_image again).
+            }
+          } else if (s == banner_idx) { // Banner
             if (g_banner_count) {
               int cur = banner_find_index(g_pc_settings.banner_name);
               if (do_right) {
                 if (cur + 1 >= g_banner_count) g_pc_settings.banner_name[0] = '\0';
                 else strcpy(g_pc_settings.banner_name, g_banner_list[cur + 1].name);
-              } else {
+              } else if (do_left) {
                 if (cur <= 0) {
                   if (cur == 0) g_pc_settings.banner_name[0] = '\0';
                   else strcpy(g_pc_settings.banner_name, g_banner_list[g_banner_count - 1].name);
@@ -453,7 +772,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
             if (do_right) {
               if (g_pc_settings.msaa == 0) g_pc_settings.msaa = 2;
               else if (g_pc_settings.msaa == 2) g_pc_settings.msaa = 4;
-            } else {
+            } else if (do_left) {
               if (g_pc_settings.msaa == 4) g_pc_settings.msaa = 2;
               else if (g_pc_settings.msaa == 2) g_pc_settings.msaa = 0;
             }
@@ -463,7 +782,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
               if (do_right) {
                 if (cur + 1 >= g_texpack_count) g_pc_settings.texture_pack[0] = '\0';
                 else strcpy(g_pc_settings.texture_pack, g_texpack_list[cur + 1].name);
-              } else {
+              } else if (do_left) {
                 if (cur <= 0) {
                   if (cur == 0) g_pc_settings.texture_pack[0] = '\0';
                   else strcpy(g_pc_settings.texture_pack, g_texpack_list[g_texpack_count - 1].name);
@@ -473,23 +792,50 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
               }
             }
           } else if (s == nesasp_idx) { // NES Aspect
-            g_pc_settings.nes_aspect = !g_pc_settings.nes_aspect;
-          } else if (s == resetti_idx) { // Disable Resetti
-            g_pc_settings.disable_resetti = !g_pc_settings.disable_resetti;
-          } else if (s == autosave_idx) { // Auto Save
-            g_pc_settings.auto_save = !g_pc_settings.auto_save;
-          } else if (s == timesync_idx) { // Time Sync
-            g_pc_settings.time_sync = !g_pc_settings.time_sync;
-          } else if (s == freecam_idx) { // Free Cam
-            g_pc_settings.free_cam = !g_pc_settings.free_cam;
-          } else if (s == textspeed_idx) { // Text Speed
+            if (do_right || do_left || do_a) g_pc_settings.nes_aspect = !g_pc_settings.nes_aspect;
+          } else if (s == bootlogo_idx) { // Boot Logo
+            if (do_right || do_left || do_a) g_pc_settings.boot_logo = !g_pc_settings.boot_logo;
+          }
+        } else if (page == PC_PAGE_GAMEPLAY) {
+          if (s == 0) { // Disable Resetti
+            if (do_right || do_left || do_a) g_pc_settings.disable_resetti = !g_pc_settings.disable_resetti;
+          } else if (s == 1) { // Time Sync
+            if (do_right || do_left || do_a) g_pc_settings.time_sync = !g_pc_settings.time_sync;
+          } else if (s == 2) { // Free Cam
+            if (do_right || do_left || do_a) g_pc_settings.free_cam = !g_pc_settings.free_cam;
+          } else if (s == 3) { // Text Speed
             if (do_right) {
               if (g_pc_settings.text_speed < 2) g_pc_settings.text_speed++;
-            } else {
+            } else if (do_left) {
               if (g_pc_settings.text_speed > 0) g_pc_settings.text_speed--;
             }
-          } else if (s == bootlogo_idx) { // Boot Logo
-            g_pc_settings.boot_logo = !g_pc_settings.boot_logo;
+          }
+        } else if (page == PC_PAGE_SAVE) {
+          if (s == 0) { // Save Slot
+            if (do_right || do_left || do_a) g_pc_settings.save_slot = !g_pc_settings.save_slot;
+          } else if (s == 1) { // Auto Save
+            if (do_right || do_left || do_a) g_pc_settings.auto_save = !g_pc_settings.auto_save;
+          } else if (s == 2) { // Delete Town
+            if (do_a) {
+              s_pc_confirm_delete = 1; // No selected by default
+              actor->pc_cursor_cooldown = 12;
+            }
+          }
+        } else if (page == PC_PAGE_CONTROLS) {
+          int row_count = 0;
+          const PCControlsRow* rows = aAL_pc_controls_rows(&row_count);
+          if (s >= 0 && s < row_count && do_a) {
+            const PCControlsRow* row = &rows[s];
+            if (row->kind == CR_MAIN_BTN || row->kind == CR_NES_BTN ||
+                row->kind == CR_NES_TURBO || row->kind == CR_GC_AXIS) {
+              s_remap_active = 1;
+              s_remap_apply_kind = row->kind;
+              s_remap_bit = row->bit;
+              s_remap_timeout = 300; // 5 sec @ 60fps
+              s_remap_captured = 0;
+              memcpy(s_remap_prev, g_pc_vita_pressed, sizeof(s_remap_prev));
+              actor->pc_cursor_cooldown = 14;
+            }
           }
         }
       }
@@ -590,8 +936,15 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       actor->pc_options_open = 1;
       g_aAL_options_menu_open = 1;
       actor->pc_cursor_cooldown = 10;
+      actor->pc_options_page = 0;
+      actor->pc_options_focus = 0;
+      actor->pc_options_sel = aAL_pc_first_selectable(actor->pc_options_page);
       g_pc_options_baseline = g_pc_settings;
 #ifdef TARGET_VITA
+      g_pc_controls_baseline = g_pc_controls;
+      s_pc_confirm_delete = 0;
+      s_remap_active = 0;
+      s_controls_subpage = PC_SUBPAGE_GAME;
       banner_scan_folder();
       texpack_scan_folder();
 #endif
@@ -953,13 +1306,20 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   GRAPH* graph = game->graph;
   char buf[48];
   int len;
-  f32 x = 80.0f;
+  // labels left-aligned at x, values right-aligned to right_x (computed
+  // below). 40 / 35 px margins on a 320-wide screen.
+  f32 x = 40.0f;
+  f32 val_x = 175.0f;
+#ifdef TARGET_VITA
+  f32 y = 22.0f;
+  f32 line_h = 13.0f;
+#else
   f32 y = 36.0f;
   f32 line_h = 14.0f;
+#endif
 
-  // full-screen semi-transparent background. PC_NOOP_WIDESCREEN_STRETCH
-  // makes the rect cover Vita's 16:9 viewport instead of the 4:3
-  // letterbox content area.
+  // fill rect (not texrect): texrect inherits tile 0 from the prior
+  // font glyph, which caused rare alpha=0 flashes.
   {
     Gfx* gfx;
     OPEN_DISP(graph);
@@ -975,9 +1335,7 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       G_AC_NONE | G_ZS_PRIM | G_RM_XLU_SURF | G_RM_XLU_SURF2);
     gDPSetCombineMode(gfx++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
     gDPSetPrimColor(gfx++, 0, 0, 0, 0, 0, 200);
-    gfx = gfx_gSPTextureRectangle1(gfx,
-      0, 0, SCREEN_WIDTH << 2, SCREEN_HEIGHT << 2,
-      0, 0, 0, 0, 0);
+    gDPFillRectangle(gfx++, 0, 0, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2);
     gDPPipeSync(gfx++);
 #ifdef TARGET_PC
     gDPNoOpTag(gfx++, PC_NOOP_WIDESCREEN_STRETCH_OFF);
@@ -989,6 +1347,9 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   int sel = actor->pc_options_sel;
   int item = 0;
 
+  f32 right_x = 285.0f;     // 35 px from the right edge
+  f32 val_min_x = 145.0f;   // value shrinks if it would start left of this
+
   // title
   {
     static u8 str_title[] = "- Options -";
@@ -999,10 +1360,27 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
   }
   y += line_h * 1.4f;
 
-// draw a label + value row. dirty=1 prefixes the label with an asterisk.
-#define DRAW_OPT_ROW(lbl_arr, val_x, dirty) do { \
-    int bright = (sel == item) ? 255 : 180; \
-    int alpha  = (sel == item) ? 255 : 160; \
+// right-align to right_x, shrinking to fit past val_min_x. 0.55 is the
+// readability floor; below that we accept a hair of overflow.
+#define DRAW_VALUE_RIGHT(text_ptr, text_len, r_, g_, b_, a_, yy) do {           \
+    f32 _vw = (f32)mFont_GetStringWidth((u8*)(text_ptr), (text_len), TRUE);     \
+    f32 _vscale = 1.0f;                                                          \
+    f32 _max_w = right_x - val_min_x;                                            \
+    if (_vw > _max_w) _vscale = _max_w / _vw;                                    \
+    if (_vscale < 0.55f) _vscale = 0.55f;                                        \
+    f32 _vx = right_x - _vw * _vscale;                                           \
+    mFont_SetLineStrings(game, (u8*)(text_ptr), (text_len), _vx, (yy),           \
+      (r_), (g_), (b_), (a_), FALSE, TRUE, _vscale, _vscale, mFont_MODE_FONT);   \
+  } while(0)
+
+// Label + value row. dirty=1 prefixes an asterisk. list_active=0 dims the
+// selected row (focus is on a tab bar, cursor lives there). val_x is kept
+// only for source-compat with existing call sites.
+#define DRAW_OPT_ROW_F(lbl_arr, val_x_unused, dirty, list_active) do { \
+    (void)(val_x_unused); \
+    int is_sel = ((sel) == item) && (list_active); \
+    int bright = is_sel ? 255 : 180; \
+    int alpha  = is_sel ? 255 : 160; \
     if (dirty) { \
       static u8 mark[] = { '*' }; \
       mFont_SetLineStrings(game, mark, 1, x - 8.0f, y, \
@@ -1010,142 +1388,464 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     } \
     mFont_SetLineStrings(game, lbl_arr, sizeof(lbl_arr), x, y, \
       bright, bright, bright, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT); \
-    mFont_SetLineStrings(game, (u8*)buf, len, val_x, y, \
-      bright, bright, bright, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT); \
-    if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y, \
+    DRAW_VALUE_RIGHT(buf, len, bright, bright, bright, alpha, y); \
+    if (is_sel) mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y, \
       255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT); \
     item++; y += line_h; \
   } while(0)
 
+// PC build has no tab bar focus state.
+#define DRAW_OPT_ROW(lbl_arr, val_x, dirty) DRAW_OPT_ROW_F(lbl_arr, val_x, dirty, 1)
+
 #ifdef TARGET_VITA
   {
     PCSettings* B = &g_pc_options_baseline;
+    int page = actor->pc_options_page;
+    int list_active = (actor->pc_options_focus == 0);
 
-    // Resolution
+    // main tab bar: uniform gap between tabs, whole bar centered. Active
+    // tab is bright; chevrons hug it when the tab bar has focus.
     {
-      const char* rs = g_pc_settings.render_scale == 100 ? "< 960x544 >" :
-                       g_pc_settings.render_scale == 75  ? "< 720x408 >" : "< 480x272 >";
-      len = sprintf(buf, "%s", rs);
-    }
-    { static u8 lbl[] = { 'R', 'e', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.render_scale != B->render_scale); }
+      static u8 lbl_graphics[] = { 'G', 'r', 'a', 'p', 'h', 'i', 'c', 's' };
+      static u8 lbl_gameplay[] = { 'G', 'a', 'm', 'e', 'p', 'l', 'a', 'y' };
+      static u8 lbl_save[]     = { 'S', 'a', 'v', 'e' };
+      static u8 lbl_controls[] = { 'C', 'o', 'n', 't', 'r', 'o', 'l', 's' };
+      static u8 lcursor[] = { '<' };
+      static u8 rcursor[] = { '>' };
 
-    // Aspect Ratio
-    len = sprintf(buf, "< %s >", g_pc_settings.aspect_mode ? "Original 4:3" : "Widescreen");
-    { static u8 lbl[] = { 'A', 's', 'p', 'e', 'c', 't' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.aspect_mode != B->aspect_mode); }
+      struct { u8* lbl; int len; } tabs[PC_PAGE_COUNT] = {
+        { lbl_graphics, sizeof(lbl_graphics) },
+        { lbl_gameplay, sizeof(lbl_gameplay) },
+        { lbl_save,     sizeof(lbl_save) },
+        { lbl_controls, sizeof(lbl_controls) },
+      };
 
-    // Banner (only in 4:3 mode)
-    if (g_pc_settings.aspect_mode) {
-      if (!g_pc_settings.banner_name[0] || g_banner_count == 0) {
-        len = sprintf(buf, "< None >");
-      } else {
-        char display[32];
-        strncpy(display, g_pc_settings.banner_name, sizeof(display) - 1);
-        display[sizeof(display) - 1] = '\0';
-        int dlen = (int)strlen(display);
-        if (dlen > 4 && (strcmp(display + dlen - 4, ".png") == 0 || strcmp(display + dlen - 4, ".PNG") == 0))
-          display[dlen - 4] = '\0';
-        len = sprintf(buf, "< %s >", display);
+      f32 widths[PC_PAGE_COUNT];
+      f32 gap = 24.0f;
+      f32 total_w = gap * (PC_PAGE_COUNT - 1);
+      for (int i = 0; i < PC_PAGE_COUNT; i++) {
+        widths[i] = (f32)mFont_GetStringWidth(tabs[i].lbl, tabs[i].len, TRUE);
+        total_w += widths[i];
       }
 
-      int bidx = banner_find_index(g_pc_settings.banner_name);
-      int is_invalid = (bidx >= 0 && !g_banner_list[bidx].valid);
-      int dirty = strcmp(g_pc_settings.banner_name, B->banner_name) != 0;
-
-      {
-        static u8 lbl[] = { 'B', 'a', 'n', 'n', 'e', 'r' };
-        int bright = (sel == item) ? 255 : 180;
-        int alpha  = (sel == item) ? 255 : 160;
-        int r = is_invalid ? 255 : bright;
-        int g_c = is_invalid ? 80 : bright;
-        int b = is_invalid ? 80 : bright;
-        if (dirty) {
-          static u8 mark[] = { '*' };
-          mFont_SetLineStrings(game, mark, 1, x - 8.0f, y,
-            255, 220, 80, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      f32 tx = (SCREEN_WIDTH_F - total_w) * 0.5f;
+      for (int i = 0; i < PC_PAGE_COUNT; i++) {
+        int is_active = (i == page);
+        int r = is_active ? 255 : 130;
+        int g = is_active ? 255 : 130;
+        int b = is_active ? 255 : 130;
+        int a = is_active ? 255 : 180;
+        mFont_SetLineStrings(game, tabs[i].lbl, tabs[i].len, tx, y,
+          r, g, b, a, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        if (is_active && !list_active) {
+          mFont_SetLineStrings(game, lcursor, 1, tx - 10.0f, y,
+            255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+          mFont_SetLineStrings(game, rcursor, 1, tx + widths[i] + 4.0f, y,
+            255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
         }
+        tx += widths[i] + gap;
+      }
+    }
+    y += line_h * 1.6f;
+
+    // sub tab bar (Game / NES) - Controls page only.
+    if (page == PC_PAGE_CONTROLS) {
+      static u8 sub_lbl_game[] = { 'G','a','m','e' };
+      static u8 sub_lbl_nes[]  = { 'N','E','S' };
+      static u8 sub_lcursor[]  = { '<' };
+      static u8 sub_rcursor[]  = { '>' };
+
+      struct { u8* lbl; int len; } subs[PC_SUBPAGE_COUNT] = {
+        { sub_lbl_game, sizeof(sub_lbl_game) },
+        { sub_lbl_nes,  sizeof(sub_lbl_nes)  },
+      };
+
+      f32 sub_widths[PC_SUBPAGE_COUNT];
+      f32 sub_gap = 20.0f;
+      f32 sub_total = sub_gap * (PC_SUBPAGE_COUNT - 1);
+      for (int i = 0; i < PC_SUBPAGE_COUNT; i++) {
+        sub_widths[i] = (f32)mFont_GetStringWidth(subs[i].lbl, subs[i].len, TRUE);
+        sub_total += sub_widths[i];
+      }
+
+      int subtab_focused = (actor->pc_options_focus == 2);
+      f32 stx = (SCREEN_WIDTH_F - sub_total) * 0.5f;
+      for (int i = 0; i < PC_SUBPAGE_COUNT; i++) {
+        int is_active = (i == s_controls_subpage);
+        int r = is_active ? 220 : 110;
+        int g = is_active ? 220 : 110;
+        int b = is_active ? 220 : 110;
+        int a = is_active ? 220 : 160;
+        mFont_SetLineStrings(game, subs[i].lbl, subs[i].len, stx, y,
+          r, g, b, a, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        if (is_active && subtab_focused) {
+          mFont_SetLineStrings(game, sub_lcursor, 1, stx - 9.0f, y,
+            255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+          mFont_SetLineStrings(game, sub_rcursor, 1, stx + sub_widths[i] + 3.0f, y,
+            255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        }
+        stx += sub_widths[i] + sub_gap;
+      }
+      // small extra gap so the up scroll indicator has room
+      y += line_h * 1.4f + 4.0f;
+    }
+
+    if (page == PC_PAGE_GRAPHICS) {
+      // Resolution
+      {
+        const char* rs = g_pc_settings.render_scale == 100 ? "< 960x544 >" :
+                         g_pc_settings.render_scale == 75  ? "< 720x408 >" : "< 480x272 >";
+        len = sprintf(buf, "%s", rs);
+      }
+      { static u8 lbl[] = { 'R', 'e', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.render_scale != B->render_scale, list_active); }
+
+      // Aspect Ratio
+      len = sprintf(buf, "< %s >", g_pc_settings.aspect_mode ? "Original 4:3" : "Widescreen");
+      { static u8 lbl[] = { 'A', 's', 'p', 'e', 'c', 't' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.aspect_mode != B->aspect_mode, list_active); }
+
+      // Banner (only in 4:3 mode)
+      if (g_pc_settings.aspect_mode) {
+        if (!g_pc_settings.banner_name[0] || g_banner_count == 0) {
+          len = sprintf(buf, "< None >");
+        } else {
+          char display[32];
+          strncpy(display, g_pc_settings.banner_name, sizeof(display) - 1);
+          display[sizeof(display) - 1] = '\0';
+          int dlen = (int)strlen(display);
+          if (dlen > 4 && (strcmp(display + dlen - 4, ".png") == 0 || strcmp(display + dlen - 4, ".PNG") == 0))
+            display[dlen - 4] = '\0';
+          len = sprintf(buf, "< %s >", display);
+        }
+
+        int bidx = banner_find_index(g_pc_settings.banner_name);
+        int is_invalid = (bidx >= 0 && !g_banner_list[bidx].valid);
+        int dirty = strcmp(g_pc_settings.banner_name, B->banner_name) != 0;
+
+        {
+          static u8 lbl[] = { 'B', 'a', 'n', 'n', 'e', 'r' };
+          int is_sel = (sel == item) && list_active;
+          int bright = is_sel ? 255 : 180;
+          int alpha  = is_sel ? 255 : 160;
+          int r = is_invalid ? 255 : bright;
+          int g_c = is_invalid ? 80 : bright;
+          int b = is_invalid ? 80 : bright;
+          if (dirty) {
+            static u8 mark[] = { '*' };
+            mFont_SetLineStrings(game, mark, 1, x - 8.0f, y,
+              255, 220, 80, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+          }
+          mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
+            r, g_c, b, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+          DRAW_VALUE_RIGHT(buf, len, r, g_c, b, alpha, y);
+          if (is_sel) mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y,
+            255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+          item++; y += line_h;
+        }
+      }
+
+      // MSAA
+      if (g_pc_settings.msaa > 0)
+        len = sprintf(buf, "< %dx >", g_pc_settings.msaa);
+      else
+        len = sprintf(buf, "< Off >");
+      { static u8 lbl[] = { 'M', 'S', 'A', 'A' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.msaa != B->msaa, list_active); }
+
+      // Texture Pack
+      if (!g_pc_settings.texture_pack[0] || g_texpack_count == 0) {
+        len = sprintf(buf, "< None >");
+      } else {
+        len = sprintf(buf, "< %s >", g_pc_settings.texture_pack);
+      }
+      { static u8 lbl[] = { 'T', 'e', 'x', ' ', 'P', 'a', 'c', 'k' };
+        DRAW_OPT_ROW_F(lbl, val_x, strcmp(g_pc_settings.texture_pack, B->texture_pack) != 0, list_active); }
+
+      // NES Aspect
+      len = sprintf(buf, "< %s >", g_pc_settings.nes_aspect ? "4:3" : "Stretch");
+      { static u8 lbl[] = { 'N', 'E', 'S', ' ', 'A', 's', 'p', 'e', 'c', 't' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.nes_aspect != B->nes_aspect, list_active); }
+
+      // Boot Logo
+      len = sprintf(buf, "< %s >", g_pc_settings.boot_logo ? "On" : "Off");
+      { static u8 lbl[] = { 'B', 'o', 'o', 't', ' ', 'L', 'o', 'g', 'o' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.boot_logo != B->boot_logo, list_active); }
+
+    } else if (page == PC_PAGE_GAMEPLAY) {
+      // Disable Resetti
+      len = sprintf(buf, "< %s >", g_pc_settings.disable_resetti ? "On" : "Off");
+      { static u8 lbl[] = { 'N', 'o', ' ', 'R', 'e', 's', 'e', 't', 't', 'i' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.disable_resetti != B->disable_resetti, list_active); }
+
+      // Time Sync
+      len = sprintf(buf, "< %s >", g_pc_settings.time_sync ? "On" : "Off");
+      { static u8 lbl[] = { 'T', 'i', 'm', 'e', ' ', 'S', 'y', 'n', 'c' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.time_sync != B->time_sync, list_active); }
+
+      // Free Cam
+      len = sprintf(buf, "< %s >", g_pc_settings.free_cam ? "On" : "Off");
+      { static u8 lbl[] = { 'F', 'r', 'e', 'e', ' ', 'C', 'a', 'm' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.free_cam != B->free_cam, list_active); }
+
+      // Text Speed
+      {
+        const char* ts = g_pc_settings.text_speed == 0 ? "Slow" :
+                         g_pc_settings.text_speed == 1 ? "Normal" : "Fast";
+        len = sprintf(buf, "< %s >", ts);
+      }
+      { static u8 lbl[] = { 'T', 'e', 'x', 't', ' ', 'S', 'p', 'e', 'e', 'd' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.text_speed != B->text_speed, list_active); }
+
+    } else if (page == PC_PAGE_SAVE) {
+      // Save Slot
+      len = sprintf(buf, "< Slot %s >", g_pc_settings.save_slot ? "B" : "A");
+      { static u8 lbl[] = { 'S', 'a', 'v', 'e', ' ', 'S', 'l', 'o', 't' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.save_slot != B->save_slot, list_active); }
+
+      // Auto Save
+      len = sprintf(buf, "< %s >", g_pc_settings.auto_save ? "On" : "Off");
+      { static u8 lbl[] = { 'A', 'u', 't', 'o', ' ', 'S', 'a', 'v', 'e' };
+        DRAW_OPT_ROW_F(lbl, val_x, g_pc_settings.auto_save != B->auto_save, list_active); }
+
+      // Delete Town: action row, no toggle value
+      {
+        static u8 lbl[]    = { 'D', 'e', 'l', 'e', 't', 'e', ' ', 'T', 'o', 'w', 'n' };
+        static u8 action[] = { '(', 'p', 'r', 'e', 's', 's', ' ', 'A', ')' };
+        int is_sel = (sel == item) && list_active;
+        int r = is_sel ? 255 : 200;
+        int g = is_sel ? 100 : 110;
+        int b = is_sel ? 100 : 110;
+        int a = is_sel ? 255 : 180;
         mFont_SetLineStrings(game, lbl, sizeof(lbl), x, y,
-          r, g_c, b, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-        mFont_SetLineStrings(game, (u8*)buf, len, 180.0f, y,
-          r, g_c, b, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-        if (sel == item) mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y,
+          r, g, b, a, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        DRAW_VALUE_RIGHT(action, sizeof(action), r, g, b, a, y);
+        if (is_sel) mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y,
           255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
         item++; y += line_h;
       }
+    } else if (page == PC_PAGE_CONTROLS) {
+      int n_rows = 0;
+      const PCControlsRow* rows = aAL_pc_controls_rows(&n_rows);
+
+      // keep the selected row centered so context above and below stays visible
+      int visible = PC_CONTROLS_VISIBLE;
+      if (visible > n_rows) visible = n_rows;
+      int scroll = sel - visible / 2;
+      if (scroll > n_rows - visible) scroll = n_rows - visible;
+      if (scroll < 0) scroll = 0;
+
+      f32 ctrl_line_h = 12.5f;
+      f32 list_start_y = y;
+
+      // scaled-down dots fit between sub-tab bar and first row without
+      // overlap. "..." since the font has no caret glyph.
+      if (scroll > 0) {
+        static u8 up_dots[] = { '.', '.', '.' };
+        f32 ud_scale = 0.7f;
+        f32 ud_w = (f32)mFont_GetStringWidth(up_dots, sizeof(up_dots), TRUE) * ud_scale;
+        mFont_SetLineStrings(game, up_dots, sizeof(up_dots),
+          (SCREEN_WIDTH_F - ud_w) * 0.5f, list_start_y - 6.0f,
+          210, 210, 210, 230, FALSE, TRUE, ud_scale, ud_scale, mFont_MODE_FONT);
+      }
+
+      static const char* axis_names[] = { "none", "main_x", "main_y", "cstick_x", "cstick_y" };
+
+      for (int row = scroll; row < scroll + visible && row < n_rows; row++) {
+        const PCControlsRow* r = &rows[row];
+        int rlen = (int)strlen(r->label);
+
+        if (r->kind == CR_HEADER) {
+          // current tables don't use headers; keep the branch for the case
+          // they come back
+          y += ctrl_line_h;
+          continue;
+        }
+
+        int is_sel = (sel == row) && list_active;
+        int is_remap_target = is_sel && s_remap_active;
+        int bright = is_sel ? 255 : 180;
+        int alpha  = is_sel ? 255 : 160;
+
+        mFont_SetLineStrings(game, (u8*)r->label, rlen, x, y,
+          bright, bright, bright, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+
+        if (is_remap_target) {
+          // captured Vita buttons joined with " or ", plus countdown
+          int secs = (s_remap_timeout + 59) / 60;
+          if (secs < 0) secs = 0;
+          char captured_str[64];
+          int csz = 0;
+          captured_str[0] = '\0';
+          for (int i = 0; i < PCV_COUNT; i++) {
+            if (!(s_remap_captured & (1u << i))) continue;
+            const char* nm = pc_controls_vita_name(i);
+            int n = snprintf(captured_str + csz, sizeof(captured_str) - csz,
+                             "%s%s", (csz > 0) ? " or " : "", nm);
+            if (n > 0 && csz + n < (int)sizeof(captured_str)) csz += n;
+          }
+          if (csz == 0) snprintf(captured_str, sizeof(captured_str), "none");
+
+          char rline[96];
+          int rl = snprintf(rline, sizeof(rline), "< %s (%ds) >", captured_str, secs);
+          DRAW_VALUE_RIGHT(rline, rl, 255, 230, 100, 255, y);
+        } else {
+          char vbuf[80];
+          int vlen = 0;
+
+          if (r->kind == CR_MAIN_BTN || r->kind == CR_NES_BTN || r->kind == CR_NES_TURBO) {
+            // reverse-lookup the right map for any Vita button bound here
+            char binding_str[64];
+            int bsz = 0;
+            binding_str[0] = '\0';
+            for (int i = 0; i < PCV_COUNT; i++) {
+              int hit = 0;
+              if (r->kind == CR_MAIN_BTN)        hit = (g_pc_controls.main_map[i]      & (uint16_t)r->bit) != 0;
+              else if (r->kind == CR_NES_BTN)    hit = (g_pc_controls.nes_map[i]       & (uint8_t)r->bit)  != 0;
+              else /* CR_NES_TURBO */            hit = (g_pc_controls.nes_turbo_map[i] & (uint8_t)r->bit)  != 0;
+              if (!hit) continue;
+              const char* nm = pc_controls_vita_name(i);
+              int max = (int)sizeof(binding_str) - bsz - 4;
+              if (max <= 0) { snprintf(binding_str + bsz, sizeof(binding_str) - bsz, "..."); bsz += 3; break; }
+              int n = snprintf(binding_str + bsz, sizeof(binding_str) - bsz,
+                               "%s%s", (bsz > 0) ? " or " : "", nm);
+              if (n <= 0) break;
+              bsz += n;
+            }
+            if (bsz == 0) snprintf(binding_str, sizeof(binding_str), "none");
+            vlen = snprintf(vbuf, sizeof(vbuf), "%s", binding_str);
+          } else if (r->kind == CR_GC_AXIS) {
+            // Vita axes targeting this GC axis, "-" prefix when inverted
+            char binding_str[64];
+            int bsz = 0;
+            binding_str[0] = '\0';
+            static const char* pca_names[] = { "lstick_x", "lstick_y", "rstick_x", "rstick_y" };
+            for (int p = 0; p < PCA_COUNT; p++) {
+              if (g_pc_controls.main_axis_map[p].target != (PCGCAxis)r->bit) continue;
+              const char* prefix = (g_pc_controls.main_axis_map[p].invert < 0) ? "-" : "";
+              int max = (int)sizeof(binding_str) - bsz - 4;
+              if (max <= 0) { snprintf(binding_str + bsz, sizeof(binding_str) - bsz, "..."); bsz += 3; break; }
+              int n = snprintf(binding_str + bsz, sizeof(binding_str) - bsz,
+                               "%s%s%s", (bsz > 0) ? " or " : "", prefix, pca_names[p]);
+              if (n <= 0) break;
+              bsz += n;
+            }
+            if (bsz == 0) snprintf(binding_str, sizeof(binding_str), "none");
+            vlen = snprintf(vbuf, sizeof(vbuf), "%s", binding_str);
+            (void)axis_names; // suppress unused if path not taken
+          }
+
+          DRAW_VALUE_RIGHT(vbuf, vlen, bright, bright, bright, alpha, y);
+        }
+
+        if (is_sel && !s_remap_active) {
+          mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y,
+            255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        }
+        item++; y += ctrl_line_h;
+      }
+
+      if (scroll + visible < n_rows) {
+        static u8 dn_dots[] = { '.', '.', '.' };
+        f32 dd_scale = 0.7f;
+        f32 dd_w = (f32)mFont_GetStringWidth(dn_dots, sizeof(dn_dots), TRUE) * dd_scale;
+        mFont_SetLineStrings(game, dn_dots, sizeof(dn_dots),
+          (SCREEN_WIDTH_F - dd_w) * 0.5f, y - 4.0f,
+          210, 210, 210, 230, FALSE, TRUE, dd_scale, dd_scale, mFont_MODE_FONT);
+      }
     }
 
-    // MSAA
-    if (g_pc_settings.msaa > 0)
-      len = sprintf(buf, "< %dx >", g_pc_settings.msaa);
-    else
-      len = sprintf(buf, "< Off >");
-    { static u8 lbl[] = { 'M', 'S', 'A', 'A' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.msaa != B->msaa); }
-
-    // Texture Pack
-    if (!g_pc_settings.texture_pack[0] || g_texpack_count == 0) {
-      len = sprintf(buf, "< None >");
-    } else {
-      len = sprintf(buf, "< %s >", g_pc_settings.texture_pack);
+    // footer pinned to the bottom so different-length pages still line up.
+    // hidden behind the delete-town modal.
+    if (!s_pc_confirm_delete) {
+      f32 footer_y = 208.0f;
+      {
+        static u8 str_save[] = { 'S', 'T', 'A', 'R', 'T', ':', ' ', 'S', 'a', 'v', 'e' };
+        static u8 str_back[] = { 'B', ':', ' ', 'C', 'a', 'n', 'c', 'e', 'l' };
+        f32 bw = (f32)mFont_GetStringWidth(str_back, sizeof(str_back), TRUE);
+        mFont_SetLineStrings(game, str_save, sizeof(str_save), x, footer_y,
+          255, 255, 255, 200, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        mFont_SetLineStrings(game, str_back, sizeof(str_back), right_x - bw, footer_y,
+          255, 255, 255, 200, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      }
+      footer_y += line_h + 4.0f;
+      {
+        static u8 str_unsaved[] = { '*', ' ', '=', ' ', 'u', 'n', 's', 'a', 'v', 'e', 'd',
+                                    ' ', 'c', 'h', 'a', 'n', 'g', 'e' };
+        f32 uw = (f32)mFont_GetStringWidth(str_unsaved, sizeof(str_unsaved), TRUE);
+        mFont_SetLineStrings(game, str_unsaved, sizeof(str_unsaved),
+          (SCREEN_WIDTH_F - uw) * 0.5f, footer_y,
+          170, 170, 170, 140, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      }
     }
-    { static u8 lbl[] = { 'T', 'e', 'x', ' ', 'P', 'a', 'c', 'k' };
-      DRAW_OPT_ROW(lbl, 180.0f, strcmp(g_pc_settings.texture_pack, B->texture_pack) != 0); }
 
-    // NES Aspect
-    len = sprintf(buf, "< %s >", g_pc_settings.nes_aspect ? "4:3" : "Stretch");
-    { static u8 lbl[] = { 'N', 'E', 'S', ' ', 'A', 's', 'p', 'e', 'c', 't' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.nes_aspect != B->nes_aspect); }
+    // Delete Town modal overlay.
+    if (s_pc_confirm_delete) {
+      // fill rect not texrect: see aAL_pc_options_draw above.
+      Gfx* gfx2;
+      OPEN_DISP(graph);
+      gfx2 = NOW_FONT_DISP;
+      gDPPipeSync(gfx2++);
+#ifdef TARGET_PC
+      gDPNoOpTag(gfx2++, PC_NOOP_WIDESCREEN_STRETCH);
+#endif
+      gDPSetOtherMode(gfx2++,
+        G_AD_DISABLE | G_CD_MAGICSQ | G_CK_NONE | G_TC_FILT |
+        G_TF_POINT | G_TT_NONE | G_TL_TILE | G_TD_CLAMP |
+        G_TP_NONE | G_CYC_1CYCLE | G_PM_NPRIMITIVE,
+        G_AC_NONE | G_ZS_PRIM | G_RM_XLU_SURF | G_RM_XLU_SURF2);
+      gDPSetCombineMode(gfx2++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+      gDPSetPrimColor(gfx2++, 0, 0, 0, 0, 0, 180);
+      gDPFillRectangle(gfx2++, 0, 0, SCREEN_WIDTH * 2, SCREEN_HEIGHT * 2);
+      gDPPipeSync(gfx2++);
+#ifdef TARGET_PC
+      gDPNoOpTag(gfx2++, PC_NOOP_WIDESCREEN_STRETCH_OFF);
+#endif
+      SET_FONT_DISP(gfx2);
+      CLOSE_DISP(graph);
 
-    // Disable Resetti
-    len = sprintf(buf, "< %s >", g_pc_settings.disable_resetti ? "On" : "Off");
-    { static u8 lbl[] = { 'N', 'o', ' ', 'R', 'e', 's', 'e', 't', 't', 'i' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.disable_resetti != B->disable_resetti); }
+      f32 dy = 90.0f;
+      static u8 hdr[]   = { 'D','e','l','e','t','e',' ','t','h','i','s',' ','t','o','w','n','?' };
+      static u8 warn1[] = { 'A','l','l',' ','p','r','o','g','r','e','s','s',' ','i','n',' ','t','h','i','s',' ','s','l','o','t' };
+      static u8 warn2[] = { 'w','i','l','l',' ','b','e',' ','l','o','s','t',' ','f','o','r','e','v','e','r','.' };
+      static u8 no_lbl[]  = { 'N', 'o' };
+      static u8 yes_lbl[] = { 'Y', 'e', 's' };
+      static u8 hint[]  = { 'A',':',' ','c','o','n','f','i','r','m','/','c','a','n','c','e','l',',',' ','L','/','R',':',' ','t','o','g','g','l','e' };
 
-    // Auto Save
-    len = sprintf(buf, "< %s >", g_pc_settings.auto_save ? "On" : "Off");
-    { static u8 lbl[] = { 'A', 'u', 't', 'o', ' ', 'S', 'a', 'v', 'e' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.auto_save != B->auto_save); }
+      f32 hw = (f32)mFont_GetStringWidth(hdr, sizeof(hdr), TRUE);
+      mFont_SetLineStrings(game, hdr, sizeof(hdr),
+        (SCREEN_WIDTH_F - hw) * 0.5f, dy,
+        255, 230, 100, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      f32 w1 = (f32)mFont_GetStringWidth(warn1, sizeof(warn1), TRUE);
+      mFont_SetLineStrings(game, warn1, sizeof(warn1),
+        (SCREEN_WIDTH_F - w1) * 0.5f, dy + 18.0f,
+        220, 220, 220, 220, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      f32 w2 = (f32)mFont_GetStringWidth(warn2, sizeof(warn2), TRUE);
+      mFont_SetLineStrings(game, warn2, sizeof(warn2),
+        (SCREEN_WIDTH_F - w2) * 0.5f, dy + 32.0f,
+        220, 220, 220, 220, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
 
-    // Time Sync
-    len = sprintf(buf, "< %s >", g_pc_settings.time_sync ? "On" : "Off");
-    { static u8 lbl[] = { 'T', 'i', 'm', 'e', ' ', 'S', 'y', 'n', 'c' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.time_sync != B->time_sync); }
+      // s_pc_confirm_delete: 1=No, 2=Yes
+      f32 btn_y = dy + 60.0f;
+      f32 no_x  = SCREEN_WIDTH_F * 0.5f - 50.0f;
+      f32 yes_x = SCREEN_WIDTH_F * 0.5f + 30.0f;
+      int no_sel  = (s_pc_confirm_delete == 1);
+      int yes_sel = (s_pc_confirm_delete == 2);
+      mFont_SetLineStrings(game, no_lbl, sizeof(no_lbl), no_x, btn_y,
+        no_sel ? 255 : 150, no_sel ? 255 : 150, no_sel ? 255 : 150,
+        no_sel ? 255 : 180, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      mFont_SetLineStrings(game, yes_lbl, sizeof(yes_lbl), yes_x, btn_y,
+        yes_sel ? 255 : 150, yes_sel ? 80 : 150, yes_sel ? 80 : 150,
+        yes_sel ? 255 : 180, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      if (no_sel)  mFont_SetLineStrings(game, str_arrow, 1, no_x - 12.0f, btn_y,
+        255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      if (yes_sel) mFont_SetLineStrings(game, str_arrow, 1, yes_x - 12.0f, btn_y,
+        255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
 
-    // Free Cam
-    len = sprintf(buf, "< %s >", g_pc_settings.free_cam ? "On" : "Off");
-    { static u8 lbl[] = { 'F', 'r', 'e', 'e', ' ', 'C', 'a', 'm' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.free_cam != B->free_cam); }
-
-    // Text Speed
-    {
-      const char* ts = g_pc_settings.text_speed == 0 ? "Slow" :
-                       g_pc_settings.text_speed == 1 ? "Normal" : "Fast";
-      len = sprintf(buf, "< %s >", ts);
-    }
-    { static u8 lbl[] = { 'T', 'e', 'x', 't', ' ', 'S', 'p', 'e', 'e', 'd' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.text_speed != B->text_speed); }
-
-    // Boot Logo
-    len = sprintf(buf, "< %s >", g_pc_settings.boot_logo ? "On" : "Off");
-    { static u8 lbl[] = { 'B', 'o', 'o', 't', ' ', 'L', 'o', 'g', 'o' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.boot_logo != B->boot_logo); }
-
-    y += line_h * 0.6f;
-
-    // hints
-    {
-      static u8 str_save[] = { 'S', 'T', 'A', 'R', 'T', ':', ' ', 'S', 'a', 'v', 'e' };
-      static u8 str_back[] = { 'B', ':', ' ', 'B', 'a', 'c', 'k' };
-      mFont_SetLineStrings(game, str_save, sizeof(str_save), x, y, 255, 255, 255, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-      mFont_SetLineStrings(game, str_back, sizeof(str_back), 190.0f, y, 255, 255, 255, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-    }
-    y += line_h;
-    {
-      static u8 str_unsaved[] = { '*', ' ', '=', ' ', 'u', 'n', 's', 'a', 'v', 'e', 'd' };
-      mFont_SetLineStrings(game, str_unsaved, sizeof(str_unsaved), x, y, 255, 220, 80, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
-      static u8 str_restart[] = { 'R', 'e', 's', 't', 'a', 'r', 't', ' ', 't', 'o', ' ', 'a', 'p', 'p', 'l', 'y' };
-      mFont_SetLineStrings(game, str_restart, sizeof(str_restart), 160.0f, y, 255, 200, 100, 140, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+      f32 hint_w = (f32)mFont_GetStringWidth(hint, sizeof(hint), TRUE);
+      mFont_SetLineStrings(game, hint, sizeof(hint),
+        (SCREEN_WIDTH_F - hint_w) * 0.5f, btn_y + 22.0f,
+        200, 200, 200, 160, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
     }
   }
 
@@ -1156,7 +1856,7 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     // Resolution
     len = sprintf(buf, "< %dx%d >", g_pc_settings.window_width, g_pc_settings.window_height);
     { static u8 lbl[] = { 'R', 'e', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.window_width != B->window_width || g_pc_settings.window_height != B->window_height); }
+      DRAW_OPT_ROW(lbl, val_x, g_pc_settings.window_width != B->window_width || g_pc_settings.window_height != B->window_height); }
 
     // Fullscreen
     {
@@ -1165,12 +1865,12 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       len = sprintf(buf, "%s", fs);
     }
     { static u8 lbl[] = { 'D', 'i', 's', 'p', 'l', 'a', 'y' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.fullscreen != B->fullscreen); }
+      DRAW_OPT_ROW(lbl, val_x, g_pc_settings.fullscreen != B->fullscreen); }
 
     // VSync
     len = sprintf(buf, "< %s >", g_pc_settings.vsync ? "On" : "Off");
     { static u8 lbl[] = { 'V', 'S', 'y', 'n', 'c' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.vsync != B->vsync); }
+      DRAW_OPT_ROW(lbl, val_x, g_pc_settings.vsync != B->vsync); }
 
     // MSAA
     if (g_pc_settings.msaa > 0)
@@ -1178,7 +1878,7 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
     else
       len = sprintf(buf, "< Off >");
     { static u8 lbl[] = { 'M', 'S', 'A', 'A' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.msaa != B->msaa); }
+      DRAW_OPT_ROW(lbl, val_x, g_pc_settings.msaa != B->msaa); }
 
     // Textures
     {
@@ -1187,7 +1887,7 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       len = sprintf(buf, "%s", tp);
     }
     { static u8 lbl[] = { 'T', 'e', 'x', 't', 'u', 'r', 'e', 's' };
-      DRAW_OPT_ROW(lbl, 180.0f, g_pc_settings.preload_textures != B->preload_textures); }
+      DRAW_OPT_ROW(lbl, val_x, g_pc_settings.preload_textures != B->preload_textures); }
 
     y += line_h * 0.5f;
 

@@ -189,7 +189,7 @@ static void aTnt_SetupAction(ACTOR* actor, int type) {
     tent->structure_class.action = type;
 }
 
-static int aTnt_ControlLight(ACTOR*) {
+static int aTnt_ControlLight(ACTOR* _p6) {
     if (Common_Get(time.now_sec) >= 18000 && Common_Get(time.now_sec) < 64800) {
         return 0;
     }

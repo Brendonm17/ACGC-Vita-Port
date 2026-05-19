@@ -22,7 +22,7 @@ ACTOR_PROFILE Groundhog_Control_Profile = {
   NULL
 };
 
-static int aGHC_get_now_term();
+static int aGHC_get_now_term(void);
 static void aGHC_setupAction(GROUNDHOG_CONTROL_ACTOR* groundhog_control, int action);
 
 static void aGHC_actor_ct(ACTOR* actor, GAME* game) {
@@ -58,7 +58,7 @@ static void aGHC_actor_dt(ACTOR* actor, GAME* game) {
   mEv_actor_dying_message(mEv_EVENT_GROUNDHOG_DAY, actor);
 }
 
-static int aGHC_get_now_term() {
+static int aGHC_get_now_term(void) {
   int res;
 
   if (aGHC_TIME_CHECK(8, 0, 0)) {

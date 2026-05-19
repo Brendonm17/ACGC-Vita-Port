@@ -9,6 +9,7 @@
 #include "vita_banner.h"
 #include "vita_gx_cmdbuf.h"
 #include "stb_image.h"
+#include <psp2/gxm.h>
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
@@ -140,7 +141,9 @@ void banner_draw_bars(void) {
 
     int content_w, bar_left;
     vita_get_43_layout(&content_w, &bar_left);
-    int bar_right = g_pc_window_w - content_w - bar_left; // absorb rounding remainder
+    // +1 overlaps the content's last column: closes a 1px viewport
+    // rounding gap between the game area and the right bar.
+    int bar_right = g_pc_window_w - content_w - bar_left + 1;
     if (bar_left <= 0) return;
 
     GLuint prog = vita_get_simple_shader();
@@ -148,9 +151,6 @@ void banner_draw_bars(void) {
 
     float W = (float)g_pc_window_w;
 
-    // NDC positions
-    // identity matrices mean these go straight to clip space
-    // right bar uses bar_right width to close any 1px rounding gap
     float l0 = -1.0f;
     float l1 = (float)bar_left / W * 2.0f - 1.0f;
     float r0 = (float)(g_pc_window_w - bar_right) / W * 2.0f - 1.0f;
@@ -176,8 +176,13 @@ void banner_draw_bars(void) {
     BV(9,  r0,-1, 1,1); BV(10, r1, 1, 0,0); BV(11, r0,1, 1,0);
     #undef BV
 
-    // Re-upload VBO with banner data (game is done with its data)
-    glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+    // Don't reuse g_gx.vbo: it's holding a zero-copy loan of cmd_verts_db[rd],
+    // and glBufferData on it makes vitaGL queue that pointer for the GC
+    // thread to free. Double-free + UAF, crashes in _free_r about a second
+    // after 4:3 + banner activates.
+    static GLuint s_banner_vbo = 0;
+    if (!s_banner_vbo) glGenBuffers(1, &s_banner_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, s_banner_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
 
     // Re-set attrib pointers (same layout as game, pointing to VBO offset 0)
@@ -216,9 +221,18 @@ void banner_draw_bars(void) {
     if (lte >= 0) glUniform1f(lte, 0.0f);
     if (ltg >= 0) glUniform1f(ltg, 0.0f);
 
-    // Bind banner texture to unit 0
+    // glBindTexture alone can no-op when VitaGL's cache is stale from
+    // the cmd-loop's direct sceGxm pushes. push directly here too so
+    // the bars sample the banner regardless of cache state.
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_banner_tex);
+    {
+        extern SceGxmContext* vglGetGxmContext(void);
+        extern const SceGxmTexture* vglGetGxmTextureById(GLuint id);
+        SceGxmContext* gxm_ctx = vglGetGxmContext();
+        const SceGxmTexture* gt = vglGetGxmTextureById(g_banner_tex);
+        if (gxm_ctx && gt) sceGxmSetFragmentTexture(gxm_ctx, 0, gt);
+    }
     if (s_uloc.tex0 >= 0) glUniform1i(s_uloc.tex0, 0);
 
     // State: no depth, no cull, no blend, no scissor
@@ -303,7 +317,15 @@ void vita_efb_draw_fullscreen(GLuint tex) {
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
     glDepthMask(GL_FALSE);
-    glViewport(0, 0, g_pc_window_w, g_pc_window_h);
+    // 4:3 mode: the EFB capture is content-sized; full-screen viewport
+    // would stretch it horizontally over the bars.
+    if (g_pc_settings.aspect_mode == 1 && g_aspect_active) {
+        int content_w, bar_w;
+        vita_get_43_layout(&content_w, &bar_w);
+        glViewport(bar_w, 0, content_w, g_pc_window_h);
+    } else {
+        glViewport(0, 0, g_pc_window_w, g_pc_window_h);
+    }
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 

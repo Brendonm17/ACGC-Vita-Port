@@ -564,7 +564,10 @@ void vita_fixnes_draw_screen(void) {
     NV(3, -1,-1, 0,1); NV(4, 1, 1, 1,0); NV(5,-1,1, 0,0);
     #undef NV
 
-    glBindBuffer(GL_ARRAY_BUFFER, g_gx.vbo);
+    // Dedicated VBO; same reason as banner_draw_bars.
+    static GLuint s_nes_vbo = 0;
+    if (!s_nes_vbo) glGenBuffers(1, &s_nes_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, s_nes_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
     vita_set_vertex_attrib_pointers();
     glUseProgram(prog);

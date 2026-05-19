@@ -65,6 +65,18 @@ extern void aBC_vita_clear_block_spawned(s8 bx, s8 bz) {
 static void aBC_block_reset_spawn_mask(void) {
   memset(aBC_block_spawned_mask, 0, sizeof(aBC_block_spawned_mask));
 }
+
+// free_cam pipeline only runs STRUCTS at frame +2 after scene init, so
+// mid-game FG placements (Redd tent, Saharah, Katrina, Snowman) need a
+// manual re-trigger to spawn the actor.
+static volatile u8 aBC_force_struct_respawn = 0;
+
+extern void aBC_vita_request_struct_respawn(s8 bx, s8 bz) {
+  if (bx < 0 || bx >= BLOCK_X_NUM) return;
+  if (bz < 0 || bz >= BLOCK_Z_NUM) return;
+  aBC_block_spawned_mask[bz][bx] = 0;
+  aBC_force_struct_respawn = 1;
+}
 #endif
 
 ACTOR_PROFILE Birth_Control_Profile = {
@@ -546,6 +558,10 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
     aBC_last_seen_scene = cur_scene_no;
     aBC_block_reset_spawn_mask();
     aBC_pending_spawn_stage = 0;
+    // event handlers fire FG placements once per event period and won't
+    // re-fire on scene-return, so force a re-walk. dedup in
+    // aBC_setupActor_impl makes this safe if STRUCTS already ran.
+    aBC_force_struct_respawn = 1;
     // arm prespawn for the start block. without this, queue_next stays
     // at 8 (disabled) until the next acre transition, so neighbors of
     // the spawn block never get prespawned. the in-block pipeline still
@@ -592,6 +608,12 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
         aBC_pending_spawn_stage = (aBC_pending_spawn_stage == 1) ? 2 : 0;
       }
       // on quota-exhausted stay put; retries next frame.
+    }
+
+    // service struct-respawn requested by mFI_SetFGStructure_common
+    if (aBC_force_struct_respawn && !birth_control->setup_actor_flag) {
+      aBC_force_struct_respawn = 0;
+      aBC_setupActor_impl(play, aBC_MASK_STRUCTS);
     }
 #endif
 

@@ -10,6 +10,19 @@
 extern "C" {
 #endif
 
+// Mirrors nofrendo's INP_PAD_* so apply_nes can OR straight into the
+// controller state byte.
+#define NES_BIT_A      0x01
+#define NES_BIT_B      0x02
+#define NES_BIT_SELECT 0x04
+#define NES_BIT_START  0x08
+#define NES_BIT_UP     0x10
+#define NES_BIT_DOWN   0x20
+#define NES_BIT_LEFT   0x40
+#define NES_BIT_RIGHT  0x80
+#define NES_TURBO_A    0x01
+#define NES_TURBO_B    0x02
+
 typedef enum {
     PCV_CROSS,
     PCV_CIRCLE,
@@ -68,9 +81,17 @@ typedef struct {
 extern PCControls g_pc_controls;
 
 void pc_controls_load(void);
+void pc_controls_save(void);
 
 uint16_t pc_controls_apply_main(const uint8_t pressed[PCV_COUNT]);
 uint8_t  pc_controls_apply_nes(const uint8_t pressed[PCV_COUNT], int turbo_phase);
+
+// UI helpers for the in-game Controls page.
+const char* pc_controls_vita_name(int vbtn);
+void        pc_controls_format_main(int vbtn, char* out, int out_size);
+void        pc_controls_format_nes(int vbtn, char* out, int out_size);
+void        pc_controls_set_main(int vbtn, uint16_t bits);
+void        pc_controls_set_nes(int vbtn, uint8_t bits, uint8_t turbo);
 
 #ifdef __cplusplus
 }

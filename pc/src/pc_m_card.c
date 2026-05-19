@@ -1,8 +1,8 @@
-/* pc_m_card.c - memory card manager: GCI save/load, village generation, ARAM data blocks
- *
- * Card A (save/card_a/) = player's home town
- * Card B (save/card_b/) = second town for visiting (drop any AC GCI file there)
- */
+// pc_m_card.c - memory card manager: GCI save/load, village generation, ARAM data blocks
+//
+// save_slot=0: home=card_a, Porter visits card_b (default)
+// save_slot=1: home=card_b, Porter visits card_a
+// Lets the player live in either town and travel to the other.
 #include "m_card.h"
 #include "m_start_data_init.h"
 #include "m_common_data.h"
@@ -61,9 +61,38 @@
 #define PC_SAVE_DIR       "save"
 #endif
 #define PC_GCI_FILENAME   "DobutsunomoriP_MURA.gci"
-#define PC_GCI_PATH       PC_CARD_A_DIR "/" PC_GCI_FILENAME
-#define PC_GCI_TMP_PATH   PC_CARD_A_DIR "/" PC_GCI_FILENAME ".tmp"
+#define PC_GCI_PATH       (l_active_gci_path)
+#define PC_GCI_TMP_PATH   (l_active_gci_tmp_path)
 #define PC_SAVE_MAX_BACKUPS 3
+
+// Resolved at boot in pc_save_resolve_paths().
+static char l_active_card_a[256];
+static char l_active_gci_path[320];
+static char l_active_gci_tmp_path[324];
+
+extern int pc_card_scan_for_gci(int chan, char* out_path, int out_size);
+
+static int pc_home_chan(void)  { return (g_pc_settings.save_slot == 1) ? 1 : 0; }
+static int pc_guest_chan(void) { return (g_pc_settings.save_slot == 1) ? 0 : 1; }
+
+static void pc_save_resolve_paths(void) {
+    const char* base = (g_pc_settings.save_slot == 1) ? PC_CARD_B_DIR : PC_CARD_A_DIR;
+    snprintf(l_active_card_a, sizeof(l_active_card_a), "%s", base);
+
+    // On Slot B the user may have a friend's GCI sitting in card_b/ with
+    // an arbitrary filename. Reuse it so saves overwrite that file instead
+    // of creating a duplicate.
+    char found[320];
+    if (g_pc_settings.save_slot == 1 &&
+        pc_card_scan_for_gci(1, found, sizeof(found))) {
+        snprintf(l_active_gci_path, sizeof(l_active_gci_path), "%s", found);
+    } else {
+        snprintf(l_active_gci_path, sizeof(l_active_gci_path), "%s/%s",
+                 l_active_card_a, PC_GCI_FILENAME);
+    }
+    snprintf(l_active_gci_tmp_path, sizeof(l_active_gci_tmp_path), "%s.tmp",
+             l_active_gci_path);
+}
 
 /* Legacy paths for migration from flat save/ layout */
 #define PC_GCI_PATH_LEGACY     "save/DobutsunomoriP_MURA.gci"
@@ -264,6 +293,8 @@ static void pc_ensure_save_dirs(void) {
     mkdir(PC_CARD_A_DIR, 0755);
     mkdir(PC_CARD_B_DIR, 0755);
 #endif
+    // Resolve paths after dirs exist so the card_b scan sees dropped GCIs.
+    pc_save_resolve_paths();
 }
 
 static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path);
@@ -626,9 +657,12 @@ static int pc_save_read_gci_to_keep(const char* path) {
     return TRUE;
 }
 
-/* Migrate legacy flat save/ layout to save/card_a/ */
+// Migrate legacy flat save/ layout to save/card_a/. Skipped when home is
+// card_b - that directory was never a legacy target.
 static void pc_save_migrate_legacy(void) {
     struct stat st_legacy, st_new;
+
+    if (g_pc_settings.save_slot != 0) return;
 
     if (stat(PC_GCI_PATH_LEGACY, &st_legacy) == 0 &&
         stat(PC_GCI_PATH, &st_new) != 0) {
@@ -662,16 +696,15 @@ static void pc_save_migrate_legacy(void) {
 }
 
 static int pc_save_scan_gci_dir(void) {
-    /* Try common AC save filenames in card_a/ */
-    static const char* gci_names[] = {
-        PC_CARD_A_DIR "/DobutsunomoriP_MURA.gci",
-        PC_CARD_A_DIR "/8P-GAFE-DobutsunomoriP_MURA.gci",
-        NULL
-    };
+    /* Try common AC save filenames in the active slot dir */
+    char gci_names[2][320];
     int i;
     struct stat st;
 
-    for (i = 0; gci_names[i] != NULL; i++) {
+    snprintf(gci_names[0], sizeof(gci_names[0]), "%s/DobutsunomoriP_MURA.gci", l_active_card_a);
+    snprintf(gci_names[1], sizeof(gci_names[1]), "%s/8P-GAFE-DobutsunomoriP_MURA.gci", l_active_card_a);
+
+    for (i = 0; i < 2; i++) {
         if (stat(gci_names[i], &st) == 0) {
             OSReport("[PC] GCI scan: found '%s'\n", gci_names[i]);
             if (pc_save_read_gci(gci_names[i])) {
@@ -680,10 +713,10 @@ static int pc_save_scan_gci_dir(void) {
         }
     }
 
-    /* Also try dynamic scan of card_a/ for any GCI */
+    /* Also try dynamic scan of the active home dir for any AC GCI */
     {
         char found_path[300];
-        if (pc_card_scan_for_gci(0, found_path, sizeof(found_path))) {
+        if (pc_card_scan_for_gci(pc_home_chan(), found_path, sizeof(found_path))) {
             OSReport("[PC] GCI scan: found '%s' via directory scan\n", found_path);
             if (pc_save_read_gci(found_path)) {
                 return TRUE;
@@ -761,12 +794,43 @@ int pc_save_check_and_load(void) {
     return FALSE;
 }
 
+// Remove the GCI, any orphaned temp, and all rotated backups from the
+// active home dir. Caller is expected to exit the process after - the
+// in-memory save state isn't cleared here.
+int pc_save_delete_current_town(void) {
+    int removed = 0;
+    char bak_path[320];
+    struct stat st;
+    int b;
+
+    pc_save_resolve_paths();
+
+    if (stat(PC_GCI_PATH, &st) == 0 && remove(PC_GCI_PATH) == 0) {
+        OSReport("[PC] Delete town: removed '%s'\n", PC_GCI_PATH);
+        removed++;
+    }
+    if (stat(PC_GCI_TMP_PATH, &st) == 0 && remove(PC_GCI_TMP_PATH) == 0) {
+        OSReport("[PC] Delete town: removed '%s'\n", PC_GCI_TMP_PATH);
+        removed++;
+    }
+    for (b = 1; b <= PC_SAVE_MAX_BACKUPS; b++) {
+        snprintf(bak_path, sizeof(bak_path), "%s.bak%d", PC_GCI_PATH, b);
+        if (stat(bak_path, &st) == 0 && remove(bak_path) == 0) {
+            OSReport("[PC] Delete town: removed '%s'\n", bak_path);
+            removed++;
+        }
+    }
+    pc_save_loaded = 0;
+    pc_save_ready = 0;
+    return removed;
+}
+
 /* --- Card B scanning --- */
 
-/* Check if Card B directory has a valid AC town GCI */
+// Scan the guest-side directory (opposite of home) for a town GCI to visit.
 static int pc_card_b_find_town(void) {
-    if (pc_card_scan_for_gci(1, l_card_b_gci_path, sizeof(l_card_b_gci_path))) {
-        OSReport("[PC] Card B: found GCI at '%s'\n", l_card_b_gci_path);
+    if (pc_card_scan_for_gci(pc_guest_chan(), l_card_b_gci_path, sizeof(l_card_b_gci_path))) {
+        OSReport("[PC] Guest town: found GCI at '%s'\n", l_card_b_gci_path);
         return TRUE;
     }
     l_card_b_gci_path[0] = '\0';

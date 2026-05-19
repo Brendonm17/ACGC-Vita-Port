@@ -398,12 +398,19 @@ int g_vita_force_state_resync = 0;
 // queue we just wrote (no threaded display lag). refreshed per-frame
 // from m_play.c while the wipe/fade state machine reports a transition.
 int g_pc_gx_dual_write_frames = 0;
+
+// > 0 = wipe next N single-mode swaps to black during an active iris
+// transition. hides stale-matrix draws while the new scene's matrix
+// pool is still populating after a scene break.
+int g_pc_gx_skip_display_frames = 0;
 #endif
 
 void pc_gx_invalidate_all_state(void) {
     g_gx.dirty = PC_GX_DIRTY_ALL;
 #ifdef TARGET_VITA
     g_vita_force_state_resync = 1;
+    // invalidate frame + 2 follow-ups while the new pool settles
+    if (g_pc_gx_skip_display_frames < 3) g_pc_gx_skip_display_frames = 3;
 #endif
 }
 

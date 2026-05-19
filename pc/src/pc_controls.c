@@ -10,20 +10,6 @@
 #include <string.h>
 #include <strings.h>
 
-// nofrendo INP_PAD_* bits
-#define NES_BIT_A      0x01
-#define NES_BIT_B      0x02
-#define NES_BIT_SELECT 0x04
-#define NES_BIT_START  0x08
-#define NES_BIT_UP     0x10
-#define NES_BIT_DOWN   0x20
-#define NES_BIT_LEFT   0x40
-#define NES_BIT_RIGHT  0x80
-
-// kept apart from nes_map so apply can gate on the per-frame turbo phase
-#define NES_TURBO_A    0x01
-#define NES_TURBO_B    0x02
-
 PCControls g_pc_controls = {
     .main_map = {
         [PCV_CROSS]      = PAD_BUTTON_A,
@@ -401,6 +387,124 @@ void pc_controls_load(void) {
     }
     fclose(f);
     printf("[Controls] Loaded %s\n", CONTROLS_FILE);
+}
+
+// Multi-bit chords get re-encoded as comma-separated names.
+static void gc_bits_to_name(uint16_t bits, char* out, int out_size) {
+    if (bits == 0) { snprintf(out, out_size, "none"); return; }
+    out[0] = '\0';
+    int written = 0;
+    for (int i = 1; i < COUNT_OF(s_gc_bits); i++) {  // skip "none" at index 0
+        if (bits & s_gc_bits[i].bit) {
+            int n = snprintf(out + written, out_size - written,
+                             "%s%s", (written > 0) ? ", " : "", s_gc_bits[i].name);
+            if (n > 0 && written + n < out_size) written += n;
+        }
+    }
+    if (written == 0) snprintf(out, out_size, "none");
+}
+
+static void nes_bits_to_name(uint8_t bits, uint8_t turbo, char* out, int out_size) {
+    if (bits == 0 && turbo == 0) { snprintf(out, out_size, "none"); return; }
+    out[0] = '\0';
+    int written = 0;
+    for (int i = 1; i < COUNT_OF(s_nes_bits); i++) {
+        const NesBitEntry* e = &s_nes_bits[i];
+        uint8_t src = e->is_turbo ? turbo : bits;
+        if (src & e->bit) {
+            int n = snprintf(out + written, out_size - written,
+                             "%s%s", (written > 0) ? ", " : "", e->name);
+            if (n > 0 && written + n < out_size) written += n;
+        }
+    }
+    if (written == 0) snprintf(out, out_size, "none");
+}
+
+// PCAxisBind -> "main_x" or "-cstick_y".
+static void gc_axis_to_name(PCAxisBind bind, char* out, int out_size) {
+    const char* axis = "none";
+    for (int i = 0; i < COUNT_OF(s_gc_axis_names); i++) {
+        if ((PCGCAxis)s_gc_axis_names[i].value == bind.target) {
+            axis = s_gc_axis_names[i].name;
+            break;
+        }
+    }
+    snprintf(out, out_size, "%s%s", (bind.invert < 0) ? "-" : "", axis);
+}
+
+const char* pc_controls_vita_name(int vbtn) {
+    if (vbtn < 0 || vbtn >= PCV_COUNT) return "?";
+    // first entry per button is the canonical name; aliases come later
+    for (int i = 0; i < COUNT_OF(s_vita_names); i++) {
+        if (s_vita_names[i].value == vbtn) return s_vita_names[i].name;
+    }
+    return "?";
+}
+
+void pc_controls_format_main(int vbtn, char* out, int out_size) {
+    if (vbtn < 0 || vbtn >= PCV_COUNT) { snprintf(out, out_size, "?"); return; }
+    gc_bits_to_name(g_pc_controls.main_map[vbtn], out, out_size);
+}
+
+void pc_controls_format_nes(int vbtn, char* out, int out_size) {
+    if (vbtn < 0 || vbtn >= PCV_COUNT) { snprintf(out, out_size, "?"); return; }
+    nes_bits_to_name(g_pc_controls.nes_map[vbtn], g_pc_controls.nes_turbo_map[vbtn], out, out_size);
+}
+
+void pc_controls_set_main(int vbtn, uint16_t bits) {
+    if (vbtn < 0 || vbtn >= PCV_COUNT) return;
+    g_pc_controls.main_map[vbtn] = bits;
+}
+
+void pc_controls_set_nes(int vbtn, uint8_t bits, uint8_t turbo) {
+    if (vbtn < 0 || vbtn >= PCV_COUNT) return;
+    g_pc_controls.nes_map[vbtn] = bits;
+    g_pc_controls.nes_turbo_map[vbtn] = turbo;
+}
+
+// Comments are regenerated each time so the file stays self-documenting.
+void pc_controls_save(void) {
+    FILE* f = fopen(CONTROLS_FILE, "w");
+    if (!f) {
+        printf("[Controls] Failed to write %s\n", CONTROLS_FILE);
+        return;
+    }
+    char buf[64];
+
+    fputs("# Vita buttons: cross, circle, square, triangle, select, start, l, r,\n", f);
+    fputs("#               dpad_up, dpad_down, dpad_left, dpad_right\n", f);
+    fputs("# Values can be a single name, a comma-separated chord, or 'none'.\n", f);
+    fputs("# Stick directions (lstick_up/down/left/right, rstick_*) can also bind.\n\n", f);
+
+    fputs("[Controls.Main]\n", f);
+    fputs("# GC: a, b, x, y, start, z, l, r, dup, ddown, dleft, dright, none\n", f);
+    for (int i = 0; i < PCV_COUNT; i++) {
+        gc_bits_to_name(g_pc_controls.main_map[i], buf, sizeof(buf));
+        fprintf(f, "%-12s = %s\n", pc_controls_vita_name(i), buf);
+    }
+    fputs("\n# Analog sticks. GC axes: main_x, main_y, cstick_x, cstick_y, none.\n", f);
+    fputs("# Prefix with - to invert (e.g. rstick_y = -cstick_y).\n", f);
+    {
+        static const char* axis_names[PCA_COUNT] = { "lstick_x", "lstick_y", "rstick_x", "rstick_y" };
+        for (int i = 0; i < PCA_COUNT; i++) {
+            gc_axis_to_name(g_pc_controls.main_axis_map[i], buf, sizeof(buf));
+            fprintf(f, "%-12s = %s\n", axis_names[i], buf);
+        }
+    }
+
+    fputs("\n[Controls.NES]\n", f);
+    fputs("# NES: a, b, select, start, up, down, left, right, turbo_a, turbo_b, none\n", f);
+    for (int i = 0; i < PCV_COUNT; i++) {
+        nes_bits_to_name(g_pc_controls.nes_map[i], g_pc_controls.nes_turbo_map[i], buf, sizeof(buf));
+        fprintf(f, "%-12s = %s\n", pc_controls_vita_name(i), buf);
+    }
+
+    fputs("\n[Sticks]\n", f);
+    fprintf(f, "deadzone          = %d\n", g_pc_controls.analog_deadzone);
+    fprintf(f, "digital_threshold = %d\n", g_pc_controls.digital_threshold);
+
+    fclose(f);
+    printf("[Controls] Saved %s\n", CONTROLS_FILE);
 }
 
 uint16_t pc_controls_apply_main(const uint8_t pressed[PCV_COUNT]) {

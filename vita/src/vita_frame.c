@@ -293,6 +293,20 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
     // vglSwapBuffers can queue an in-flight FBO for display before the
     // GPU finishes writing it; flash during the title->intro fade
     glFinish();
+    // scene-break frames render with a partially-populated matrix pool
+    // (invalidate fires mid-game_main, earlier draws this frame already
+    // captured stale identity matrices). the iris transition wants
+    // black here anyway, so wipe the back buffer before swap. gated on
+    // active dual-write so the clear can't fire outside transitions.
+    extern int g_pc_gx_skip_display_frames;
+    extern int g_pc_gx_dual_write_frames;
+    if (g_pc_gx_skip_display_frames > 0 && g_pc_gx_dual_write_frames > 0) {
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        g_pc_gx_skip_display_frames--;
+    }
     JW_EndFrame();
 #ifdef VITA_DEBUG
     vita_perf_log_frame();
@@ -319,9 +333,18 @@ void vita_frame_run(ucode_info* ucode, void* gfx_list) {
         // wait, single mode's inline prededup races it on shared state
         extern void vita_wait_prededup(void);
         vita_wait_prededup();
+        // entry seam fence: belt-and-suspenders for ARM weak ordering
+        // over sceKernelWaitSema's implied acquire on g_gx writes.
+        __sync_synchronize();
         vita_frame_run_single(ucode, gfx_list);
         if (g_pc_gx_dual_write_frames == 0) {
             vita_skip_next_top_swap = 1;
+            // exit seam fence: pairs with the next worker dispatch's
+            // sceKernelSignalSema release.
+            __sync_synchronize();
+            // reset so the counter can't leak into a later transition.
+            extern int g_pc_gx_skip_display_frames;
+            g_pc_gx_skip_display_frames = 0;
         }
         return;
     }

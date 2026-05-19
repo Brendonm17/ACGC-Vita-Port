@@ -705,6 +705,7 @@ class emu64 : public emu64_print {
     void dl_G_MOVEMEM();
     void dl_G_S2DEX();
     void dl_G_SPECIAL_1();
+    void dl_G_QUEUE_HINT();
 
     u32 emu64_taskstart_r(Gfx* dl_p);
     void emu64_taskstart(Gfx* dl_p);
@@ -857,6 +858,7 @@ private:
     /* 0x0E00 */ u32 guMtxL2F_cnt;
     /* 0x0E04 */ u32 combine_auto_cnt[5];
     /* 0x0E18 */ bool using_nonshared_mtx;
+    int cached_vtx_desc_key; // setup_1tri_2tri_1quad vtx desc skip key
     /* 0x0E1C */ Vertex vertices[VTX_COUNT];
     /* 0x201C */ u8 texture_adjust_mode;
     /* 0x2020 */ u32 resolved_addresses;
@@ -868,6 +870,51 @@ private:
     /* 0x2035 */ bool segment_set;
     /* 0x2038 */ Gfx* dl_history[DL_HISTORY_COUNT];
     /* 0x2078 */ u8 dl_history_start;
+
+#ifdef TARGET_VITA
+    // Sub-DL vertex cache. Keyed by DL addr + content hash + matrix.
+    #define DL_CACHE_SIZE 512
+    #define DL_CACHE_VPOOL_SIZE 8192
+
+    struct DLCacheVtxRange {
+        u16 v0;
+        u16 count;
+    };
+    #define DL_CACHE_MAX_VTX_RANGES 8
+
+    struct DLCacheEntry {
+        u32 dl_addr;
+        u32 content_hash;
+        u16 vpool_offset;
+        u16 vpool_count;
+        DLCacheVtxRange vtx_ranges[DL_CACHE_MAX_VTX_RANGES];
+        u8  num_ranges;
+        u8  valid;            // 0=empty, 1=valid, 2=uncacheable
+        f32 aabb_min[3];
+        f32 aabb_max[3];
+    };
+
+    DLCacheEntry dl_cache[DL_CACHE_SIZE];
+    Vertex dl_cache_vpool[DL_CACHE_VPOOL_SIZE];
+    u32 dl_cache_vpool_used;
+
+    // Recording state during first execution of a cacheable DL.
+    int dl_cache_recording;       // -1 = not recording, else = cache index
+    u16 dl_cache_rec_vpool_start;
+    u8  dl_cache_rec_num_ranges;
+    f32 dl_cache_rec_aabb_min[3];
+    f32 dl_cache_rec_aabb_max[3];
+
+    u32 dl_cache_hits;
+    u32 dl_cache_misses;
+    u32 dl_cache_culled;
+
+    void dl_cache_init(void);
+    u32 dl_cache_hash(const void* dl_ptr, const GC_Mtx* mtx);
+    int dl_cache_find(u32 addr, u32 hash);
+    int dl_cache_alloc(u32 addr, u32 hash);
+    bool dl_cache_frustum_test(const DLCacheEntry* e);
+#endif
 };
 
 typedef void (emu64::* dl_func)(void);

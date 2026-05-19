@@ -1,4 +1,4 @@
-static int aTOU_actor_draw_before(GAME*,cKF_SkeletonInfo_R_c*, int idx, Gfx** gfxp,u8* dispbuf, void* actor, s_xyz* rotation, xyz_t* translation){
+static int aTOU_actor_draw_before(GAME* _p10,cKF_SkeletonInfo_R_c* _p9, int idx, Gfx** gfxp,u8* dispbuf, void* actor, s_xyz* rotation, xyz_t* translation){
 
     if(idx == 4){
         *gfxp = NULL;

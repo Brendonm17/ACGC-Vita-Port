@@ -45,6 +45,7 @@ typedef struct {
     u8 external;     /* owned by texture pack, don't delete on eviction */
 #ifdef TARGET_VITA
     unsigned long long vtc_cache_key;
+    u32 last_used;   // frame counter at last hit (LRU)
 #endif
 } TexCacheEntry;
 
@@ -167,6 +168,85 @@ static void tex_hash_rebuild(void) {
     for (int i = 0; i < tex_cache_count; i++)
         tex_hash_insert(tex_cache[i].data_ptr, i);
 }
+
+// Salvage pool: parks GL textures of evicted non-external entries so a
+// quick re-encounter restores them without re-uploading. Avoids the
+// avg-color stub flash on cache churn in busy scenes. All ops share
+// tex_cache_lock; sized to cover the gap LRU eviction leaves.
+#define VITA_SALVAGE_POOL_SIZE 32
+static TexCacheEntry vita_salvage_pool[VITA_SALVAGE_POOL_SIZE];
+static int vita_salvage_pool_count = 0;
+static u32 vita_tex_frame_counter = 0;
+
+// Drop entries idle longer than this many frames so they don't pin
+// CDRAM and block new GC entries from getting picked up for HD upgrade.
+#define VITA_TEX_STALE_FRAMES 300
+
+static void pc_gx_texture_prune_stale_locked(void);
+
+void pc_gx_texture_tick_frame(void) {
+    vita_tex_frame_counter++;
+    tex_cache_lock();
+    pc_gx_texture_prune_stale_locked();
+    tex_cache_unlock();
+}
+
+// must hold tex_cache_lock
+static int salvage_pool_find_locked(u32 data_ptr, int w, int h, u32 fmt,
+                                     u32 tlut_name, u32 tlut_ptr, u32 tlut_hash, u32 data_hash) {
+    for (int i = 0; i < vita_salvage_pool_count; i++) {
+        TexCacheEntry* e = &vita_salvage_pool[i];
+        if (e->data_ptr == data_ptr && e->width == w && e->height == h &&
+            e->format == fmt && e->tlut_name == tlut_name && e->tlut_ptr == tlut_ptr &&
+            e->tlut_hash == tlut_hash && e->data_hash == data_hash) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// must hold tex_cache_lock
+static TexCacheEntry salvage_pool_take_locked(int idx) {
+    TexCacheEntry e = vita_salvage_pool[idx];
+    if (idx + 1 < vita_salvage_pool_count) {
+        memmove(&vita_salvage_pool[idx], &vita_salvage_pool[idx + 1],
+                (vita_salvage_pool_count - idx - 1) * sizeof(TexCacheEntry));
+    }
+    vita_salvage_pool_count--;
+    return e;
+}
+
+// must hold tex_cache_lock
+static void salvage_pool_append_locked(const TexCacheEntry* src) {
+    if (src->gl_tex == 0) return;
+    if (vita_salvage_pool_count >= VITA_SALVAGE_POOL_SIZE) {
+        TexCacheEntry victim = salvage_pool_take_locked(0);
+        // externals shouldn't reach here but guard anyway
+        if (victim.external && victim.vtc_cache_key != 0) {
+            extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+            vita_vtc_loaded_cache_release_key(victim.vtc_cache_key);
+        }
+        pc_gx_texture_invalidate_gl_tex(victim.gl_tex);
+        vita_defer_tex_delete(victim.gl_tex);
+    }
+    vita_salvage_pool[vita_salvage_pool_count++] = *src;
+}
+
+// must hold tex_cache_lock
+static void salvage_pool_clear_locked(void) {
+    for (int i = 0; i < vita_salvage_pool_count; i++) {
+        TexCacheEntry* e = &vita_salvage_pool[i];
+        if (e->external && e->vtc_cache_key != 0) {
+            extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+            vita_vtc_loaded_cache_release_key(e->vtc_cache_key);
+        }
+        if (e->gl_tex) {
+            pc_gx_texture_invalidate_gl_tex(e->gl_tex);
+            vita_defer_tex_delete(e->gl_tex);
+        }
+    }
+    vita_salvage_pool_count = 0;
+}
 #endif
 
 #ifdef TARGET_VITA
@@ -187,9 +267,21 @@ static GLuint vita_tex_delete_ready[VITA_TEX_DELETE_MAX];
 static int vita_tex_delete_pending_count = 0;
 static int vita_tex_delete_ready_count = 0;
 
+// worker (eviction) and main (upgrade scan, loaded_cache evict) both append;
+// without this lock count++ races leak ids or cause double-delete.
+static volatile int vita_tex_delete_lock = 0;
+static inline void vita_tex_delete_lock_acquire(void) {
+    while (__sync_lock_test_and_set(&vita_tex_delete_lock, 1)) { }
+}
+static inline void vita_tex_delete_lock_release(void) {
+    __sync_lock_release(&vita_tex_delete_lock);
+}
+
 void vita_defer_tex_delete(GLuint tex) {
     if (tex == 0) return;
+    vita_tex_delete_lock_acquire();
     if (vita_tex_delete_pending_count >= VITA_TEX_DELETE_MAX) {
+        vita_tex_delete_lock_release();
         // overflow: leak the texture rather than stall on glFinish
         static int _leaked = 0;
         if ((_leaked++ & 0xFF) == 0) {
@@ -198,18 +290,26 @@ void vita_defer_tex_delete(GLuint tex) {
         return;
     }
     vita_tex_delete_pending[vita_tex_delete_pending_count++] = tex;
+    vita_tex_delete_lock_release();
 }
 
 void pc_gx_texture_flush_deferred_deletes(void) {
+    // lock the whole roll+drain so a worker append can't race the memmove
+    vita_tex_delete_lock_acquire();
     // drain up to 64 of last frame's pending deletes
     if (vita_tex_delete_ready_count > 0) {
         int to_delete = vita_tex_delete_ready_count < 64 ? vita_tex_delete_ready_count : 64;
-        glDeleteTextures(to_delete, vita_tex_delete_ready);
+        GLuint to_delete_local[64];
+        memcpy(to_delete_local, vita_tex_delete_ready, to_delete * sizeof(GLuint));
         if (to_delete < vita_tex_delete_ready_count) {
             memmove(vita_tex_delete_ready, &vita_tex_delete_ready[to_delete],
                     (vita_tex_delete_ready_count - to_delete) * sizeof(GLuint));
         }
         vita_tex_delete_ready_count -= to_delete;
+        // drop the lock across glDeleteTextures so worker appends don't stall
+        vita_tex_delete_lock_release();
+        glDeleteTextures(to_delete, to_delete_local);
+        vita_tex_delete_lock_acquire();
     }
     // roll this frame's pending into next frame's ready queue
     if (vita_tex_delete_pending_count > 0) {
@@ -220,6 +320,7 @@ void pc_gx_texture_flush_deferred_deletes(void) {
         vita_tex_delete_ready_count += move;
         vita_tex_delete_pending_count = 0;
     }
+    vita_tex_delete_lock_release();
 }
 #else
 void pc_gx_texture_flush_deferred_deletes(void) { }
@@ -236,7 +337,9 @@ static TexCacheEntry* tex_cache_find(u32 data_ptr, int w, int h, u32 fmt, u32 tl
         u32 s = (slot + i) & TEX_HASH_MASK;
         int idx = tex_hash_table[s];
         if (idx == TEX_HASH_EMPTY) { tex_cache_unlock(); return NULL; }
-        if (idx < tex_cache_count) {
+        // signed bound check too: a negative idx from a dirty hash entry
+        // passes `< count` and would wild-pointer deref tex_cache.
+        if (idx >= 0 && idx < tex_cache_count && idx < TEX_CACHE_SIZE) {
             TexCacheEntry* e = &tex_cache[idx];
             if (e->data_ptr == data_ptr && e->width == w && e->height == h &&
                 e->format == fmt && e->tlut_name == tlut_name && e->tlut_ptr == tlut_ptr &&
@@ -262,24 +365,201 @@ static TexCacheEntry* tex_cache_find(u32 data_ptr, int w, int h, u32 fmt, u32 tl
 #endif
 }
 
+#ifdef TARGET_VITA
+// Combined lookup + wrap/filter snapshot-and-update under tex_cache_lock.
+// No entry pointer escapes the lock, so a concurrent eviction memmove
+// can't shift the row out from under the caller.
+typedef struct {
+    GLuint gl_tex;
+    int param_changed;
+    u32 old_wrap_s, old_wrap_t, old_min_filter;
+} TexCacheLookupResult;
+
+static int tex_cache_find_and_update_params(u32 data_ptr, int w, int h, u32 fmt,
+                                            u32 tlut_name, u32 tlut_ptr, u32 tlut_hash,
+                                            u32 data_hash,
+                                            u32 new_wrap_s, u32 new_wrap_t, u32 new_min_filter,
+                                            TexCacheLookupResult* out) {
+    out->gl_tex = 0;
+    out->param_changed = 0;
+    tex_cache_lock();
+    u32 slot = tex_hash_key(data_ptr);
+    for (int i = 0; i < TEX_HASH_SIZE; i++) {
+        u32 s = (slot + i) & TEX_HASH_MASK;
+        int idx = tex_hash_table[s];
+        if (idx == TEX_HASH_EMPTY) break;
+        if (idx >= 0 && idx < tex_cache_count && idx < TEX_CACHE_SIZE) {
+            TexCacheEntry* e = &tex_cache[idx];
+            if (e->data_ptr == data_ptr && e->width == w && e->height == h &&
+                e->format == fmt && e->tlut_name == tlut_name && e->tlut_ptr == tlut_ptr &&
+                e->tlut_hash == tlut_hash && e->data_hash == data_hash) {
+                // touch for LRU
+                e->last_used = vita_tex_frame_counter;
+                out->gl_tex = e->gl_tex;
+                out->old_wrap_s = e->wrap_s;
+                out->old_wrap_t = e->wrap_t;
+                out->old_min_filter = e->min_filter;
+                if (e->wrap_s != new_wrap_s || e->wrap_t != new_wrap_t ||
+                    e->min_filter != new_min_filter) {
+                    out->param_changed = 1;
+                    e->wrap_s = new_wrap_s;
+                    e->wrap_t = new_wrap_t;
+                    e->min_filter = new_min_filter;
+                }
+                tex_cache_unlock();
+                return 1;
+            }
+        }
+    }
+    // miss: try the salvage pool for a still-live GL tex to restore
+    int sp_idx = salvage_pool_find_locked(data_ptr, w, h, fmt, tlut_name, tlut_ptr, tlut_hash, data_hash);
+    if (sp_idx >= 0) {
+        TexCacheEntry restored = salvage_pool_take_locked(sp_idx);
+        // inlined append to avoid recursive lock through tex_cache_insert
+        if (tex_cache_count < TEX_CACHE_SIZE) {
+            tex_cache[tex_cache_count] = restored;
+            tex_cache[tex_cache_count].last_used = vita_tex_frame_counter;
+            out->gl_tex = restored.gl_tex;
+            out->old_wrap_s = restored.wrap_s;
+            out->old_wrap_t = restored.wrap_t;
+            out->old_min_filter = restored.min_filter;
+            if (restored.wrap_s != new_wrap_s || restored.wrap_t != new_wrap_t ||
+                restored.min_filter != new_min_filter) {
+                out->param_changed = 1;
+                tex_cache[tex_cache_count].wrap_s = new_wrap_s;
+                tex_cache[tex_cache_count].wrap_t = new_wrap_t;
+                tex_cache[tex_cache_count].min_filter = new_min_filter;
+            }
+            tex_hash_insert(data_ptr, tex_cache_count);
+            tex_cache_count++;
+            tex_cache_unlock();
+            return 1;
+        }
+        // no room to restore; drop the salvaged tex and report miss
+        if (restored.external && restored.vtc_cache_key != 0) {
+            extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+            vita_vtc_loaded_cache_release_key(restored.vtc_cache_key);
+        }
+        pc_gx_texture_invalidate_gl_tex(restored.gl_tex);
+        vita_defer_tex_delete(restored.gl_tex);
+    }
+    tex_cache_unlock();
+    return 0;
+}
+#endif
+
+// Drop entries idle for VITA_TEX_STALE_FRAMES. Externals release their
+// loaded_cache ref so CDRAM can be reclaimed; non-externals defer-delete
+// the GL tex directly (skip salvage pool, too cold to keep).
+// Must hold tex_cache_lock.
+static void pc_gx_texture_prune_stale_locked(void) {
+    if (tex_cache_count == 0) return;
+    if (vita_tex_frame_counter <= VITA_TEX_STALE_FRAMES) return;
+    u32 cutoff = vita_tex_frame_counter - VITA_TEX_STALE_FRAMES;
+
+    int dst = 0;
+    int pruned = 0;
+    for (int src = 0; src < tex_cache_count; src++) {
+        TexCacheEntry* e = &tex_cache[src];
+        if (e->last_used > cutoff) {
+            if (dst != src) tex_cache[dst] = tex_cache[src];
+            dst++;
+        } else {
+            if (e->external && e->vtc_cache_key != 0) {
+                extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+                pc_gx_texture_invalidate_gl_tex(e->gl_tex);
+                vita_vtc_loaded_cache_release_key(e->vtc_cache_key);
+                // gl_tex is owned by loaded_cache, don't delete here
+            } else if (e->gl_tex) {
+                pc_gx_texture_invalidate_gl_tex(e->gl_tex);
+                vita_defer_tex_delete(e->gl_tex);
+            }
+            extern void vita_vtc_invalidate_compute_cache_for_ptr(unsigned int);
+            vita_vtc_invalidate_compute_cache_for_ptr(e->data_ptr);
+            pruned++;
+        }
+    }
+    if (pruned > 0) {
+        tex_cache_count = dst;
+        tex_hash_rebuild();
+    }
+}
+
 static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 tlut_name,
                                        u32 tlut_ptr, u32 tlut_hash, u32 data_hash, GLuint gl_tex) {
     tex_cache_lock();
+#ifdef TARGET_VITA
+    // If a matching entry exists (e.g. a stub from a budget-truncated upload
+    // last frame), swap its gl_tex in place and defer-delete the old one
+    // rather than appending a duplicate.
+    {
+        u32 slot0 = tex_hash_key(data_ptr);
+        for (int i = 0; i < TEX_HASH_SIZE; i++) {
+            u32 s = (slot0 + i) & TEX_HASH_MASK;
+            int idx = tex_hash_table[s];
+            if (idx == TEX_HASH_EMPTY) break;
+            if (idx >= 0 && idx < tex_cache_count && idx < TEX_CACHE_SIZE) {
+                TexCacheEntry* e = &tex_cache[idx];
+                if (e->data_ptr == data_ptr && e->width == w && e->height == h &&
+                    e->format == fmt && e->tlut_name == tlut_name && e->tlut_ptr == tlut_ptr &&
+                    e->tlut_hash == tlut_hash && e->data_hash == data_hash) {
+                    if (e->gl_tex && e->gl_tex != gl_tex) {
+                        pc_gx_texture_invalidate_gl_tex(e->gl_tex);
+                        vita_defer_tex_delete(e->gl_tex);
+                    }
+                    e->gl_tex = gl_tex;
+                    e->last_used = vita_tex_frame_counter;
+                    tex_cache_unlock();
+                    return e;
+                }
+            }
+        }
+    }
+#endif
     if (tex_cache_count >= TEX_CACHE_SIZE - 32) {
-        // evict oldest non-external entries. external (HD upgraded)
-        // entries are compacted to the front so they survive eviction.
-        // losing an external entry forces a GXLoadTexObj re-fetch which
-        // creates a new GC entry and then waits for the upgrade scan to
-        // re-upgrade it, causing visible HD->normal->HD cycling.
-        int evict_n = 32;
-        int src = 0;
+        // LRU evict 32 non-externals. Externals (HD) are always preserved;
+        // losing one forces a re-fetch and a visible HD->GC->HD cycle.
+        // Old FIFO from index 0 killed hot textures and caused stub flashing.
+        #define LRU_EVICT_TARGET 32
+        int evict_count = 0;
+        u32 evict_mark[TEX_CACHE_SIZE];
+        // collect 32 smallest last_used via insertion into a fixed sorted array
+        u32 lru_lu[LRU_EVICT_TARGET];
+        int lru_idx[LRU_EVICT_TARGET];
+        int lru_count = 0;
+        for (int i = 0; i < tex_cache_count; i++) {
+            if (tex_cache[i].external) continue;
+            u32 lu = tex_cache[i].last_used;
+            if (lru_count < LRU_EVICT_TARGET) {
+                // insertion into sorted position
+                int pos = lru_count;
+                while (pos > 0 && lru_lu[pos - 1] > lu) {
+                    lru_lu[pos] = lru_lu[pos - 1];
+                    lru_idx[pos] = lru_idx[pos - 1];
+                    pos--;
+                }
+                lru_lu[pos] = lu;
+                lru_idx[pos] = i;
+                lru_count++;
+            } else if (lu < lru_lu[LRU_EVICT_TARGET - 1]) {
+                int pos = LRU_EVICT_TARGET - 1;
+                while (pos > 0 && lru_lu[pos - 1] > lu) {
+                    lru_lu[pos] = lru_lu[pos - 1];
+                    lru_idx[pos] = lru_idx[pos - 1];
+                    pos--;
+                }
+                lru_lu[pos] = lu;
+                lru_idx[pos] = i;
+            }
+        }
+        evict_count = lru_count;
+        for (int i = 0; i < tex_cache_count; i++) evict_mark[i] = 0;
+        for (int k = 0; k < evict_count; k++) evict_mark[lru_idx[k]] = 1;
+
+        // compact in place, dropping marked
         int dst = 0;
-        // walk the first 32 slots. keep externals (compact forward);
-        // drop everything else, deleting the GL tex if present. non-
-        // external entries with a null gl_tex still count as dropped
-        // so the removed-slot count stays consistent.
-        for (src = 0; src < evict_n && src < tex_cache_count; src++) {
-            if (tex_cache[src].external) {
+        for (int src = 0; src < tex_cache_count; src++) {
+            if (!evict_mark[src]) {
                 if (dst != src) tex_cache[dst] = tex_cache[src];
                 dst++;
             } else {
@@ -288,20 +568,47 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
                         if (g_gx.gl_textures[s] == tex_cache[src].gl_tex)
                             g_gx.gl_textures[s] = 0;
                     }
+#ifdef TARGET_VITA
+                    // park in salvage pool for possible re-encounter
+                    salvage_pool_append_locked(&tex_cache[src]);
+#else
                     PC_DELETE_TEXTURE(tex_cache[src].gl_tex);
+#endif
                 }
+#ifdef TARGET_VITA
+                extern void vita_vtc_invalidate_compute_cache_for_ptr(unsigned int);
+                vita_vtc_invalidate_compute_cache_for_ptr(tex_cache[src].data_ptr);
+#endif
             }
         }
-        // shift the tail forward to close the gap left by dropped slots.
-        int removed = src - dst;
-        if (removed > 0 && src < tex_cache_count) {
-            memmove(&tex_cache[dst], &tex_cache[src],
-                    (tex_cache_count - src) * sizeof(TexCacheEntry));
-        }
-        tex_cache_count -= removed;
+        tex_cache_count = dst;
 #ifdef TARGET_VITA
         tex_hash_rebuild();
 #endif
+    }
+#ifdef TARGET_VITA
+    // last resort: cache full of externals, force-evict the oldest one.
+    // worst case is a brief GC-res frame before re-upgrade fires.
+    if (tex_cache_count >= TEX_CACHE_SIZE && tex_cache_count > 0 && tex_cache[0].external) {
+        extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+        extern void vita_vtc_invalidate_compute_cache_for_ptr(unsigned int);
+        // scrub bindings so glGenTextures reusing this id can't return
+        // stale samples to draws still holding the old binding
+        pc_gx_texture_invalidate_gl_tex(tex_cache[0].gl_tex);
+        if (tex_cache[0].vtc_cache_key != 0) {
+            vita_vtc_loaded_cache_release_key(tex_cache[0].vtc_cache_key);
+        }
+        vita_vtc_invalidate_compute_cache_for_ptr(tex_cache[0].data_ptr);
+        memmove(&tex_cache[0], &tex_cache[1],
+                (tex_cache_count - 1) * sizeof(TexCacheEntry));
+        tex_cache_count--;
+        tex_hash_rebuild();
+    }
+#endif
+    // refuse rather than overrun. caller binds without caching.
+    if (tex_cache_count >= TEX_CACHE_SIZE) {
+        tex_cache_unlock();
+        return NULL;
     }
     TexCacheEntry* e = &tex_cache[tex_cache_count];
     e->data_ptr = data_ptr;
@@ -318,7 +625,15 @@ static TexCacheEntry* tex_cache_insert(u32 data_ptr, int w, int h, u32 fmt, u32 
     e->min_filter = 0xFFFFFFFF;
     e->external = 0;
 #ifdef TARGET_VITA
+    // zero so any reader before the caller sets it sees "no HD" rather
+    // than a stale key from a recycled slot
+    e->vtc_cache_key = 0;
+    e->last_used = vita_tex_frame_counter;
     tex_hash_insert(data_ptr, tex_cache_count);
+    // a stale kc_cache result for this data_ptr could partial-hash collide
+    // with the new content and serve the wrong HD key; force a recompute
+    extern void vita_vtc_invalidate_compute_cache_for_ptr(unsigned int);
+    vita_vtc_invalidate_compute_cache_for_ptr(data_ptr);
 #endif
     tex_cache_count++;
     tex_cache_unlock();
@@ -440,7 +755,8 @@ void pc_gx_texture_process_deferred_uploads(void) {
 
         unsigned int _drain_t0 = sceKernelGetProcessTimeLow();
         int slot_uploads_this_frame = 0;
-        for (int si = 0; si < 24 && slot_uploads_this_frame < 1; si++) {
+        // drain all ready slots per frame, ~25 us each so worst case ~0.6 ms
+        for (int si = 0; si < 24; si++) {
             unsigned char* dxt_data = NULL;
             int dxt_size = 0, hd_w = 0, hd_h = 0, gl_fmt = 0;
             if (!vita_vtc_check_ready(si, &dxt_data, &dxt_size, &hd_w, &hd_h, &gl_fmt))
@@ -457,17 +773,22 @@ void pc_gx_texture_process_deferred_uploads(void) {
             // just runs a descriptor init here, no swizzle on this path.
             int p_w = 0, p_h = 0;
             vglPendingTexture* pending = vita_vtc_take_ready_pending(si, &p_w, &p_h);
+            extern int vita_vtc_format_version(void);
+            int upload_failed = 0;
             if (pending) {
                 vglCommitPendingTexture(pending);
+            } else if (vita_vtc_format_version() == 3) {
+                // v3 bytes are pre-swizzled, raw upload would corrupt
+                upload_failed = 1;
             } else {
-                // fallback if the io thread prepare couldn't allocate
+                // v2 linear DXT is safe via glCompressedTexImage2D
                 glCompressedTexImage2D(GL_TEXTURE_2D, 0, (GLenum)gl_fmt,
                                        hd_w, hd_h, 0, dxt_size, dxt_data);
             }
             glActiveTexture(GL_TEXTURE0);
             vita_vtc_release_slot(si);
 
-            if (glGetError() != GL_NO_ERROR) {
+            if (upload_failed || glGetError() != GL_NO_ERROR) {
                 glDeleteTextures(1, &hd_tex);
                 continue;
             }
@@ -493,8 +814,9 @@ void pc_gx_texture_process_deferred_uploads(void) {
         static int scan_pos = 0;
         unsigned int _t0 = sceKernelGetProcessTimeLow();
         int upgrades = 0, requeues = 0, checked = 0;
-        #define UPGRADE_SCAN_PER_FRAME 32
-        #define UPGRADE_MAX_PER_FRAME  32
+        // 64/frame at ~5 us each, completes full pass in 8 frames
+        #define UPGRADE_SCAN_PER_FRAME 64
+        #define UPGRADE_MAX_PER_FRAME  64
 
         // collect upgrade targets under the lock, apply GL state after release
         struct { GLuint hd; u32 ws, wt, mf; } pending[UPGRADE_MAX_PER_FRAME];
@@ -508,7 +830,8 @@ void pc_gx_texture_process_deferred_uploads(void) {
             checked++;
             GLuint hd_tex = vita_vtc_loaded_cache_lookup(tex_cache[ci].vtc_cache_key);
             if (!hd_tex) {
-                if (requeues < 4) {
+                // higher cap absorbs transition spikes that lost prefetches
+                if (requeues < 16) {
                     vita_vtc_requeue_prefetch(tex_cache[ci].vtc_cache_key);
                     requeues++;
                 }
@@ -575,33 +898,86 @@ void pc_gx_texture_process_deferred_uploads(void) {
         }
     }
 
-    // time budget rate limit: cap deferred uploads to 2ms per frame.
-    // on scene transitions cnt can spike to 50-100 uploads each with a
-    // ~500us glTexImage2D call. overflow uploads stay in the queue for
-    // the next frame, and draws referencing them are skipped for one
-    // frame by the replay loop tex_missing check.
+    // 2 ms upload budget. Overflow uploads emit 1x1 avg-color stubs so the
+    // truncated tail renders as flat hue for one frame rather than missing.
     #define DEFERRED_UPLOAD_BUDGET_US 2000
     unsigned int _upload_budget_start = sceKernelGetProcessTimeLow();
-    int uploads_done = 0;
 
     for (int i = 0; i < cnt; i++) {
         // always do at least one upload so forward progress is guaranteed
-        if (uploads_done > 0 &&
+        if (i > 0 &&
             (sceKernelGetProcessTimeLow() - _upload_budget_start) >= DEFERRED_UPLOAD_BUDGET_US) {
+            glActiveTexture(GL_TEXTURE7);
+            for (int j = i; j < cnt; j++) {
+                VitaDeferredTexUpload* up = &vita_tex_upload_db[rd][j];
+                unsigned char color[4] = {128, 128, 128, 255};
+                if (up->rgba && up->width > 0 && up->height > 0) {
+                    int w = up->width, h = up->height;
+                    int sx[5] = { w / 2,     w / 4,     3 * w / 4, w / 4,     3 * w / 4 };
+                    int sy[5] = { h / 2,     h / 4,     h / 4,     3 * h / 4, 3 * h / 4 };
+                    unsigned int sum[4] = {0, 0, 0, 0};
+                    for (int k = 0; k < 5; k++) {
+                        int x = sx[k], y = sy[k];
+                        if (x < 0) x = 0; if (x >= w) x = w - 1;
+                        if (y < 0) y = 0; if (y >= h) y = h - 1;
+                        int off = (y * w + x) * 4;
+                        sum[0] += up->rgba[off + 0];
+                        sum[1] += up->rgba[off + 1];
+                        sum[2] += up->rgba[off + 2];
+                        sum[3] += up->rgba[off + 3];
+                    }
+                    color[0] = (unsigned char)(sum[0] / 5);
+                    color[1] = (unsigned char)(sum[1] / 5);
+                    color[2] = (unsigned char)(sum[2] / 5);
+                    color[3] = (unsigned char)(sum[3] / 5);
+                }
+                GLuint stub = 0;
+                glGenTextures(1, &stub);
+                if (stub != 0) {
+                    glBindTexture(GL_TEXTURE_2D, stub);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0,
+                                 GL_RGBA, GL_UNSIGNED_BYTE, color);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    vita_deferred_uploaded[j] = stub;
+                    // cache the stub so later frames stay consistent until
+                    // the real upload swaps it in via insert's in-place replace
+                    TexCacheEntry* se = tex_cache_insert(up->data_ptr, up->cache_w, up->cache_h,
+                                                          up->format, up->tlut_name, up->tlut_ptr,
+                                                          up->tlut_hash, up->data_hash, stub);
+                    if (se) {
+                        se->wrap_s = up->wrap_s;
+                        se->wrap_t = up->wrap_t;
+                        se->min_filter = up->min_filter;
+                        se->external = 0;
+                        se->vtc_cache_key = up->vtc_cache_key;
+                    } else {
+                        // cache full of externals; only this frame's cmd uses the stub
+                        vita_defer_tex_delete(stub);
+                    }
+                }
+            }
+            glActiveTexture(GL_TEXTURE0);
+
             int remain = cnt - i;
-            if (remain > 0 && i > 0) {
+            if (remain > 0) {
                 memmove(&vita_tex_upload_db[rd][0], &vita_tex_upload_db[rd][i],
                         remain * sizeof(VitaDeferredTexUpload));
             }
             vita_tex_upload_count_db[rd] = remain;
-            pc_gx_deferred_tex_uploads = i;  // only i actually uploaded this frame
+            // all cnt entries in vita_deferred_uploaded[] now have valid ids
+            // (real for [0..i), stub for [i..cnt))
+            pc_gx_deferred_tex_uploads = cnt;
+            vita_deferred_uploaded_count = cnt;
             _section_upload_us = sceKernelGetProcessTimeLow() - _frame_t0
                                  - _section_drain_us - _section_upgrade_us;
             extern void vita_vtc_tick_frame(void);
             vita_vtc_tick_frame();
+            pc_gx_texture_tick_frame();
             return;
         }
-        uploads_done++;
         VitaDeferredTexUpload* up = &vita_tex_upload_db[rd][i];
         GLuint tex = 0;
         int used_hd = 0;
@@ -650,6 +1026,16 @@ void pc_gx_texture_process_deferred_uploads(void) {
         TexCacheEntry* entry = tex_cache_insert(up->data_ptr, up->cache_w, up->cache_h,
                                                  up->format, up->tlut_name, up->tlut_ptr,
                                                  up->tlut_hash, up->data_hash, tex);
+        if (!entry) {
+            // cache full of externals; drop the insert and release the
+            // loaded_cache ref we acquired so we don't leak it
+            if (up->external && up->vtc_cache_key != 0) {
+                extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+                vita_vtc_loaded_cache_release_key(up->vtc_cache_key);
+            }
+            if (up->rgba) free(up->rgba);
+            continue;
+        }
         entry->wrap_s = up->wrap_s;
         entry->wrap_t = up->wrap_t;
         entry->min_filter = up->min_filter;
@@ -669,6 +1055,7 @@ void pc_gx_texture_process_deferred_uploads(void) {
 
     extern void vita_vtc_tick_frame(void);
     vita_vtc_tick_frame();
+    pc_gx_texture_tick_frame();
 }
 #endif // TARGET_VITA deferred upload
 
@@ -702,6 +1089,15 @@ void pc_gx_texture_cache_invalidate(void) {
     tex_cache_count = 0;
 #ifdef TARGET_VITA
     tex_hash_clear();
+    // kc_cache entries now refer to stale data
+    extern void vita_vtc_invalidate_all_compute_cache(void);
+    vita_vtc_invalidate_all_compute_cache();
+    // old-scene textures must not carry over (data_ptrs map to new content)
+    salvage_pool_clear_locked();
+    // Do NOT defer-delete EFB capture textures here. Queued cmds in
+    // cmd_queue_db hold efb_src_ptr and late-replay re-resolves to a
+    // fresh empty texture, sampling black. Letting the old ids persist
+    // keeps re-resolve sampling stale-but-non-black content.
 #endif
     tex_cache_unlock();
 }
@@ -1278,16 +1674,16 @@ void GXLoadTexObj(void* obj, u32 id) {
     u32 hash = tex_content_hash(image_ptr, width, height, format);
 
     /* cache lookup */
-    TexCacheEntry* cached = tex_cache_find(o[TEXOBJ_IMAGE_PTR], width, height, format, tlut_key,
-                                           tlut_ptr_key, tlut_hash_key, hash);
-    if (cached) {
-        tex_cache_hits++;
-        GLuint tex = cached->gl_tex;
 #ifdef TARGET_VITA
-        // Update wrap/filter if changed. Main thread: immediate GL calls.
-        // Worker thread: queue for deferred application.
-        if (cached->wrap_s != wrap_s || cached->wrap_t != wrap_t ||
-            cached->min_filter != filter_mode) {
+    // combined find+update so no entry pointer escapes the lock (an
+    // eviction memmove could otherwise shift it under us)
+    TexCacheLookupResult cached_r;
+    if (tex_cache_find_and_update_params(o[TEXOBJ_IMAGE_PTR], width, height, format,
+                                          tlut_key, tlut_ptr_key, tlut_hash_key, hash,
+                                          wrap_s, wrap_t, filter_mode, &cached_r)) {
+        tex_cache_hits++;
+        GLuint tex = cached_r.gl_tex;
+        if (cached_r.param_changed) {
             GLenum gl_ws = (wrap_s == 2) ? GL_MIRRORED_REPEAT :
                            (wrap_s == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
             GLenum gl_wt = (wrap_t == 2) ? GL_MIRRORED_REPEAT :
@@ -1297,11 +1693,11 @@ void GXLoadTexObj(void* obj, u32 id) {
             if (!vita_on_worker_thread) {
                 glActiveTexture(GL_TEXTURE7);
                 glBindTexture(GL_TEXTURE_2D, tex);
-                if (cached->wrap_s != wrap_s || cached->wrap_t != wrap_t) {
+                if (cached_r.old_wrap_s != wrap_s || cached_r.old_wrap_t != wrap_t) {
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_ws);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_wt);
                 }
-                if (cached->min_filter != filter_mode) {
+                if (cached_r.old_min_filter != filter_mode) {
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_filter);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter);
                 }
@@ -1316,11 +1712,22 @@ void GXLoadTexObj(void* obj, u32 id) {
                     p->min_filter = gl_filter;
                 }
             }
-            cached->wrap_s = wrap_s;
-            cached->wrap_t = wrap_t;
-            cached->min_filter = filter_mode;
         }
+
+        o[TEXOBJ_GL_TEX] = tex;
+        g_gx.gl_textures[id] = tex; g_gx.gl_tex_deferred[id] = -1;
+        g_gx.tex_obj_w[id] = width;
+        g_gx.tex_obj_h[id] = height;
+        g_gx.tex_obj_fmt[id] = (int)format;
+        DIRTY(PC_GX_DIRTY_TEXTURES);
+        return;
+    }
 #else
+    TexCacheEntry* cached = tex_cache_find(o[TEXOBJ_IMAGE_PTR], width, height, format, tlut_key,
+                                           tlut_ptr_key, tlut_hash_key, hash);
+    if (cached) {
+        tex_cache_hits++;
+        GLuint tex = cached->gl_tex;
         glBindTexture(GL_TEXTURE_2D, tex);
 
         /* update wrap/filter if changed */
@@ -1340,8 +1747,6 @@ void GXLoadTexObj(void* obj, u32 id) {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter);
             cached->min_filter = filter_mode;
         }
-#endif
-
         o[TEXOBJ_GL_TEX] = tex;
         g_gx.gl_textures[id] = tex; g_gx.gl_tex_deferred[id] = -1;
         g_gx.tex_obj_w[id] = width;
@@ -1350,6 +1755,7 @@ void GXLoadTexObj(void* obj, u32 id) {
         DIRTY(PC_GX_DIRTY_TEXTURES);
         return;
     }
+#endif
 
     /* cache miss */
     tex_cache_misses++;
@@ -1373,10 +1779,11 @@ void GXLoadTexObj(void* obj, u32 id) {
         }
         int data_size = (width * height * gc_format_bpp(format)) / 8;
         int hd_w = 0, hd_h = 0;
+        unsigned long long hd_key = 0;
         GLuint hd_tex = pc_texture_pack_lookup(image_ptr, data_size,
                                                width, height, format,
                                                tp_tlut, tp_tlut_entries, tp_tlut_is_be,
-                                               &hd_w, &hd_h);
+                                               &hd_w, &hd_h, &hd_key);
         if (hd_tex) {
             glBindTexture(GL_TEXTURE_2D, hd_tex);
             GLenum gl_ws = (wrap_s == 2) ? GL_MIRRORED_REPEAT :
@@ -1388,10 +1795,24 @@ void GXLoadTexObj(void* obj, u32 id) {
 
             TexCacheEntry* entry = tex_cache_insert(o[TEXOBJ_IMAGE_PTR], width, height, format,
                                                     tlut_key, tlut_ptr_key, tlut_hash_key, hash, hd_tex);
-            entry->wrap_s = wrap_s;
-            entry->wrap_t = wrap_t;
-            entry->min_filter = filter_mode;
-            entry->external = 1;
+            if (entry) {
+                entry->wrap_s = wrap_s;
+                entry->wrap_t = wrap_t;
+                entry->min_filter = filter_mode;
+                entry->external = 1;
+#ifdef TARGET_VITA
+                // record so eviction releases the loaded_cache ref we acquired
+                entry->vtc_cache_key = hd_key;
+#endif
+            }
+#ifdef TARGET_VITA
+            else if (hd_key != 0) {
+                // insert refused, release the ref we acquired above
+                extern void vita_vtc_loaded_cache_release_key(unsigned long long);
+                vita_vtc_loaded_cache_release_key(hd_key);
+            }
+#endif
+            // bind hd_tex either way; missing cache entry is non-fatal
 
             o[TEXOBJ_GL_TEX] = hd_tex;
             g_gx.gl_textures[id] = hd_tex; g_gx.gl_tex_deferred[id] = -1;
@@ -1594,13 +2015,15 @@ void GXLoadTexObj(void* obj, u32 id) {
     /* insert into cache */
     TexCacheEntry* entry = tex_cache_insert(o[TEXOBJ_IMAGE_PTR], width, height, format, tlut_key,
                                             tlut_ptr_key, tlut_hash_key, hash, tex);
-    entry->wrap_s = wrap_s;
-    entry->wrap_t = wrap_t;
-    entry->min_filter = filter_mode;
+    if (entry) {
+        entry->wrap_s = wrap_s;
+        entry->wrap_t = wrap_t;
+        entry->min_filter = filter_mode;
+    }
 
 #ifdef TARGET_VITA
     // compute VTC cache key for background HD upgrade (same as worker path)
-    {
+    if (entry) {
         extern unsigned long long vita_vtc_compute_key(const void*, int, int, int,
                                                        unsigned int, const void*, int, int,
                                                        unsigned int, unsigned int, unsigned int);

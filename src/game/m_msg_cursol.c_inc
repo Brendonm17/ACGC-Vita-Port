@@ -1258,13 +1258,25 @@ static void mMsg_request_main_index_fromCursol(mMsg_Window_c* msg_p, int process
 }
 
 static void mMsg_Main_Cursol(mMsg_Window_c* msg_p, GAME* game) {
+#ifdef TARGET_VITA
+  // text_speed=2 doubles typing rate, but only on pure-typing frames; a
+  // control opcode (newline, choice, cancel) firing here would soft-lock
+  // the conversation on the following line.
+  int before_idx = msg_p->end_text_cursor_idx;
+  int before_cancel = msg_p->cancel_flag;
+  u32 before_cj = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
+#endif
+
   int processing = mMsg_Main_Cursol_ControlCursol(msg_p);
 
 #ifdef TARGET_VITA
-  // fast + B held -> double up to 2 chars / frame (caps the matrix above)
-  if (processing && g_pc_settings.text_speed == 2 &&
+  // only run the second pass if the first advanced a char with no control flag
+  int advanced = msg_p->end_text_cursor_idx > before_idx;
+  u32 after_cj = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
+  if (processing && advanced && g_pc_settings.text_speed == 2 &&
       (msg_p->status_flags & mMsg_STATUS_FLAG_FAST_TEXT) != 0 &&
-      (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) == 0) {
+      before_cj == 0 && after_cj == 0 &&
+      before_cancel == FALSE && msg_p->cancel_flag == FALSE) {
     mMsg_Main_Cursol_ControlCursol(msg_p);
   }
 #endif

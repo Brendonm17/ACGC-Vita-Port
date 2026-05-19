@@ -1,6 +1,9 @@
 // cfg48_f.cg
 // color = lerp(ras.rgb, C1, A0) * tex.rgb, alpha = tex.a
 // S0 c(10,4,3,15) a(7,7,7,7) S1 c(15,0,8,15) a(7,7,7,4)
+// Only stage 1 references the texture (TEXMAP1 -> u_texture1). u_texture0
+// is declared too because psp2cgc will remap TEXUNIT1 if TEXUNIT0 isn't
+// declared, which crashes the GPU.
 
 void main(
     half4 v_color : COLOR0,
@@ -10,7 +13,8 @@ void main(
     float v_fog_z : TEXCOORD3,
 
     uniform sampler2D u_texture0 : TEXUNIT0,
-    uniform half u_use_texture0,
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture1,
     uniform half u_tev1_tc_src,
 
     // S0: B=C1 (pre-resolved), C=A0 (pre-resolved scalar in cc.x)
@@ -42,9 +46,9 @@ void main(
 
     out half4 out_color : COLOR
 ) {
-    // S1 uses texture
+    // S1 uses TEXMAP1 (u_texture1)
     float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
-    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc1), step(0.5h, u_use_texture0));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
 
     half3 matC = lerp(u_mat_color.rgb, v_color.rgb, step(0.5h, u_chan_mat_src));
     half matA = lerp(u_mat_color.a, v_color.a, step(0.5h, u_alpha_mat_src));
@@ -71,8 +75,8 @@ void main(
     // cc is pre-resolved A0 (scalar broadcast to rgb)
     half3 s0_c = lerp(ras_c, u_tev0_cb, u_tev0_cc);
     // S1: color = prev * tex, alpha = tex.a
-    half3 prev_c = s0_c * tex0.rgb;
-    half prev_a = tex0.a;
+    half3 prev_c = s0_c * tex1.rgb;
+    half prev_a = tex1.a;
 
 #ifdef ALPHA_TEST
     if (prev_a < u_alpha_ref0) discard;

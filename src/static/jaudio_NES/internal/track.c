@@ -1650,7 +1650,7 @@ static void Nas_SubSeq(sub* subtrack) {
                                 seq_data = &grp->seq_data[cmdArgU16 + subtrack->subtrack_idx];
                                 *seq_data = (u8)m->value + cmdArgU8;
                                 break;
-                            case SUBTRACK_CMD_MACRO_BIT_MOD: // manipulate macro register value
+                            case SUBTRACK_CMD_MACRO_BIT_MOD: { // manipulate macro register value
                                 u32 shift = (cmdArgs[0] & 0xF);
                                 lo_bits = (m->value & 0x80);
                                 new_var2 = (cmdArgs[0] & 0x80);
@@ -1669,6 +1669,7 @@ static void Nas_SubSeq(sub* subtrack) {
 
                                 m->value = cmdArgU8;
                                 break;
+                            }
                         }
                     }
                     // continue;

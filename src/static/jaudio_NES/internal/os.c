@@ -4,7 +4,11 @@
 #include "jaudio_NES/sample.h"
 
 #ifdef TARGET_PC
+#ifdef TARGET_VITA
+#include <SDL2/SDL.h>
+#else
 #include <SDL.h>
+#endif
 static SDL_mutex* z_mq_mutex = NULL;
 
 void pc_audio_mq_init(void) {

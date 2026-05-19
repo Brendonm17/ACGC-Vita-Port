@@ -55,6 +55,18 @@ extern "C" {
 #define G_SETCOMBINE_NOTEV 0xCF
 #define G_SETCOMBINE_TEV 0xD0
 #define G_SETTILE_DOLPHIN 0xD2
+#define G_QUEUE_HINT      0xD1   // repurpose unused NOOP slot (dispatch index 3)
+
+// Queue IDs for G_QUEUE_HINT command
+#define GFX_QUEUE_WORK      0
+#define GFX_QUEUE_BG_OPA    1
+#define GFX_QUEUE_SHADOW    2
+#define GFX_QUEUE_BG_XLU    3
+#define GFX_QUEUE_POLY_OPA  4
+#define GFX_QUEUE_POLY_XLU  5
+#define GFX_QUEUE_LIGHT     6
+#define GFX_QUEUE_FONT      7
+#define GFX_QUEUE_OVERLAY   8
 
 #define G_FIRST_CMD G_SETTEXEDGEALPHA
 
@@ -1242,6 +1254,13 @@ do { \
   (u32)(_SHIFTL(G_SPECIAL_1, 24, 8) | _SHIFTL(G_SPECIAL_TA_MODE, 16, 8) | _SHIFTL(mode, 0, 16)), \
   (u32)0 \
 }}
+
+#define gDPQueueHint(pkt, queue_id) \
+do { \
+    Gfx* _g = (Gfx*)(pkt); \
+    _g->words.w0 = (u32)(_SHIFTL(G_QUEUE_HINT, 24, 8) | _SHIFTL(queue_id, 0, 8)); \
+    _g->words.w1 = (u32)0; \
+} while(0)
 
 //Helpful macro for defining values of a Matrix
 

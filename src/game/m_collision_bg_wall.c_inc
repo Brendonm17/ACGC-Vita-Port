@@ -468,6 +468,13 @@ static void mCoBG_MakeForbidVectorData(mCoBG_vec_info_c* vec_info, mCoBG_UnitInf
         s16 idx = data[i];
 
         if (idx != -1) {
+            // bounds check matching the other wall vector funcs; without
+            // it train-route forbid attrs (27-62) overflow unit[128] into
+            // col_count/column/l_ActorInf
+            if (*unit_count_p >= mCoBG_UNIT_VEC_INFO_MAX) {
+                break;
+            }
+
             mCoBG_forbid_vec_data_c* forbid_data = &mCoBG_make_vector_table[idx];
 
             unit_vec->normal[0] = forbid_data->norm[0];

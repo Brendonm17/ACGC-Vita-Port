@@ -78,7 +78,7 @@ extern Gfx obj_w_museum_t3T_model[];
 extern Gfx obj_w_museum_windowT_model[];
 
 static void aMsm_set_bgOffset(STRUCTURE_ACTOR* kamakura);
-static int aMsm_ctrl_light();
+static int aMsm_ctrl_light(void);
 
 static void aMsm_actor_ct(ACTOR* actor, GAME* game) {
     STRUCTURE_ACTOR* museum;
@@ -177,7 +177,7 @@ static void aMsm_rewrite_out_data(ACTOR* actor, GAME_PLAY* play) {
     mBGMPsComp_make_ps_wipe(0x2168);
 }
 
-static int aMsm_ctrl_light() {
+static int aMsm_ctrl_light(void) {
     int now_sec = Common_Get(time.now_sec);
     return !(now_sec < (64800) && now_sec >= (21600));
 }

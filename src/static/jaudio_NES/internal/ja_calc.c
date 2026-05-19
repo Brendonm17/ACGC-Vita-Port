@@ -1,6 +1,13 @@
 #include "jaudio_NES/ja_calc.h"
 
+#ifdef TARGET_VITA
+#include <math.h>
+#ifndef HALF_PI
+#define HALF_PI 1.5707963267948966f
+#endif
+#else
 #include "PowerPC_EABI_Support/msl/MSL_C/PPC_EABI/cmath_gcn.h"
+#endif
 // #include "std/Math.h"
 // #include "dolphin/math.h"
 // #include "stl/math.h"
@@ -15,7 +22,7 @@ static f32 SINTABLE[SINTABLE_LENGTH];
  */
 f32 sqrtf2(f32 x)
 {
-	return std::sqrtf(x);
+	return ::sqrtf(x);
 }
 
 /*
@@ -46,7 +53,7 @@ f32 atanf2(f32 x, f32 y)
 f32 sinf2(f32 x)
 {
 	// @fabricated
-    return std::sinf(x);
+    return ::sinf(x);
 }
 
 /*
@@ -57,7 +64,7 @@ f32 sinf2(f32 x)
 void Jac_InitSinTable()
 {
 	for (u32 i = 0; i < SINTABLE_LENGTH; i++) {
-		SINTABLE[i] = std::sinf(i * HALF_PI / 256.0f);
+		SINTABLE[i] = ::sinf(i * HALF_PI / 256.0f);
 	}
 }
 

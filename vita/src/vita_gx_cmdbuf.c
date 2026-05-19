@@ -761,6 +761,8 @@ void pc_gx_submit_frame(void) {
                 int idx = c->textures.deferred_idx[s];
                 if (c->textures.obj_stage[s] == 0 && idx >= 0) {
                     if (idx < vita_deferred_uploaded_count) {
+                        // real uploads and budget-truncated stubs both have
+                        // valid GL ids for this frame's replay.
                         GLuint tex = vita_deferred_uploaded[idx];
                         if (tex) {
                             c->textures.obj_stage[s] = tex;
@@ -821,6 +823,14 @@ void pc_gx_submit_frame(void) {
         cmd_last_shader_db[rd] = 0;
         efb_capture_count_db[rd] = 0;
         vita_gpu_skip_draws = 1;
+        // scene-change seam: the cmd-free frame between fade-out and
+        // iris fade-in still needs the banner, else the bars expose
+        // the cleared framebuffer for one frame.
+        vgl_fast_draw_mode = 0;
+        banner_draw_bars();
+        gl_cache.vp_x = -1;
+        gl_cache.scissor_test_enabled = -1;
+        gl_cache.blend = -1;
 #ifdef VITA_DEBUG
         // empty-frame path: total elapsed minus the waitpdd block.
         vita_timing.submit_presub_us =
@@ -850,6 +860,14 @@ void pc_gx_submit_frame(void) {
             extern void vita_efb_draw_fullscreen(GLuint tex);
             vita_efb_draw_fullscreen(pre_efb_tex);
             if (pre_normal_count == 0) {
+                // efb-only frame: one-frame seam during inventory close.
+                // the prbuf is the only cmd, so submit would skip the
+                // banner without this.
+                vgl_fast_draw_mode = 0;
+                banner_draw_bars();
+                gl_cache.vp_x = -1;
+                gl_cache.scissor_test_enabled = -1;
+                gl_cache.blend = -1;
                 cmd_queue_count_db[rd] = 0;
                 cmd_vert_count_db[rd] = 0;
                 cmd_last_shader_db[rd] = 0;
@@ -1698,8 +1716,9 @@ void pc_gx_submit_frame(void) {
 
     // draw pillarbox banners after all game draws, before swap
     banner_draw_bars();
-    // banner_draw_bars disables scissor + blend without notifying gl_cache;
-    // invalidate so the next frame's first draw correctly re-enables.
+    // banner bypasses gl_cache (direct glViewport/glScissor/glDisable);
+    // invalidate so the next frame's first draw re-applies these.
+    gl_cache.vp_x = -1;
     gl_cache.scissor_test_enabled = -1;
     gl_cache.blend = -1;
 
@@ -1939,31 +1958,22 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         memcpy(cmd->transform.nrm_mtx_t, g_gx.nrm_mtx_t[g_gx.current_mtx], 9 * sizeof(float));
     }
 
-    // TEV input snapshot only. resolution (ca/cb/cc/cd/aval/csrc/asrc/
-    // param/aparam + tc_src) now runs inline at the top of prededup on
-    // core 2, which reads cmd->tev.stages + colors + k_colors; those
-    // must all be valid here, so we snapshot them inside the same gate.
-    if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_COLORS)) {
+    // TEV input snapshot. The prededup resolver reads stages + colors +
+    // k_colors and re-runs on any of these bits, so the snapshot mask
+    // must match exactly. Earlier asymmetric gates left stale colors in
+    // reused slots and produced wrong-color flashes.
+    unsigned int tev_capture_mask = (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS |
+                                      PC_GX_DIRTY_KONST | PC_GX_DIRTY_TEXTURES);
+    if (dirty & tev_capture_mask) {
         int ns = g_gx.num_tev_stages;
         if (ns > PC_GX_MAX_TEV_STAGES) ns = PC_GX_MAX_TEV_STAGES;
         if (ns < 0) ns = 0;
-        // Store the clamped count so downstream loops stay in-bounds.
         cmd->tev.num_stages = ns;
-        // Narrow: only copy active stages. Submit + resolve both loop
-        // up to cmd->tev.num_stages, so stages[ns..] can stay stale.
-        // Dense scenes often have num_stages=1 or 2, saving 136-272B.
         if (ns > 0) {
             memcpy(cmd->tev.stages, g_gx.tev_stages, ns * sizeof(PCGXTevStage));
         }
-
-        if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS)) {
-            // Snapshot colors + k_colors UNCONDITIONALLY inside this gate.
-            // Needed even when DIRTY_TEV_COLORS isn't set: core 2 resolve
-            // reads cmd->tev.colors/k_colors, and cmd slot may have stale
-            // values from a different frame's cmd that reused this slot.
-            memcpy(cmd->tev.colors, g_gx.tev_colors, sizeof(cmd->tev.colors));
-            memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
-        }
+        memcpy(cmd->tev.colors, g_gx.tev_colors, sizeof(cmd->tev.colors));
+        memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
     }
     // cfg20/cfg48 tex remap bit. captured UNCONDITIONALLY: gating it on
     // DIRTY_TEV_STAGES/COLORS would zero the flag for cfg48 draws whose
@@ -1977,15 +1987,6 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     unsigned int _state_phase_t0 = sceKernelGetProcessTimeLow();
     vita_timing.flush_tev_us += _state_phase_t0 - _tev_phase_t0;
 #endif
-
-    // KONST dirty: submit's KONST branch uploads cmd->tev.k_colors.
-    // Skip redundant memcpy when the TEV gate above already copied it
-    // (happens when DIRTY_KONST fires with DIRTY_TEV_STAGES/COLORS,
-    // which is common on Vita since GXSetTevKColor sets both bits).
-    if ((dirty & PC_GX_DIRTY_KONST) &&
-        !(dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS))) {
-        memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
-    }
 
     if (dirty & PC_GX_DIRTY_ALPHA_CMP) {
         float ref0 = (float)g_gx.alpha_ref0 / 255.0f;

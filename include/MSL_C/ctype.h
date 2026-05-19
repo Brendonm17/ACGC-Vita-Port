@@ -12,6 +12,8 @@
 extern "C" {
 #endif
 
+#ifndef TARGET_VITA
+// Vita's system <ctype.h> provides these; skip the Metrowerks weak decls.
 __declspec(weak) int isalpha(int __c);
 __declspec(weak) int isdigit(int __c);
 __declspec(weak) int isspace(int __c);
@@ -20,6 +22,7 @@ __declspec(weak) int isxdigit(int __c);
 
 __declspec(weak) int tolower(int __c);
 __declspec(weak) int toupper(int __c);
+#endif
 
 // added underscore to avoid naming conflicts
 inline int _isalpha(int c) {

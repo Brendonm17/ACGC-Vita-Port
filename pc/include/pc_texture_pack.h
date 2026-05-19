@@ -11,11 +11,15 @@ void pc_texture_pack_init(void);
 void pc_texture_pack_preload_all(void);
 void pc_texture_pack_shutdown(void);
 
-/* Returns GL texture ID for an HD replacement, or 0 if none found */
+/* Returns GL texture ID for an HD replacement, or 0 if none found.
+ * On hit, bumps the loaded_cache ref_count and returns the cache_key
+ * via out_key. Caller must release the ref on eviction so LRU can't
+ * free a still-referenced HD tex (long-session wrong-texture swaps). */
 GLuint pc_texture_pack_lookup(const void* data, int data_size,
                               int w, int h, unsigned int fmt,
                               const void* tlut_data, int tlut_entries, int tlut_is_be,
-                              int* out_w, int* out_h);
+                              int* out_w, int* out_h,
+                              unsigned long long* out_key);
 
 /* Returns malloc'd RGBA buffer for HD replacement (no GL calls, thread-safe).
  * Caller must free() the returned buffer. Returns NULL if no match. */

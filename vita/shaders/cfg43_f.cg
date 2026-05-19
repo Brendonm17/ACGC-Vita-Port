@@ -16,8 +16,8 @@ void main(
 
     uniform half4 u_tev0_aval,
     uniform half4 u_tev1_aval,
-    // S1 color_c=6(C2), color_b=12(ONE): CPREV + C2
-    uniform half3 u_tev1_cd,
+    // S1 color_c=6(C2), color_b=12(ONE): CPREV + C2 (C2 in cc slot, not cd)
+    uniform half3 u_tev1_cc,
 
     uniform half u_num_chans,
     uniform half4 u_mat_color,
@@ -72,8 +72,8 @@ void main(
     half3 prev_c = tex0.rgb * ras_c;
     // S0: alpha = reg*TEXA
     half prev_a = u_tev0_aval.z * tex0.a;
-    // S1: color = CPREV + C2*ONE (u_tev1_cd holds pre-resolved C2 via D slot)
-    prev_c = saturate(prev_c + u_tev1_cd);
+    // S1: color = CPREV + C2
+    prev_c = saturate(prev_c + u_tev1_cc);
     // S1: alpha = APREV + reg*KONST
     prev_a = saturate(prev_a + u_tev1_aval.z * u_tev1_aval.y);
 

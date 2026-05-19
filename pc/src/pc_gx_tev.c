@@ -1078,22 +1078,22 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
     int fa = lfa & ~VITA_VF_LIGHTING; // F/A only, VS handles LIGHTING
     if (key & VITA_VF_ALPHA_TEST) vita_tev_alpha_test_draws++;
 
-    // zero-alpha skip: alpha=0 + SRC_ALPHA blend = invisible, safe to skip
+    // zero-alpha skip: alpha=0 + SRC_ALPHA blend is invisible. must walk
+    // every stage (3-stage cfg24/25/26 can produce non-zero on stage 2)
+    // and bail on non-zero alpha_bias (which produces output from zeros).
     if (state->blend_mode == GX_BM_BLEND && !state->z_update_enable &&
         (state->blend_src == GX_BL_SRCALPHA || state->blend_src == GX_BL_DSTALPHA) &&
         (state->blend_dst == GX_BL_INVSRCALPHA || state->blend_dst == GX_BL_INVDSTALPHA)) {
-        // check if all TEV stages produce alpha=0
         int alpha_is_zero = 1;
-        for (int s = 0; s < state->num_tev_stages && s < 2; s++) {
+        for (int s = 0; s < state->num_tev_stages; s++) {
             PCGXTevStage* t = &state->tev_stages[s];
+            if (t->alpha_bias != 0) { alpha_is_zero = 0; break; }
             int aa = t->alpha_a, ab = t->alpha_b, ac = t->alpha_c, ad = t->alpha_d;
             if (s == 0) {
-                // all inputs must be ZERO(7) for result=0
                 if (!(aa == 7 && ab == 7 && ac == 7 && ad == 7)) {
                     alpha_is_zero = 0; break;
                 }
             } else {
-                // APREV(0) carries 0 from stage 0; accept ZERO(7) or APREV(0)
                 int za = (aa == 7 || aa == 0);
                 int zb = (ab == 7 || ab == 0);
                 int zc = (ac == 7 || ac == 0);
