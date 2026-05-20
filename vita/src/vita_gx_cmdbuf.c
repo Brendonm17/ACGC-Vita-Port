@@ -325,6 +325,22 @@ static void gl_cache_reset_textures(void) {
     for (int i = 0; i < 8; i++) { gl_cache_wrap_s[i] = 0xFF; gl_cache_wrap_t[i] = 0xFF; }
 }
 
+// called by pc_gx_texture_flush_deferred_deletes before glDeleteTextures runs,
+// so any unit cached as "bound to id X" gets cleared before X is recycled.
+void vita_cmdbuf_invalidate_bound_textures(const GLuint* ids, int count) {
+    for (int j = 0; j < count; j++) {
+        GLuint id = ids[j];
+        if (id == 0) continue;
+        for (int i = 0; i < 8; i++) {
+            if (gl_cache_bound_tex[i] == id) {
+                gl_cache_bound_tex[i] = 0;
+                gl_cache_wrap_s[i] = 0xFF;
+                gl_cache_wrap_t[i] = 0xFF;
+            }
+        }
+    }
+}
+
 static inline void gl_cache_active_texture(GLenum unit) {
     if (gl_cache.active_texture != unit) {
         glActiveTexture(unit);
@@ -476,11 +492,8 @@ void vita_cmdbuf_shutdown(void) {
     }
 }
 
-// vertex write target for a new batch. in the common case returns a
-// pointer directly into cmd_verts so GXPosition/Normal/Color/TexCoord
-// write straight into the per-frame vertex buffer (no memcpy on flush).
-// overflowing batches get the global scratch buffer instead and will be
-// caught by the flush overflow check and dropped.
+// fast path writes directly into cmd_verts (no memcpy on flush);
+// overflow batches use scratch and get dropped at flush time.
 PCGXVertex* vita_cmdbuf_begin_vertex_batch(int nverts) {
     if (nverts <= 0 || cmd_vert_count + nverts > PC_GX_MAX_VERTS) {
         return g_gx.vertex_buffer;
@@ -839,11 +852,7 @@ void pc_gx_submit_frame(void) {
         return;
     }
 
-    // the cfg shader path renders the prbuf invisibly on vita, causing
-    // intermittent black flashes on menu open. draw the efb tex with the
-    // simple shader instead. pure-prbuf frames skip the cmd loop; mixed
-    // frames run it on top. skipped when a capture is pending in the
-    // cmd loop since the tex won't be filled yet
+    // efb prbuf needs the simple shader; cfg path renders invisible on vita.
     if (rd_efb_count == 0) {
         GLuint pre_efb_tex = 0;
         int pre_normal_count = 0;
@@ -1033,10 +1042,7 @@ void pc_gx_submit_frame(void) {
         PCGXDrawCmd* cmd = &cmd_queue_db[rd][i];
         if (cmd->shader == 0) continue;
         // Prefetch next cmd's hot fields while we process this one. Each
-        // PCGXDrawCmd is ~1.5KB spanning ~48 cache lines; the uniform+
-        // state block below touches many of those lines. Prefetching the
-        // next cmd 2-3 cache lines ahead warms the cache before we need
-        // it, hiding some of the L2 latency.
+        // warm next PCGXDrawCmd (~1.5KB) before the state block touches it.
         if (i + 1 < rd_count) {
             PCGXDrawCmd* next_cmd = &cmd_queue_db[rd][i + 1];
             __builtin_prefetch(next_cmd, 0, 0);
@@ -1153,18 +1159,8 @@ void pc_gx_submit_frame(void) {
                     loc = UL(tev_tc_src[s]); if (loc >= 0) UNI1I(cmd->tev.tc_src[s]);
                 }
             }
-            // Pre-resolved TEV input values (ca/cb/cc/cd/aval/...) depend
-            // on register colors, KONST, AND stage config. The resolve at
-            // the top of this function (line ~93) re-runs whenever any
-            // of those dirty bits fire — but the upload below was gated
-            // on TEV_STAGES alone, so a primitive_color change between
-            // two cfg22 draws (same stages, different C1) would silently
-            // re-resolve cb[1] on the cmd side without ever pushing it
-            // to the GPU uniform. The shader kept the previous draw's
-            // primitive color, which is exactly the post office "POST
-            // OFFICE" / Nookway-class invisibility bug. Match this gate
-            // to the resolve gate so any time the resolved values
-            // change, the GPU sees the new values.
+            // upload gate must match the resolve gate (TEV_STAGES|COLORS|KONST);
+            // gating on STAGES alone leaves stale uniforms when only colors change.
             if (dirty & (PC_GX_DIRTY_TEV_STAGES | PC_GX_DIRTY_TEV_COLORS | PC_GX_DIRTY_KONST)) {
                 for (int s = 0; s < PC_GX_MAX_TEV_STAGES && s < cmd->tev.num_stages; s++) {
                     loc = UL(tev_ca[s]); if (loc >= 0) DFVN(loc, cmd->tev.ca[s], 12);
@@ -1268,21 +1264,14 @@ void pc_gx_submit_frame(void) {
             }
 
             if (dirty & (PC_GX_DIRTY_TEXTURES | PC_GX_DIRTY_TEV_STAGES)) {
-                // direct GXM texture path: bypasses glBindTexture,
-                // glActiveTexture, glTexParameteri entirely. sets wrap
-                // modes directly on the SceGxmTexture struct.
-                // use glBindTexture + glTexParameteri for wrap (proven
-                // working) + direct sceGxm push for the fast-path bypass.
+                // GL path for wrap; direct sceGxm push for the bind bypass.
                 int ns = cmd->tev.num_stages;
                 if (ns > PC_GX_MAX_TEV_STAGES) ns = PC_GX_MAX_TEV_STAGES;
                 for (int s = 0; s < ns; s++) {
                     if (!cmd->textures.use_stage[s]) continue;
                     GLuint tid = cmd->textures.obj_stage[s];
-                    // skip texture binding entirely when unchanged for this
-                    // GXM unit. consecutive draws of same material/texture
-                    // (very common for batched geometry) hit this fast path.
+                    // unchanged tex: skip bind, still refresh wrap if game changed it.
                     if (gxm_frag_tex[s] == tid) {
-                        // still need wrap mode refresh if game changed it
                         if (cmd->textures.wrap_s[s] != 0xFF &&
                             (gl_cache_wrap_s[s] != cmd->textures.wrap_s[s] ||
                              gl_cache_wrap_t[s] != cmd->textures.wrap_t[s])) {
@@ -1568,13 +1557,7 @@ void pc_gx_submit_frame(void) {
                 default:               gl_prim = GL_TRIANGLES; break;
             }
 
-            // fold consecutive cmds with the same state into one
-            // glDrawElements. needs same shader, same primitive,
-            // contiguous indices, no EFB refs or captures between them,
-            // and either no dirty bits or only DIRTY_LIGHTING where the
-            // lighting bytes actually match. prededup skips the lighting
-            // dedup frame-wide (hit rate too low), but adjacent same-
-            // material draws do share lighting, so verify here.
+            // fold adjacent same-state draws into one glDrawElements.
             int merged_count = cmd->idx_count;
             int merged_until = i;
             extern int vita_disable_merge;
@@ -1975,12 +1958,8 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         memcpy(cmd->tev.colors, g_gx.tev_colors, sizeof(cmd->tev.colors));
         memcpy(cmd->tev.k_colors, g_gx.tev_k_colors, sizeof(cmd->tev.k_colors));
     }
-    // cfg20/cfg48 tex remap bit. captured UNCONDITIONALLY: gating it on
-    // DIRTY_TEV_STAGES/COLORS would zero the flag for cfg48 draws whose
-    // TEV state is identical to the prior draw (no dirty bits) or that
-    // only changed textures, silently dropping the swizzle and breaking
-    // Nookway/post office sign rendering. The global is set by shader
-    // selection (pc_gx_tev_get_shader) which always runs before this.
+    // capture unconditionally; gating it drops the swizzle on
+    // unchanged-TEV draws.
     cmd->tev_tex_remap = vita_tev_tex_remap ? 1 : 0;
 
 #ifdef VITA_DEBUG
@@ -2087,15 +2066,8 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
                 }
             }
         }
-        // cfg20/cfg48 tex remap. read the per-cmd snapshot, not the
-        // global: the global is reset at the top of every shader match
-        // (pc_gx_tev.c:1034) and re-set only if the matched cfg wants
-        // remap. between shader selection and this snapshot block, the
-        // shader-match cache fast path can restore a stale cached
-        // value, so by the time we're here the global may be 0 even
-        // though THIS draw needs the swizzle. cmd->tev_tex_remap is
-        // captured at line 1908 right after shader selection, so it's
-        // the authoritative per-draw value.
+        // per-cmd flag is authoritative; the global can be stale by now
+        // due to shader-match cache fast path.
         if (cmd->tev_tex_remap) {
             cmd->textures.obj_stage[0] = cmd->textures.obj_stage[1];
             cmd->textures.use_stage[0] = cmd->textures.use_stage[1];
@@ -2186,14 +2158,10 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
         }
     }
 
-    // PASSTHROUGH: simple shader does tex*ras, but pure-texture passthrough
-    // TEV (D=TEXC, no B*C) must not multiply by ras. Force num_chans=0 so
-    // ras_c=(1,1,1) and ras_a=1, making output = tex * 1 = tex.
-    // Must force DIRTY_LIGHTING so the uniform gets uploaded during replay,
-    // and snapshot the full lighting state if it wasn't already captured.
+    // passthrough TEV: force num_chans=0 so ras_c=(1,1,1), ras_a=1 (output = tex).
+    // requires DIRTY_LIGHTING + a snapshot if it wasn't already captured.
     if (vita_tev_passthrough) {
         if (!(dirty & PC_GX_DIRTY_LIGHTING)) {
-            // lighting wasn't dirty, snapshot current state so cmd has valid data
             cmd->lighting.chan_ctrl_enable_0 = g_gx.chan_ctrl_enable[0];
             cmd->lighting.chan_ctrl_enable_1 = g_gx.chan_ctrl_enable[1];
             memcpy(cmd->lighting.mat_color_0, g_gx.chan_mat_color[0], sizeof(cmd->lighting.mat_color_0));
@@ -2211,11 +2179,7 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     cmd_vert_count += count;
     cmd_queue_count++;
 
-    // clear dirty before the cpu-lit restore so the next cmd picks up
-    // the lighting re-mark. previously `g_gx.dirty = 0` was below the
-    // restore, which erased the DIRTY_LIGHTING bit we just set, so the
-    // next non-cpu-lit draw kept the cpu-lit lighting snapshot state
-    // and rendered with wrong lighting uniforms for one frame.
+    // clear dirty before the cpu-lit restore; reversed order eats DIRTY_LIGHTING.
     g_gx.dirty = 0;
     if (vita_cpu_lit_active) {
         g_gx.chan_ctrl_enable[0] = saved_enable;

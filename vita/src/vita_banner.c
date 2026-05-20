@@ -77,7 +77,7 @@ int banner_find_index(const char* name) {
 
 static void banner_unload(void) {
     if (!g_banner_loaded) return;
-    glDeleteTextures(1, &g_banner_tex);
+    vita_defer_tex_delete(g_banner_tex);
     g_banner_tex = 0;
     g_banner_loaded = 0;
     g_banner_loaded_name[0] = '\0';

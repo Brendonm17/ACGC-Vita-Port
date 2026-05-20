@@ -57,23 +57,13 @@ static jmp_buf* pc_active_jmpbuf = NULL;
 static volatile unsigned int pc_last_crash_addr = 0;
 static volatile unsigned int pc_last_crash_data_addr = 0;
 
-// scePower callback for save-on-suspend. vita's SDL lifecycle events are
-// unreliable; the only pre-kill signal that actually fires is the power
-// callback. same trick rinnegatamante's ports use.
-//
-// the callback is delivered to a dedicated thread parked in
-// sceKernelDelayThreadCB (the one wait state that lets SCE callbacks
-// dispatch). the save runs synchronously inside the callback; the kernel
-// holds the suspend off until we return.
+// scePower callback is the only pre-kill signal that actually fires.
+// thread parks in sceKernelDelayThreadCB so the callback can dispatch.
 static SceUID s_power_cb_uid    = -1;
 static SceUID s_power_cb_thread = -1;
 static volatile int s_power_cb_running = 1;
 
-// power events that mean "save now". docs say APP_SUSPEND is the right bit
-// but on real hardware it doesn't fire for the PS-button close path, so
-// we also watch BUTTON_PS_PRESS (verified firing at 0x20000080 when PS
-// opens LiveArea) and the sleep/power button bits. PS_PRESS is documented
-// as kernel-only but vita delivers it to user callbacks anyway.
+// APP_SUSPEND alone misses the PS-button path; PS_PRESS fires there.
 #define PC_POWER_SAVE_MASK ( \
     SCE_POWER_CB_APP_SUSPEND        | \
     SCE_POWER_CB_BUTTON_PS_PRESS    | \
@@ -427,12 +417,7 @@ void vita_emu64_worker_shutdown(void) {
 
 void vita_emu64_wait_done(void) {
     if (emu64_worker_tid < 0) return;
-    // The 2000-iteration spin-poll was wasting ~2ms every frame on hot
-    // path: PERF_MAIN measurements showed waitW=2.22ms where worker was
-    // not yet done when main arrived, so all 2000 PollSema syscalls
-    // fired (each costs ~1 microsecond) before we finally blocked.
-    // Just block directly - kernel wake latency (~20-50 microseconds)
-    // is tiny compared to 2000 polls.
+    // block directly; the previous spin-poll cost ~2ms/frame when worker was late.
     sceKernelWaitSema(emu64_work_done_sema, 1, NULL);
 }
 
@@ -459,14 +444,10 @@ static void vita_atexit_cleanup(void) {
     vita_emu64_worker_shutdown();
 }
 
-// scan process thread UIDs and pin SDL/VitaGL/system threads that
-// would otherwise drift across cores. idempotent, called multiple times
-// to catch late created threads (SDL audio device, etc).
-//
-// final layout:
-//   core 0: main (submit_frame), SDL audio callback (SDLAudioP1)
-//   core 1: emu64 worker, SceGxmDisplayQueue, SDLTimer, SceCommonDialogWorker
-//   core 2: vtc_io, AudioProducer, VitaGL Garbage Collector
+// pin SDL/VitaGL/system threads to fixed cores. idempotent.
+// core 0: main (submit_frame), SDL audio callback
+// core 1: emu64 worker, SceGxmDisplayQueue, SDLTimer, SceCommonDialogWorker
+// core 2: vtc_io, AudioProducer, VitaGL GC
 void vita_pin_hidden_threads(void) {
     SceKernelThreadInfo info;
     int misses_in_row = 0;

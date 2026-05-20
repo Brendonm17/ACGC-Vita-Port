@@ -63,11 +63,7 @@ static VtcIndexEntry* g_vtc_index = NULL;
 static int g_vtc_count = 0;
 static int g_vtc_active = 0;
 
-// loaded cache with LRU eviction. HD textures go in main memory (not
-// CDRAM), and 32MB is a comfortable middle ground - rarely evicts in
-// normal play but leaves plenty of the 128MB heap for game state. the
-// cmd-queue race that eviction used to trigger is fixed by the deferred
-// delete holdoff in pc_gx_texture.c, so running tighter is safe.
+// HD textures live in main memory (not CDRAM) under a 32MB LRU budget.
 #define VTC_LOADED_CACHE_SIZE 8192
 #define VTC_LOADED_CACHE_MASK (VTC_LOADED_CACHE_SIZE - 1)
 #define VTC_VRAM_BUDGET (32 * 1024 * 1024)
@@ -94,12 +90,7 @@ static int g_vtc_evictions = 0;       // stat: total LRU evictions
 static unsigned long long g_vtc_neg[VTC_NEG_CACHE_SIZE];
 static int g_vtc_neg_valid[VTC_NEG_CACHE_SIZE];
 
-// XXHash64 result cache
-// Eliminates repeat XXHash64 computations for textures already seen.
-// Keyed by (data_ptr, data_hash_fnv, tlut_hash_fnv, w, h, fmt) which are
-// all available from the tex_cache without any hashing. On cache hit, we
-// return the pre-computed vtc_cache_key instantly (no XXHash64, no binary search).
-// data_hash_fnv detects buffer reuse (same data_ptr, different content).
+// xxhash64 result cache. avoids recomputing keys for seen textures.
 #define VTC_KEY_CACHE_SIZE 1024
 #define VTC_KEY_CACHE_MASK (VTC_KEY_CACHE_SIZE - 1)
 typedef struct {
@@ -207,11 +198,8 @@ static unsigned char* g_vtc_access_logged = NULL; // 1 bit per entry index
 static int g_vtc_access_inflight = 0;
 static int g_vtc_access_total = 0;
 
-// Prefetch pending queue
-// Populated by vita_vtc_compute_key (worker thread),
-// drained by vita_vtc_prefetch (worker thread idle time after signal done)
-// 128 holds transition bursts; 64 dropped overflow on area changes and
-// HD versions only landed once the slow upgrade-scan requeued them.
+// prefetch queue: worker fills via compute_key, drains via prefetch.
+// 128 is sized to absorb area-change bursts; 64 dropped overflow.
 #define VTC_PREFETCH_MAX 128
 static unsigned long long g_vtc_prefetch_keys[VTC_PREFETCH_MAX];
 static volatile int g_vtc_prefetch_count = 0;
@@ -424,11 +412,7 @@ void vtc_loaded_insert_locked(unsigned long long key, GLuint tex, int w, int h, 
         return;
     }
 
-    // two-pass insert. first pass scans the probe chain for a live
-    // duplicate of this key (another insert path already landed it here)
-    // and picks the earliest reusable slot along the way. reusable means
-    // empty or tombstoned. if a duplicate is found, release the new
-    // texture and bump the existing entry's last_used.
+    // probe chain for an existing entry; reuse first empty/tombstoned slot.
     unsigned int slot = (unsigned int)(key & VTC_LOADED_CACHE_MASK);
     int reuse_idx = -1;
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
@@ -896,12 +880,7 @@ unsigned char* vita_vtc_lookup_deferred(const void* data, int data_size,
     return dxt;
 }
 
-// Compute VTC cache_key for a texture (worker thread safe, no I/O, no GL).
-// Returns non-zero key if VTC has a match, 0 if not found.
-//
-// data_ptr + data_hash_fnv + tlut_hash_fnv identify the texture content cheaply
-// (already computed by tex_cache). On repeat calls for the same content, the
-// XXHash64 result cache returns instantly with no re-hashing.
+// worker-safe: no I/O, no GL. returns 0 if VTC has no match.
 unsigned long long vita_vtc_compute_key(const void* data, int data_size,
                                          int w, int h, unsigned int fmt,
                                          const void* tlut_data, int tlut_entries, int tlut_is_be,
@@ -1026,11 +1005,7 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
     return result_key;
 }
 
-// Main thread: lookup by pre-computed cache_key, read DXT, upload GL texture.
-// Called from deferred upload processing after worker thread provided the key.
-// Every non-zero return increments the loaded_cache entry's ref_count; the
-// caller owns that reference and must eventually release it via
-// vita_vtc_loaded_cache_release_key.
+// main-thread lookup; non-zero return takes a ref the caller must release.
 GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
     if (!g_vtc_active || key == 0) return 0;
 
@@ -1091,7 +1066,7 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
                 // v3 bytes are pre-swizzled; uploading them via the linear
                 // path would re-swizzle and produce garbage. Drop and let
                 // the next compute_key requeue.
-                glDeleteTextures(1, &tex);
+                vita_defer_tex_delete(tex);
                 vita_vtc_release_slot(si);
                 return 0;
             } else {
@@ -1114,7 +1089,7 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             vita_vtc_release_slot(si);
 
             if (glGetError() != GL_NO_ERROR) {
-                glDeleteTextures(1, &tex);
+                vita_defer_tex_delete(tex);
                 return 0;
             }
 

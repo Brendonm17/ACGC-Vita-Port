@@ -252,19 +252,18 @@ static void salvage_pool_clear_locked(void) {
 #ifdef TARGET_VITA
 extern volatile int vita_on_worker_thread;
 
-// two-frame holdoff on texture deletes. the cmd queue is double-buffered,
-// so worker frame N's snapshot gets replayed on main frame N+1. if we
-// glDeleteTextures at the end of frame N the gl id becomes reusable
-// immediately, and process_deferred_uploads on frame N+1 can grab it back
-// via glGenTextures for a different texture. when cmd[A] finally replays
-// it samples the wrong data (the letter-C-top DXT corruption bug).
-//
-// pending = this frame's new deletes, ready = last frame's pending. we
-// glDelete from ready in batches of 64 to avoid a stall from mass deletion.
+// 4-frame holdoff to match VitaGL's FRAME_PURGE_FREQ. cmds captured by
+// the worker can sit in cmd_queue_db for more than 2 frames under slow-CPU
+// conditions (333 MHz vs 444 MHz OC), and the cross-frame gl_cache_bound_tex
+// skip-bind keeps a recycled id "bound" until something invalidates it.
 #define VITA_TEX_DELETE_MAX 16384
 static GLuint vita_tex_delete_pending[VITA_TEX_DELETE_MAX];
+static GLuint vita_tex_delete_age1[VITA_TEX_DELETE_MAX];
+static GLuint vita_tex_delete_age2[VITA_TEX_DELETE_MAX];
 static GLuint vita_tex_delete_ready[VITA_TEX_DELETE_MAX];
 static int vita_tex_delete_pending_count = 0;
+static int vita_tex_delete_age1_count = 0;
+static int vita_tex_delete_age2_count = 0;
 static int vita_tex_delete_ready_count = 0;
 
 // worker (eviction) and main (upgrade scan, loaded_cache evict) both append;
@@ -296,7 +295,7 @@ void vita_defer_tex_delete(GLuint tex) {
 void pc_gx_texture_flush_deferred_deletes(void) {
     // lock the whole roll+drain so a worker append can't race the memmove
     vita_tex_delete_lock_acquire();
-    // drain up to 64 of last frame's pending deletes
+    // drain up to 64 ids that have aged 4 frames
     if (vita_tex_delete_ready_count > 0) {
         int to_delete = vita_tex_delete_ready_count < 64 ? vita_tex_delete_ready_count : 64;
         GLuint to_delete_local[64];
@@ -308,16 +307,37 @@ void pc_gx_texture_flush_deferred_deletes(void) {
         vita_tex_delete_ready_count -= to_delete;
         // drop the lock across glDeleteTextures so worker appends don't stall
         vita_tex_delete_lock_release();
+        // invalidate the persistent bind cache before the gl handles go away,
+        // so a recycled id can't ride a stale gl_cache_bound_tex skip-bind.
+        extern void vita_cmdbuf_invalidate_bound_textures(const GLuint* ids, int count);
+        vita_cmdbuf_invalidate_bound_textures(to_delete_local, to_delete);
         glDeleteTextures(to_delete, to_delete_local);
+        // vitaGL's DRAW_STATE_CACHE keys last_frag_tex_cache by SceGxmTexture*,
+        // but texture_slots[] is static so the pointer stays valid after recycle
+        // and the cache skip-binds the new content. force a reset to be safe.
+        extern void vgl_draw_state_cache_reset(void);
+        vgl_draw_state_cache_reset();
         vita_tex_delete_lock_acquire();
     }
-    // roll this frame's pending into next frame's ready queue
-    if (vita_tex_delete_pending_count > 0) {
+    // age the pipeline by one frame: ready <- age2 <- age1 <- pending
+    if (vita_tex_delete_age2_count > 0) {
         int room = VITA_TEX_DELETE_MAX - vita_tex_delete_ready_count;
-        int move = vita_tex_delete_pending_count < room ? vita_tex_delete_pending_count : room;
+        int move = vita_tex_delete_age2_count < room ? vita_tex_delete_age2_count : room;
         memcpy(&vita_tex_delete_ready[vita_tex_delete_ready_count],
-               vita_tex_delete_pending, move * sizeof(GLuint));
+               vita_tex_delete_age2, move * sizeof(GLuint));
         vita_tex_delete_ready_count += move;
+        vita_tex_delete_age2_count = 0;
+    }
+    if (vita_tex_delete_age1_count > 0) {
+        memcpy(vita_tex_delete_age2, vita_tex_delete_age1,
+               vita_tex_delete_age1_count * sizeof(GLuint));
+        vita_tex_delete_age2_count = vita_tex_delete_age1_count;
+        vita_tex_delete_age1_count = 0;
+    }
+    if (vita_tex_delete_pending_count > 0) {
+        memcpy(vita_tex_delete_age1, vita_tex_delete_pending,
+               vita_tex_delete_pending_count * sizeof(GLuint));
+        vita_tex_delete_age1_count = vita_tex_delete_pending_count;
         vita_tex_delete_pending_count = 0;
     }
     vita_tex_delete_lock_release();
@@ -708,11 +728,7 @@ int vita_deferred_uploaded_count = 0;
 // legacy slot-based array (kept for compatibility)
 GLuint vita_just_uploaded_tex[8] = {0};
 
-// scrub a gl id out of the per-unit binding cache before deleting it.
-// without this, after the deferred-delete flush glGenTextures can hand the
-// same id back for a different texture and draws still holding the old id
-// bind the wrong data (shows as pink/cyan DXT block corruption after
-// long sessions with HD upgrades + LRU evictions).
+// drop a gl id from the per-unit cache so a reused id doesn't bind stale data.
 void pc_gx_texture_invalidate_gl_tex(GLuint tex) {
     if (tex == 0) return;
     for (int s = 0; s < 8; s++) {
@@ -789,7 +805,7 @@ void pc_gx_texture_process_deferred_uploads(void) {
             vita_vtc_release_slot(si);
 
             if (upload_failed || glGetError() != GL_NO_ERROR) {
-                glDeleteTextures(1, &hd_tex);
+                vita_defer_tex_delete(hd_tex);
                 continue;
             }
 
@@ -1070,14 +1086,8 @@ void pc_gx_texture_cache_invalidate(void) {
             PC_DELETE_TEXTURE(tex_cache[i].gl_tex);
         }
 #ifdef TARGET_VITA
-        // release the loaded_cache reference held by this tex_cache entry.
-        // externals came from the VTC loaded_cache and hold a ref_count
-        // there. without this release, scene transitions leave behind
-        // "zombie" refs that prevent LRU eviction, and the 24 MB HD
-        // texture budget fills up over enough scene transitions.
+        // release VTC ref so LRU can evict; scrub binding to avoid stale id.
         if (tex_cache[i].external && tex_cache[i].vtc_cache_key != 0) {
-            // scrub so a later LRU evict of this HD tex (now ref_count=0)
-            // doesn't leave a stale id binding behind
             pc_gx_texture_invalidate_gl_tex(tex_cache[i].gl_tex);
             vita_vtc_loaded_cache_release_key(tex_cache[i].vtc_cache_key);
         }
@@ -1824,11 +1834,7 @@ void GXLoadTexObj(void* obj, u32 id) {
         }
     }
 
-    // worker-thread fast path: if the HD version is already in the vtc
-    // loaded_cache, skip the GC decode. main's HD-first upload path will
-    // pick up the HD texture without ever touching rgba, which avoids
-    // the malloc + decode pass during miss bursts. the loaded_cache
-    // lookup is a lockless hash probe so this is safe off main.
+    // worker fast path: skip GC decode if HD is already in loaded_cache.
 #ifdef TARGET_VITA
     unsigned long long early_vtc_key = 0;
     int skip_decode = 0;

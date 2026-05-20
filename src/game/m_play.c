@@ -704,10 +704,9 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
             play->fb_mode, play->fb_wipe_mode, play->submenu.mode);
 
 #ifdef TARGET_VITA
-    // force single-mode for the transition window so the threaded 2-frame
-    // display lag doesn't expose pre-fade content. refreshed per frame
-    // while the state machine reports a transition; the 4-frame trail
-    // covers pipeline drain after the last fade frame
+    // single-mode-dispatch for transitions DISABLED for full multithreaded test.
+    // re-enable by uncommenting the block below if door/menu flash returns.
+    #if 0
     if (play->fb_wipe_mode != WIPE_MODE_NONE ||
         play->fb_mode != FBDEMO_MODE_NONE ||
         (play->fb_fade_type != FADE_TYPE_NONE &&
@@ -715,6 +714,7 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
         extern int g_pc_gx_dual_write_frames;
         if (g_pc_gx_dual_write_frames < 4) g_pc_gx_dual_write_frames = 4;
     }
+    #endif
 #endif
 
     OPEN_DISP(graph1);

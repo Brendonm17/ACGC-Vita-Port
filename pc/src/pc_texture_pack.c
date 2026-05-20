@@ -742,7 +742,7 @@ static GLuint load_dds_file(const char* filepath, int* out_w, int* out_h) {
 
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
-        glDeleteTextures(1, &tex);
+        PC_DELETE_TEXTURE(tex);
         free(pixels);
         return 0;
     }
@@ -1085,7 +1085,7 @@ static int tpc_upload_entry(const TPCEntryHeader* eh, const unsigned char* pixel
     }
 
     if (glGetError() != GL_NO_ERROR) {
-        glDeleteTextures(1, &tex);
+        PC_DELETE_TEXTURE(tex);
         return 0;
     }
 
@@ -1358,7 +1358,7 @@ void pc_texture_pack_preload_all(void) {
                     cache_entries++;
                 }
             } else {
-                glDeleteTextures(1, &tex);
+                PC_DELETE_TEXTURE(tex);
                 failed++;
             }
             free(pixels);
@@ -1421,7 +1421,7 @@ void pc_texture_pack_preload_all(void) {
                     cache_entries++;
                 }
             } else {
-                glDeleteTextures(1, &tex);
+                PC_DELETE_TEXTURE(tex);
                 failed++;
             }
             free(pixels);

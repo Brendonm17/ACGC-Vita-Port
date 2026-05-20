@@ -23,6 +23,7 @@
 
 extern int g_pc_window_w;
 extern int g_pc_window_h;
+extern void vita_defer_tex_delete(GLuint tex);
 
 uint8_t *emuPrgRAM = NULL;
 uint32_t emuPrgRAMsize = 0;
@@ -326,7 +327,7 @@ void pc_fixnes_cleanup(void) {
     s_machine = NULL;
 
     if (fixnes_texture) {
-        glDeleteTextures(1, &fixnes_texture);
+        vita_defer_tex_delete(fixnes_texture);
         fixnes_texture = 0;
     }
 }

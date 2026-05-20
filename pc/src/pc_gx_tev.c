@@ -514,11 +514,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg50 vita_cfgs[49].programs
 #define vita_cfg51 vita_cfgs[50].programs
 
-// hash-based fast lookup for fully-literal TEV configs. replaces the
-// linear if/else cascade for the worker-thread per-draw shader match,
-// which was the dominant per-draw CPU cost. literal-match configs (every
-// condition is ==) are pre-hashed at init; pattern configs (range
-// checks, predicates) stay in the linear fallback.
+// pre-hashed lookup for literal-only TEV configs; pattern configs fall through.
 typedef struct {
     u32 key[4];          // [num_stages, stage0_packed, stage1_packed, stage2_packed]
     GLuint* programs;    // pointer to vita_cfgs[X].programs (8 fa variants)
@@ -641,12 +637,8 @@ static void tev_lit_build(void) {
     // cfg49: C2*ras color, A2*tex.a alpha
     TEV_INS_2(15,15,15,6, 7,4,3,7,    15,0,10,15, 7,7,7,0, vita_cfg49, 49, 0);
 
-    // cfg50: TEX*C1*RAS color, TEXA*A2 alpha. only variant 2 keeps
-    // C1 in stage 1 B (where the shader reads u_tev1_cb); the original
-    // variant 1 entry put C1 in stage 0 C and used CPREV for stage 1 B,
-    // which the shared shader misreads as C1 and produces black /
-    // discarded output (post office text, Nook signs). fall back to
-    // uber for that variant.
+    // cfg50: TEX*C1*RAS color, TEXA*A2 alpha. only variant 2 places C1 where
+    // the shared shader reads u_tev1_cb; other variants fall back to uber.
     TEV_INS_2(15,8,10,15, 7,4,3,7,    15,4,0,15,  7,7,7,0, vita_cfg50, 50, 0);
 
     // 3-stage literal configs
@@ -1064,14 +1056,8 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
             !state->z_update_enable &&
             (state->blend_src == GX_BL_SRCALPHA || state->blend_src == GX_BL_DSTALPHA) &&
             (state->blend_dst == GX_BL_INVSRCALPHA || state->blend_dst == GX_BL_INVDSTALPHA));
-        // gDPSetTexEdgeAlpha(32) is a soft anti-aliased edge threshold,
-        // not a binary alpha key. with N64 RGB5A3 the lowest non-zero
-        // alpha step is 36, which sits just above 32, and on Vita the
-        // half-precision rounding can drop it under the gate. raising
-        // the gate to 33/255 lets all tex_edge_alpha=32 draws skip the
-        // discard so anti-aliased letters (post office "POST OFFICE",
-        // and similar neon overlays) survive. real alpha keys still
-        // engage at the typical 64/128 thresholds.
+        // RGB5A3's smallest non-zero alpha is 36; half-precision rounding can
+        // drop it under tex_edge_alpha=32. raise gate to 33/255 so AA edges survive.
         if (!blended_no_zwrite && eff_ref > 33.0f/255.0f) key |= VITA_VF_ALPHA_TEST;
     }
     int lfa = key & 0x7; // L/F/A bits
@@ -1556,11 +1542,7 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
                 int ca = s0->color_a, cb = s0->color_b, cc = s0->color_c, cd = s0->color_d;
                 int aa = s0->alpha_a, ab = s0->alpha_b, ac = s0->alpha_c, ad = s0->alpha_d;
 
-                // PASSTHROUGH: result=D
-                // Simple shader does tex*ras; for pure-texture passthrough
-                // (D=TEXC/TEXA, no B*C), ras must be neutralized to (1,1,1,1)
-                // so output = tex*1 = tex. Set vita_tev_passthrough flag to
-                // force num_chans=0 in the command snapshot.
+                // pure-texture passthrough (D=TEXC/TEXA): neutralize ras to (1,1,1,1).
                 if (ca == 15 && (cb == 15 || cc == 15) &&
                     aa == 7  && (ab == 7  || ac == 7) &&
                     (cd == 8 || cd == 10 || cd == 15) &&

@@ -54,11 +54,7 @@ static struct {
 } s_efb_captures[MAX_EFB_CAPTURES];
 static int s_efb_capture_count = 0;
 
-// persistent set of dest_ptrs that have ever been used as an EFB capture
-// target. once remembered, subsequent loads of that pointer are always
-// treated as EFB-sourced even if the current frame hasn't captured yet
-// or s_efb_captures evicted the old entry. closes a race where the
-// worker snapshots a cmd before main has stored the fresh capture.
+// once a dest_ptr is an EFB target, it stays one — closes a worker/main race.
 #define MAX_KNOWN_EFB_PTRS 16
 static u32 s_known_efb_ptrs[MAX_KNOWN_EFB_PTRS];
 static int s_known_efb_count = 0;

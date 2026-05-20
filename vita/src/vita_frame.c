@@ -293,11 +293,7 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
     // vglSwapBuffers can queue an in-flight FBO for display before the
     // GPU finishes writing it; flash during the title->intro fade
     glFinish();
-    // scene-break frames render with a partially-populated matrix pool
-    // (invalidate fires mid-game_main, earlier draws this frame already
-    // captured stale identity matrices). the iris transition wants
-    // black here anyway, so wipe the back buffer before swap. gated on
-    // active dual-write so the clear can't fire outside transitions.
+    // scene-break frames have stale matrices; iris wants black here anyway.
     extern int g_pc_gx_skip_display_frames;
     extern int g_pc_gx_dual_write_frames;
     if (g_pc_gx_skip_display_frames > 0 && g_pc_gx_dual_write_frames > 0) {
