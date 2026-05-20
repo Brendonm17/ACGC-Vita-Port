@@ -42,7 +42,7 @@ extern "C" {
 
 /* --- Vertex buffer --- */
 #ifdef TARGET_VITA
-#define PC_GX_MAX_VERTS       32768  // overworld needs ~16K+; 8K caused drops
+#define PC_GX_MAX_VERTS       49152  // overworld needs ~16K+; 8K caused drops; 32K still overflowed in dense scenes
 #else
 #define PC_GX_MAX_VERTS       65536
 #endif

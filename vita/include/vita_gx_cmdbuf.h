@@ -136,7 +136,7 @@ typedef struct {
     int clear_after;
 } PCGXEfbCapture;
 
-#define CMD_QUEUE_MAX 768
+#define CMD_QUEUE_MAX 1536
 #define EFB_CAPTURE_MAX 8
 #define GFX_QUEUE_WORK   0
 #define GFX_QUEUE_SHADOW 2

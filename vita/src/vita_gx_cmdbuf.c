@@ -1773,9 +1773,14 @@ void vita_gx_flush_vertices_cmdbuf(int count) {
     // Buffer overflow check
     if (cmd_vert_count + count > PC_GX_MAX_VERTS || cmd_queue_count >= CMD_QUEUE_MAX) {
         vita_stats.dropped_draws++;
-        if (vita_stats.dropped_draws <= 5)
+        if (vita_stats.dropped_draws <= 5) {
+            // dropped draws cause flashing in dense scenes — log to error.log
+            // (stderr) so release builds surface this without VITA_DEBUG.
+            fprintf(stderr, "[GX] OVERFLOW: dropping draw (verts=%d+%d/%d, cmds=%d/%d)\n",
+                    cmd_vert_count, count, PC_GX_MAX_VERTS, cmd_queue_count, CMD_QUEUE_MAX);
             vita_log("[GX] OVERFLOW: dropping draw (verts=%d+%d/%d, cmds=%d/%d)\n",
                      cmd_vert_count, count, PC_GX_MAX_VERTS, cmd_queue_count, CMD_QUEUE_MAX);
+        }
         if (vita_cpu_lit_active) {
             g_gx.chan_ctrl_enable[0] = saved_enable;
             g_gx.chan_ctrl_mat_src[0] = saved_mat;
