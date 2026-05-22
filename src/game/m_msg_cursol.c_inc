@@ -1105,9 +1105,17 @@ static int mMsg_Main_Cursol_ControlCursol(mMsg_Window_c* msg_p) {
   int utter = FALSE;
   int processed = FALSE;
 
+#ifdef TARGET_VITA
+  // hold-to-skip: FAST_TEXT gets cleared on segment boundaries, so use held
+  // state to re-arm it each frame
+  if (chkButton(BUTTON_B) && (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) == 0) {
+    msg_p->status_flags |= mMsg_STATUS_FLAG_FAST_TEXT;
+  }
+#else
   if (chkTrigger(BUTTON_B) && (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) == 0) {
     msg_p->status_flags |= mMsg_STATUS_FLAG_FAST_TEXT;
   }
+#endif
 
   if (mMsg_Check_CancelOrder(msg_p)) {
     msg_p->cancel_flag = TRUE;
@@ -1259,9 +1267,8 @@ static void mMsg_request_main_index_fromCursol(mMsg_Window_c* msg_p, int process
 
 static void mMsg_Main_Cursol(mMsg_Window_c* msg_p, GAME* game) {
 #ifdef TARGET_VITA
-  // text_speed=2 doubles typing rate, but only on pure-typing frames; a
-  // control opcode (newline, choice, cancel) firing here would soft-lock
-  // the conversation on the following line.
+  // text_speed=2 double-pass: snapshot state to gate the second pass on
+  // pure-typing frames only
   int before_idx = msg_p->end_text_cursor_idx;
   int before_cancel = msg_p->cancel_flag;
   u32 before_cj = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
@@ -1270,14 +1277,19 @@ static void mMsg_Main_Cursol(mMsg_Window_c* msg_p, GAME* game) {
   int processing = mMsg_Main_Cursol_ControlCursol(msg_p);
 
 #ifdef TARGET_VITA
-  // only run the second pass if the first advanced a char with no control flag
   int advanced = msg_p->end_text_cursor_idx > before_idx;
   u32 after_cj = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
   if (processing && advanced && g_pc_settings.text_speed == 2 &&
       (msg_p->status_flags & mMsg_STATUS_FLAG_FAST_TEXT) != 0 &&
       before_cj == 0 && after_cj == 0 &&
       before_cancel == FALSE && msg_p->cancel_flag == FALSE) {
-    mMsg_Main_Cursol_ControlCursol(msg_p);
+    int processing2 = mMsg_Main_Cursol_ControlCursol(msg_p);
+    // any page-boundary side-effect must force a state transition or input
+    // handlers stay gated on CURSOL_JUST/cancel and the dialog soft-locks
+    u32 after_cj2 = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
+    if (!processing2 || after_cj2 != 0 || msg_p->cancel_flag != FALSE) {
+      processing = FALSE;
+    }
   }
 #endif
 

@@ -2132,7 +2132,10 @@ static void mSM_move_chg_base(mSM_MenuInfo_c* menu_info, int mv_dir) {
 
 static void mSM_make_trigger_data(Submenu* submenu) {
     static u32 add_trigger[] = { BUTTON_CRIGHT, BUTTON_CUP, BUTTON_CLEFT, BUTTON_CDOWN };
-    int trigger = (getButton() & 0xF) | getTrigger();
+    // dpad is handled via the held-state mirror below; strip its edge bits
+    // so trigger stays stable across frames and repeat_timer isn't reset
+    int trigger = (getButton() & 0xF) |
+                  (getTrigger() & ~(BUTTON_DRIGHT | BUTTON_DLEFT | BUTTON_DDOWN | BUTTON_DUP));
     mSM_Control_c* control = &submenu->overlay->menu_control;
 
     if (gamePT->mcon.move_pR > 0.5f) {
