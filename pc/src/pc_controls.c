@@ -386,7 +386,16 @@ void pc_controls_load(void) {
         if (*key) apply_binding(section, key, value);
     }
     fclose(f);
+    // hand-edited inis can chord A+B onto one vita slot; A (confirm) wins.
+    int auto_cleared = pc_controls_enforce_confirm_cancel_distinct(PAD_BUTTON_A);
     printf("[Controls] Loaded %s\n", CONTROLS_FILE);
+    if (auto_cleared > 0) {
+        fprintf(stderr,
+                "[Controls] %s had Confirm+Cancel on the same vita button(s); "
+                "cleared Cancel from %d slot(s) and rewrote %s.\n",
+                CONTROLS_FILE, auto_cleared, CONTROLS_FILE);
+        pc_controls_save();
+    }
 }
 
 // Multi-bit chords get re-encoded as comma-separated names.
@@ -460,6 +469,22 @@ void pc_controls_set_nes(int vbtn, uint8_t bits, uint8_t turbo) {
     if (vbtn < 0 || vbtn >= PCV_COUNT) return;
     g_pc_controls.nes_map[vbtn] = bits;
     g_pc_controls.nes_turbo_map[vbtn] = turbo;
+}
+
+int pc_controls_enforce_confirm_cancel_distinct(uint16_t winning_bit) {
+    uint16_t loser;
+    if (winning_bit == PAD_BUTTON_A)      loser = PAD_BUTTON_B;
+    else if (winning_bit == PAD_BUTTON_B) loser = PAD_BUTTON_A;
+    else return 0;
+    int cleared = 0;
+    for (int j = 0; j < PCV_COUNT; j++) {
+        if ((g_pc_controls.main_map[j] & winning_bit) &&
+            (g_pc_controls.main_map[j] & loser)) {
+            g_pc_controls.main_map[j] &= ~loser;
+            cleared++;
+        }
+    }
+    return cleared;
 }
 
 // Comments are regenerated each time so the file stays self-documenting.

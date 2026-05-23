@@ -574,6 +574,7 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
           for (int i = 0; i < PCV_COUNT; i++) {
             if (s_remap_captured & (1u << i)) g_pc_controls.main_map[i] |= (uint16_t)s_remap_bit;
           }
+          pc_controls_enforce_confirm_cancel_distinct((uint16_t)s_remap_bit);
         }
         s_remap_active = 0;
         actor->pc_cursor_cooldown = 14;

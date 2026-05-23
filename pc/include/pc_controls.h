@@ -93,6 +93,8 @@ void        pc_controls_format_nes(int vbtn, char* out, int out_size);
 void        pc_controls_set_main(int vbtn, uint16_t bits);
 void        pc_controls_set_nes(int vbtn, uint8_t bits, uint8_t turbo);
 
+int         pc_controls_enforce_confirm_cancel_distinct(uint16_t winning_bit);
+
 #ifdef __cplusplus
 }
 #endif
