@@ -792,9 +792,13 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
         } else if (prev_active && !curr_active) {
             extern void pc_gx_restore_world_state(void);
             pc_gx_restore_world_state();
-            Gfx* poly = NOW_POLY_OPA_DISP;
-            gDPNoOpTag(poly++, PC_NOOP_FULL_STATE_INVALIDATE);
-            SET_POLY_OPA_DISP(poly);
+            // BG_OPA so emu64 invalidates before bg roof draws, not after
+            Gfx* bg = NOW_BG_OPA_DISP;
+            gDPNoOpTag(bg++, PC_NOOP_FULL_STATE_INVALIDATE);
+            SET_BG_OPA_DISP(bg);
+            // hide the close-transition's stale-state flash frame
+            extern int g_pc_gx_skip_endframe_countdown;
+            if (g_pc_gx_skip_endframe_countdown < 3) g_pc_gx_skip_endframe_countdown = 3;
         }
         s_prev_submenu_mode = play->submenu.mode;
     }

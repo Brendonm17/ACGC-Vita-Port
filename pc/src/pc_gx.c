@@ -547,6 +547,9 @@ void pc_gx_restore_world_state(void) {
     PC_GX_LOAD_ARRAY(fog_color);
     PC_GX_LOAD_FIELD(num_ind_stages);
 
+    // vita_light_norm cache is only refilled by GXLoadLightObj
+    for (int i = 0; i < 8; i++) vita_normalize_light(i);
+
     // force fresh state on next cmd snapshot
     pc_gx_invalidate_all_state();
 }

@@ -18,6 +18,9 @@ static int vita_worker_pending = 0;
 // would undo it. armed when leaving the dual-write window
 static int vita_skip_next_top_swap = 0;
 
+// >0 = decrement each frame; skip EndFrame when it transitions 1->0
+int g_pc_gx_skip_endframe_countdown = 0;
+
 static int vita_perf_log_init_done = 0;
 
 #ifdef VITA_DEBUG
@@ -203,7 +206,12 @@ static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     if (!vita_first_frame) {
         int skip_top = vita_skip_next_top_swap;
         vita_skip_next_top_swap = 0;
-        if (!vita_gpu_skip_draws && !skip_top) {
+        int freeze_skip = 0;
+        if (g_pc_gx_skip_endframe_countdown > 0) {
+            if (g_pc_gx_skip_endframe_countdown == 1) freeze_skip = 1;
+            g_pc_gx_skip_endframe_countdown--;
+        }
+        if (!vita_gpu_skip_draws && !skip_top && !freeze_skip) {
 #ifdef VITA_DEBUG
             unsigned int ef0 = sceKernelGetProcessTimeLow();
 #endif
