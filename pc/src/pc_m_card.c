@@ -141,6 +141,7 @@ extern void lbRTC_GetTime(lbRTC_time_c* time);
 
 // defined further down; called from pc_save_read_gci
 void pc_time_sync_on_save_load(void);
+static void pc_save_snapshot_capture(void);
 
 /* --- ARAM data blocks (mail/diary/original designs) --- */
 
@@ -300,7 +301,12 @@ static void pc_ensure_save_dirs(void) {
 static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path);
 
 static int pc_save_write_gci(void) {
-    return pc_save_write_gci_to(PC_GCI_PATH, PC_GCI_TMP_PATH);
+    int result = pc_save_write_gci_to(PC_GCI_PATH, PC_GCI_TMP_PATH);
+    if (result) {
+        // keep the reload snapshot aligned with on-disk state
+        pc_save_snapshot_capture();
+    }
+    return result;
 }
 
 static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
@@ -573,6 +579,7 @@ static int pc_save_read_gci(const char* path) {
     }
 
     free(file_data);
+    pc_save_snapshot_capture();
     return TRUE;
 }
 
@@ -727,11 +734,47 @@ static int pc_save_scan_gci_dir(void) {
     return FALSE;
 }
 
-/* Reload save from GCI file on disk. PC equivalent of GC re-reading the
- * memory card. */
+// pc_save_reload reads from this instead of the GCI file to avoid
+// stalling the title screen on Vita.
+static Save_t l_save_snapshot;
+static u8* l_aram_snapshot[mCD_ARAM_DATA_NUM];
+static int l_save_snapshot_valid = 0;
+
+static void pc_save_snapshot_capture(void) {
+    int i;
+    memcpy(&l_save_snapshot, &common_data.save.save, sizeof(Save_t));
+    for (i = 0; i < mCD_ARAM_DATA_NUM; i++) {
+        if (l_aram_block_p_table[i] == NULL) continue;
+        if (l_aram_snapshot[i] == NULL) {
+            l_aram_snapshot[i] = (u8*)malloc(l_aram_alloc_size_table[i]);
+            if (l_aram_snapshot[i] == NULL) {
+                l_save_snapshot_valid = 0;
+                return;
+            }
+        }
+        memcpy(l_aram_snapshot[i], l_aram_block_p_table[i], l_aram_alloc_size_table[i]);
+    }
+    l_save_snapshot_valid = 1;
+}
+
+static int pc_save_snapshot_restore(void) {
+    int i;
+    if (!l_save_snapshot_valid) return FALSE;
+    memcpy(&common_data.save.save, &l_save_snapshot, sizeof(Save_t));
+    for (i = 0; i < mCD_ARAM_DATA_NUM; i++) {
+        if (l_aram_block_p_table[i] == NULL || l_aram_snapshot[i] == NULL) continue;
+        memcpy(l_aram_block_p_table[i], l_aram_snapshot[i], l_aram_alloc_size_table[i]);
+    }
+    pc_time_sync_on_save_load();
+    return TRUE;
+}
+
 int pc_save_reload(void) {
     struct stat st;
     if (!pc_save_loaded) return 0;
+    if (pc_save_snapshot_restore()) {
+        return TRUE;
+    }
     if (stat(PC_GCI_PATH, &st) == 0) {
         return pc_save_read_gci(PC_GCI_PATH);
     }

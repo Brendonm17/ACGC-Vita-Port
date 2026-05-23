@@ -129,7 +129,10 @@ static void aCOU_actor_move(ACTOR* actorx, GAME* game) {
 }
 
 static void aCOU_actor_init(ACTOR* actorx, GAME* game) {
-    mFI_SetFG_common(DUMMY_COUNT02, actorx->home.position, FALSE);
     aCOU_actor_move(actorx, game);
+#ifdef TARGET_VITA
+    if (actorx->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_COUNT02, actorx->home.position, FALSE);
     actorx->mv_proc = aCOU_actor_move;
 }

@@ -271,14 +271,7 @@ static void aBRS_actor_move(ACTOR* actor, GAME* game) {
 
     blocks_differ = (bx1 != bx2) || (bz1 != bz2);
 #ifdef TARGET_VITA
-    // free_cam: skip self-delete when player is within 2-block keep-alive
-    // range. without this, prespawn creates the tent in a neighbor acre
-    // and the embedded actor_move call inside aBRS_actor_init immediately
-    // self-deletes (bx1 != bx2). that nulls dw_proc, init then re-arms
-    // mv_proc, leaving an alive-but-invisible actor that loops through
-    // delete sequences. the home FG slot ends up overwritten with
-    // DUMMY_BROKER_SHOP from init while the actor never properly draws,
-    // so the tent never appears even when the player walks into the acre.
+    // free_cam: skip self-delete inside 2-block keep-alive
     if (g_pc_settings.free_cam && blocks_differ) {
         int dx = bx1 - bx2;
         int dz = bz1 - bz2;
@@ -307,7 +300,12 @@ static void aBRS_actor_move(ACTOR* actor, GAME* game) {
 }
 
 static void aBRS_actor_init(ACTOR* actor, GAME* game) {
-    mFI_SetFG_common(DUMMY_BROKER_SHOP, actor->home.position, 0);
     aBRS_actor_move(actor, game);
+#ifdef TARGET_VITA
+    // if move self-deleted (blocks_differ + outside keep-alive range),
+    // bail before writing FG or mv_proc so we don't orphan the FG slot
+    if (actor->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_BROKER_SHOP, actor->home.position, 0);
     actor->mv_proc = aBRS_actor_move;
 }

@@ -54,8 +54,10 @@ static void aKAG_actor_move(ACTOR* actor, GAME* game) {
 }
 
 static void aKAG_actor_init(ACTOR* actor, GAME* game) {
-
-    mFI_SetFG_common(0xF111, actor->home.position, 0);
     aKAG_actor_move(actor, game);
+#ifdef TARGET_VITA
+    if (actor->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(0xF111, actor->home.position, 0);
     actor->mv_proc = aKAG_actor_move;
 }

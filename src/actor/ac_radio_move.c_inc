@@ -70,7 +70,10 @@ static void aRAD_actor_init(ACTOR* actor, GAME* game){
     RADIO_ACTOR* radio = (RADIO_ACTOR*)actor;
     xyz_t pos = radio->actor_class.home.position;
 
-    mFI_SetFG_common(DUMMY_RADIO, pos, 0); 
     aRAD_actor_move(actor, game);
+#ifdef TARGET_VITA
+    if (actor->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_RADIO, pos, 0);
     radio->actor_class.mv_proc = aRAD_actor_move;
 }

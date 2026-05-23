@@ -55,7 +55,10 @@ static void aTUK_actor_move(ACTOR* actor, GAME* game) {
 }
 
 static void aTUK_actor_init(ACTOR* actor, GAME* game) {
-    mFI_SetFG_common(DUMMY_TUKIMI, actor->home.position, FALSE);
     aTUK_actor_move(actor, game);
+#ifdef TARGET_VITA
+    if (actor->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_TUKIMI, actor->home.position, FALSE);
     actor->mv_proc = aTUK_actor_move;
 }

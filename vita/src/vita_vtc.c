@@ -155,6 +155,18 @@ void vita_vtc_invalidate_all_compute_cache(void) {
     vtc_kc_unlock();
 }
 
+// drop kc_cache rows whose vtc_key matches; called from loaded_cache
+// eviction so subsequent compute_key doesn't return the doomed key.
+static void vtc_kc_invalidate_for_key(unsigned long long key) {
+    vtc_kc_lock();
+    for (int i = 0; i < VTC_KEY_CACHE_SIZE; i++) {
+        if (g_vtc_key_cache[i].occupied && g_vtc_key_cache[i].vtc_key == key) {
+            g_vtc_key_cache[i].occupied = 0;
+        }
+    }
+    vtc_kc_unlock();
+}
+
 static unsigned int vtc_key_cache_slot(unsigned int data_ptr, unsigned int data_hash_fnv) {
     unsigned int h = data_ptr ^ (data_hash_fnv * 0x9E3779B1u);
     h ^= h >> 16;
@@ -199,15 +211,16 @@ static int g_vtc_access_inflight = 0;
 static int g_vtc_access_total = 0;
 
 // prefetch queue: worker fills via compute_key, drains via prefetch.
-// 128 is sized to absorb area-change bursts; 64 dropped overflow.
-#define VTC_PREFETCH_MAX 128
+// 256 absorbs scene-change bursts without silently dropping requests.
+#define VTC_PREFETCH_MAX 256
 static unsigned long long g_vtc_prefetch_keys[VTC_PREFETCH_MAX];
 static volatile int g_vtc_prefetch_count = 0;
 
 // I/O slot definitions (used by lookup_by_key and worker prefetch)
 #include <psp2/kernel/threadmgr.h>
 
-#define VTC_IO_SLOTS 24
+// 64 lets one queueing pass cover a major scene-change burst
+#define VTC_IO_SLOTS 64
 #define VTC_IO_BUF_SIZE (256 * 1024)
 
 enum { VTC_SLOT_FREE = 0, VTC_SLOT_QUEUED, VTC_SLOT_READING, VTC_SLOT_READY };
@@ -361,10 +374,17 @@ static void vtc_loaded_evict_oldest(void) {
     VtcLoadedEntry* victim = &g_vtc_loaded[oldest_idx];
 
     extern void vita_defer_tex_delete(GLuint tex);
+    extern void pc_gx_texture_evict_tex_cache_for_gl_tex(GLuint tex);
     // strip the id out of any live binding before queuing the delete;
     // pc_gx_texture.c holds the delete one extra frame so no in-flight cmd
     // snapshot can still reference it when glGenTextures reuses the id
     pc_gx_texture_invalidate_gl_tex(victim->gl_tex);
+    // also clear any tex_cache/salvage row pointing at this gl_tex so the
+    // next lookup misses and re-resolves instead of returning a recycled id
+    pc_gx_texture_evict_tex_cache_for_gl_tex(victim->gl_tex);
+    // and drop kc_cache rows resolving to this key, otherwise subsequent
+    // compute_key on the same data_ptr returns a key that's about to die
+    vtc_kc_invalidate_for_key(victim->key);
     vita_defer_tex_delete(victim->gl_tex);
     g_vtc_vram_used -= victim->vram_bytes;
     g_vtc_evictions++;
@@ -631,6 +651,9 @@ void vita_vtc_init(void) {
     g_vtc_file_worker = fopen(g_vtc_path, "rb");
     if (!g_vtc_file_worker) {
         printf("[VTC] WARNING: failed to open worker file handle, worker thread HD textures disabled\n");
+    } else {
+        // 256KB stdio buffer so adjacent Phase-2-sorted reads share refills
+        setvbuf(g_vtc_file_worker, NULL, _IOFBF, 256 * 1024);
     }
 
     g_vtc_count = count;
@@ -1239,12 +1262,17 @@ void vita_vtc_io_init(void) {
 
     // Open dedicated file handle for I/O thread
     g_vtc_file_io = fopen(g_vtc_path, "rb");
+    if (g_vtc_file_io) {
+        // 256KB stdio buffer so adjacent Phase-2-sorted reads share refills
+        setvbuf(g_vtc_file_io, NULL, _IOFBF, 256 * 1024);
+    }
 
     // Start low-priority I/O thread for VTC reads.
     // Priority 0xA0 (160) = lower than main (0x40) and worker (0x60).
     // core 2: off main (core 0) and emu64 worker (core 1).
     // shares with GC + AudioProducer, all low-priority/bursty.
-    g_vtc_io_sema = sceKernelCreateSema("vtc_io", 0, 0, 64, NULL);
+    // sema max = 2*slots so a full batch signal can stack with leftover counts
+    g_vtc_io_sema = sceKernelCreateSema("vtc_io", 0, 0, VTC_IO_SLOTS * 2, NULL);
     if (g_vtc_io_sema >= 0 && g_vtc_file_io) {
         g_vtc_io_shutdown = 0;
         g_vtc_io_thread = sceKernelCreateThread("vtc_io", vtc_io_thread_func,
@@ -1277,6 +1305,18 @@ void vita_vtc_prefetch(void) {
     vtc_prefetch_unlock();
 
     if (count == 0) return;
+
+    // dedup. compute_key appends without checking, so N cmds for the
+    // same key produce N duplicates → N I/O slots → (N-1) wasted uploads.
+    int unique_count = 0;
+    for (int i = 0; i < count; i++) {
+        int dup = 0;
+        for (int j = 0; j < unique_count; j++) {
+            if (local_keys[j] == local_keys[i]) { dup = 1; break; }
+        }
+        if (!dup) local_keys[unique_count++] = local_keys[i];
+    }
+    count = unique_count;
 
     // If I/O thread is running, queue slots for it.
     // If no I/O thread, fall back to inline reads (worker file handle).
@@ -1503,6 +1543,21 @@ vglPendingTexture* vita_vtc_take_ready_pending(int slot, int* out_w, int* out_h)
 unsigned long long vita_vtc_get_slot_key(int slot) {
     if (slot < 0 || slot >= VTC_IO_SLOTS) return 0;
     return g_vtc_io_slots[slot].key;
+}
+
+// scene-change cleanup: release READY/QUEUED I/O slots and the
+// prefetch queue. READING slots are owned by the I/O thread; skip.
+void vita_vtc_invalidate_for_scene_change(void) {
+    vtc_prefetch_lock();
+    g_vtc_prefetch_count = 0;
+    vtc_prefetch_unlock();
+
+    for (int si = 0; si < VTC_IO_SLOTS; si++) {
+        int state = g_vtc_io_slots[si].state;
+        if (state == VTC_SLOT_READY || state == VTC_SLOT_QUEUED) {
+            vita_vtc_release_slot(si);
+        }
+    }
 }
 
 // Release a slot after main thread has uploaded the DXT data.

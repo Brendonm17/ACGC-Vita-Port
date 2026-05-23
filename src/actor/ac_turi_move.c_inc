@@ -110,7 +110,10 @@ static void aTUR_actor_move(ACTOR* actorx, GAME* game) {
 }
 
 static void aTUR_actor_init(ACTOR* actorx, GAME* game) {
-    mFI_SetFG_common(DUMMY_TURI, actorx->home.position, FALSE);
     aTUR_actor_move(actorx, game);
+#ifdef TARGET_VITA
+    if (actorx->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_TURI, actorx->home.position, FALSE);
     actorx->mv_proc = &aTUR_actor_move;
 }

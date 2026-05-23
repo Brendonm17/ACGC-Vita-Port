@@ -96,7 +96,10 @@ static void aGOZ_actor_init(ACTOR* actor, GAME* game) {
     xyz_t pos;
 
     pos = actor->home.position;
-    mFI_SetFG_common(DUMMY_GOZA, pos, FALSE);
     aGOZ_actor_move(actor, game);
+#ifdef TARGET_VITA
+    if (actor->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_GOZA, pos, FALSE);
     actor->mv_proc = aGOZ_actor_move;
 }

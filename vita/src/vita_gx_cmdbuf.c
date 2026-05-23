@@ -341,6 +341,55 @@ void vita_cmdbuf_invalidate_bound_textures(const GLuint* ids, int count) {
     }
 }
 
+// scrub READ buffer only. id is still alive in defer; write-buffer scrub
+// would nuke cmds for textures that are fine to bind for the next 4 frames.
+void vita_cmdbuf_invalidate_queued_obj_stage(const GLuint* ids, int count) {
+    int rd = 1 - cmd_write;
+    if (!cmd_queue_db[rd]) return;
+    int n = cmd_queue_count_db[rd];
+    for (int i = 0; i < n; i++) {
+        PCGXDrawCmd* c = &cmd_queue_db[rd][i];
+        for (int j = 0; j < count; j++) {
+            GLuint id = ids[j];
+            if (id == 0) continue;
+            for (int s = 0; s < 3; s++) {
+                if (c->textures.obj_stage[s] == id) {
+                    c->textures.obj_stage[s] = 0;
+                    c->textures.use_stage[s] = 0;
+                }
+            }
+            for (int s = 0; s < 4; s++) {
+                if (c->indirect.tex[s] == id) c->indirect.tex[s] = 0;
+            }
+        }
+    }
+}
+
+// scrub BOTH buffers. only safe when worker is idle (scene init or
+// at glDeleteTextures, where the id is about to be recycled).
+void vita_cmdbuf_invalidate_queued_obj_stage_both(const GLuint* ids, int count) {
+    for (int b = 0; b < 2; b++) {
+        if (!cmd_queue_db[b]) continue;
+        int n = cmd_queue_count_db[b];
+        for (int i = 0; i < n; i++) {
+            PCGXDrawCmd* c = &cmd_queue_db[b][i];
+            for (int j = 0; j < count; j++) {
+                GLuint id = ids[j];
+                if (id == 0) continue;
+                for (int s = 0; s < 3; s++) {
+                    if (c->textures.obj_stage[s] == id) {
+                        c->textures.obj_stage[s] = 0;
+                        c->textures.use_stage[s] = 0;
+                    }
+                }
+                for (int s = 0; s < 4; s++) {
+                    if (c->indirect.tex[s] == id) c->indirect.tex[s] = 0;
+                }
+            }
+        }
+    }
+}
+
 static inline void gl_cache_active_texture(GLenum unit) {
     if (gl_cache.active_texture != unit) {
         glActiveTexture(unit);
@@ -774,15 +823,10 @@ void pc_gx_submit_frame(void) {
                 int idx = c->textures.deferred_idx[s];
                 if (c->textures.obj_stage[s] == 0 && idx >= 0) {
                     if (idx < vita_deferred_uploaded_count) {
-                        // real uploads and budget-truncated stubs both have
-                        // valid GL ids for this frame's replay.
                         GLuint tex = vita_deferred_uploaded[idx];
                         if (tex) {
                             c->textures.obj_stage[s] = tex;
                             c->textures.use_stage[s] = 1;
-                            // only set DIRTY_TEXTURES here; setting
-                            // DIRTY_TEV_STAGES as well caused a black
-                            // flash on first-time texture loads.
                             c->dirty |= PC_GX_DIRTY_TEXTURES;
                             rr_patched++;
                         } else {

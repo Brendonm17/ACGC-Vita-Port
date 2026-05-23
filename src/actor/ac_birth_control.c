@@ -14,6 +14,7 @@ static void aBC_actor_move(ACTOR*, GAME*);
 
 #ifdef TARGET_VITA
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz);
+static int aBC_struct_exists_anywhere(GAME_PLAY* play, mActor_name_t item_id);
 static int aBC_setupActor_impl(GAME_PLAY* play, int mask);
 
 #define aBC_MASK_ITEMS   0x1
@@ -234,7 +235,9 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
 
         case NAME_TYPE_STRUCT:
           if ((mask & aBC_MASK_STRUCTS) && Common_Get(clip).structure_clip != NULL) {
-            if (aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
+            // cross-block dedup: same structure in neighbor acres' field
+            // data spawned duplicates with per-block-only check
+            if (aBC_struct_exists_anywhere(play, *item_p)) {
               break;
             }
             STRUCTURE_ACTOR* actor = (*Common_Get(clip).structure_clip->setup_actor_proc)((GAME*)play, *item_p, -1, base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
@@ -470,6 +473,22 @@ static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 b
   return FALSE;
 }
 
+// cross-block dedup for structures. acre boundary overlap can put the same
+// structure entry in two neighboring acres' field data; without this, both
+// prespawn cycles spawn their own actor and the player sees duplicates.
+static int aBC_struct_exists_anywhere(GAME_PLAY* play, mActor_name_t item_id) {
+  for (int part = 0; part < ACTOR_PART_NUM; part++) {
+    ACTOR* actor = play->actor_info.list[part].actor;
+    while (actor != NULL) {
+      if (actor->mv_proc != NULL && actor->npc_id == item_id) {
+        return TRUE;
+      }
+      actor = actor->next_actor;
+    }
+  }
+  return FALSE;
+}
+
 static int aBC_setupOtherActor_block(GAME_PLAY* play, mActor_name_t actor_id, s16 profile,
     f32 pos_x, f32 pos_z, mActor_name_t clear_item, s8 bx, s8 bz) {
   xyz_t pos;
@@ -525,9 +544,9 @@ static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
           break;
         }
         case NAME_TYPE_STRUCT:
-          // dedup: skip if this struct is already spawned
+          // cross-block dedup: same struct in adjacent acres' field data
           if (Common_Get(clip).structure_clip != NULL &&
-              !aBC_item_exists_in_block(play, item, bx, bz)) {
+              !aBC_struct_exists_anywhere(play, item)) {
             (*Common_Get(clip).structure_clip->setup_actor_proc)(
               (GAME*)play, item, -1,
               base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);

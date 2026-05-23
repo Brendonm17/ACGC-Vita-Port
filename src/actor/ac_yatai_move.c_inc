@@ -96,7 +96,10 @@ static void aYAT_actor_move(ACTOR* actor, GAME* game) {
 
 static void aYAT_actor_init(ACTOR* actor, GAME* game){
     STRUCTURE_ACTOR* yatai = (STRUCTURE_ACTOR*)actor;
-    mFI_SetFG_common(DUMMY_YATAI, actor->home.position, FALSE);
     aYAT_actor_move(actor, game);
+#ifdef TARGET_VITA
+    if (actor->dw_proc == NULL) return;
+#endif
+    mFI_SetFG_common(DUMMY_YATAI, actor->home.position, FALSE);
     actor->mv_proc = aYAT_actor_move;
 }
