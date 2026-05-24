@@ -1267,28 +1267,23 @@ static void mMsg_request_main_index_fromCursol(mMsg_Window_c* msg_p, int process
 
 static void mMsg_Main_Cursol(mMsg_Window_c* msg_p, GAME* game) {
 #ifdef TARGET_VITA
-  // text_speed=2 double-pass: snapshot state to gate the second pass on
-  // pure-typing frames only
   int before_idx = msg_p->end_text_cursor_idx;
-  int before_cancel = msg_p->cancel_flag;
-  u32 before_cj = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
 #endif
 
   int processing = mMsg_Main_Cursol_ControlCursol(msg_p);
 
 #ifdef TARGET_VITA
-  int advanced = msg_p->end_text_cursor_idx > before_idx;
-  u32 after_cj = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
-  if (processing && advanced && g_pc_settings.text_speed == 2 &&
+  // text_speed=2 types a 2nd char per frame, but only over plain text: re-running
+  // the control-code processor over an opcode desyncs the msg/choice handshake.
+  if (processing && g_pc_settings.text_speed == 2 &&
       (msg_p->status_flags & mMsg_STATUS_FLAG_FAST_TEXT) != 0 &&
-      before_cj == 0 && after_cj == 0 &&
-      before_cancel == FALSE && msg_p->cancel_flag == FALSE) {
-    int processing2 = mMsg_Main_Cursol_ControlCursol(msg_p);
-    // any page-boundary side-effect must force a state transition or input
-    // handlers stay gated on CURSOL_JUST/cancel and the dialog soft-locks
-    u32 after_cj2 = msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST;
-    if (!processing2 || after_cj2 != 0 || msg_p->cancel_flag != FALSE) {
-      processing = FALSE;
+      (msg_p->status_flags & mMsg_STATUS_FLAG_CURSOL_JUST) == 0 &&
+      msg_p->cancel_flag == FALSE &&
+      msg_p->end_text_cursor_idx > before_idx) {
+    u8 next_ch = msg_p->msg_data->text_buf.data[msg_p->end_text_cursor_idx];
+    if (next_ch != CHAR_CONTROL_CODE && next_ch != CHAR_NEW_LINE &&
+        next_ch != CHAR_MESSAGE_TAG) {
+      mMsg_Main_Cursol_ControlCursol(msg_p);
     }
   }
 #endif

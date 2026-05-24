@@ -222,6 +222,10 @@ static void Vita_Handle_DPad_ToolCycle(ACTOR* actor, GAME* game) {
     if (mPlib_Check_SetOrderSubmenu()) return;
     if (g_vita_dpad_state != VITA_DPAD_IDLE) return;
 
+    // gate on the dialog window itself, not only player state: a desync can free
+    // the player to a normal index while the message window is still open
+    if (!mMsg_Check_MainHide(mMsg_Get_base_window_p())) return;
+
     // submenu's gate guarantees no animation interrupts (fishing/talking/etc all
     // run at higher priority and would fail this check)
     if (!mPlib_able_submenu_type1(game)) return;
