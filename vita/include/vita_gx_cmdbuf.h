@@ -143,16 +143,17 @@ typedef struct {
 
 extern PCGXDrawCmd* cmd_queue_db[2];
 extern int cmd_queue_count_db[2];
-extern PCGXVertex* cmd_verts_db[2];
-extern int cmd_vert_count_db[2];
+extern PCGXVertex* cmd_verts_db[3];
+extern int cmd_vert_count_db[3];
 extern GLuint cmd_last_shader_db[2];
 extern PCGXEfbCapture efb_capture_db[2][EFB_CAPTURE_MAX];
 extern int efb_capture_count_db[2];
+extern int vbuf_w;
 
 #define cmd_queue       cmd_queue_db[cmd_write]
 #define cmd_queue_count cmd_queue_count_db[cmd_write]
-#define cmd_verts       cmd_verts_db[cmd_write]
-#define cmd_vert_count  cmd_vert_count_db[cmd_write]
+#define cmd_verts       cmd_verts_db[vbuf_w]
+#define cmd_vert_count  cmd_vert_count_db[vbuf_w]
 #define cmd_last_shader cmd_last_shader_db[cmd_write]
 #define efb_captures      efb_capture_db[cmd_write]
 #define efb_capture_count  efb_capture_count_db[cmd_write]

@@ -497,45 +497,62 @@ int vita_disable_merge = 0;
 
 PCGXDrawCmd* cmd_queue_db[2] = {NULL, NULL};
 int cmd_queue_count_db[2] = {0, 0};
-PCGXVertex* cmd_verts_db[2] = {NULL, NULL};
-int cmd_vert_count_db[2] = {0, 0};
+PCGXVertex* cmd_verts_db[3] = {NULL, NULL, NULL};
+int cmd_vert_count_db[3] = {0, 0, 0};
 GLuint cmd_last_shader_db[2] = {0, 0};
 int cmd_write = 0;
+
+// vertex/index data is GPU-read (zero-copy via vglBufferData), so it needs as
+// many slots as the display is buffered (3): the GPU reads a handed-off buffer
+// up to 2 frames later. vbuf_w is the slot the worker builds into; vbuf_for_cmd
+// maps each 2-deep command buffer to the vertex slot it used.
+int vbuf_w = 0;
+int vbuf_for_cmd[2] = {0, 0};
 
 PCGXEfbCapture efb_capture_db[2][EFB_CAPTURE_MAX];
 int efb_capture_count_db[2] = {0, 0};
 
 #define FRAME_IDX_MAX (PC_GX_MAX_VERTS * 3)
-static GLushort* frame_indices_db[2] = {NULL, NULL};
-static int       frame_idx_count_db[2] = {0, 0};
-#define frame_indices      frame_indices_db[cmd_write]
-#define frame_idx_count    frame_idx_count_db[cmd_write]
+static GLushort* frame_indices_db[3] = {NULL, NULL, NULL};
+static int       frame_idx_count_db[3] = {0, 0, 0};
+#define frame_indices      frame_indices_db[vbuf_w]
+#define frame_idx_count    frame_idx_count_db[vbuf_w]
 
 
 void vita_cmdbuf_init(void) {
+    extern void *vglMalloc(uint32_t size);
     for (int i = 0; i < 2; i++) {
         cmd_queue_db[i] = (PCGXDrawCmd*)calloc(CMD_QUEUE_MAX, sizeof(PCGXDrawCmd));
-        // vglMalloc gives GPU-mapped memory so submit can use vglBufferData.
-        // +2048 vertex guard for GXBegin's nverts hint underestimating.
-        extern void *vglMalloc(uint32_t size);
-        cmd_verts_db[i] = (PCGXVertex*)vglMalloc((PC_GX_MAX_VERTS + 2048) * sizeof(PCGXVertex));
-        frame_indices_db[i] = (GLushort*)vglMalloc(FRAME_IDX_MAX * sizeof(GLushort));
-        if (!cmd_queue_db[i] || !cmd_verts_db[i] || !frame_indices_db[i]) {
-            fprintf(stderr, "[GX] Failed to allocate double-buffer command queue %d\n", i);
+        if (!cmd_queue_db[i]) {
+            fprintf(stderr, "[GX] Failed to allocate command queue %d\n", i);
             exit(1);
         }
         cmd_queue_count_db[i] = 0;
-        cmd_vert_count_db[i] = 0;
         cmd_last_shader_db[i] = 0;
+    }
+    // 3 GPU-read vertex/index slots: must outlive the 2-frame display lag.
+    // vglMalloc gives GPU-mapped memory so submit can use vglBufferData.
+    // +2048 vertex guard for GXBegin's nverts hint underestimating.
+    for (int i = 0; i < 3; i++) {
+        cmd_verts_db[i] = (PCGXVertex*)vglMalloc((PC_GX_MAX_VERTS + 2048) * sizeof(PCGXVertex));
+        frame_indices_db[i] = (GLushort*)vglMalloc(FRAME_IDX_MAX * sizeof(GLushort));
+        if (!cmd_verts_db[i] || !frame_indices_db[i]) {
+            fprintf(stderr, "[GX] Failed to allocate vertex/index buffer %d\n", i);
+            exit(1);
+        }
+        cmd_vert_count_db[i] = 0;
         frame_idx_count_db[i] = 0;
     }
     cmd_write = 0;
+    vbuf_w = 0;
 }
 
 void vita_cmdbuf_shutdown(void) {
     extern void vglFree(void *ptr);
     for (int i = 0; i < 2; i++) {
-        free(cmd_queue_db[i]);         cmd_queue_db[i] = NULL;
+        free(cmd_queue_db[i]); cmd_queue_db[i] = NULL;
+    }
+    for (int i = 0; i < 3; i++) {
         if (cmd_verts_db[i])    { vglFree(cmd_verts_db[i]);    cmd_verts_db[i] = NULL; }
         if (frame_indices_db[i]){ vglFree(frame_indices_db[i]); frame_indices_db[i] = NULL; }
     }
@@ -565,6 +582,10 @@ void vita_cmdbuf_begin_frame(void) {
     // BEFORE main thread's perf_log_frame reads them.
 
     pc_gx_current_queue = GFX_QUEUE_WORK;
+    // advance the 3-slot vertex/index ring; the GPU keeps reading the last two
+    // frames' slots while we build into this one (display is triple-buffered).
+    vbuf_w = (vbuf_w + 1) % 3;
+    vbuf_for_cmd[cmd_write] = vbuf_w;
     cmd_queue_count = 0;
     cmd_vert_count = 0;
     cmd_last_shader = 0;
@@ -848,8 +869,9 @@ void pc_gx_submit_frame(void) {
     }
 
     int rd = 1 - cmd_write;
+    int vbuf_rd = vbuf_for_cmd[rd];
     int rd_count = cmd_queue_count_db[rd];
-    int rd_verts = cmd_vert_count_db[rd];
+    int rd_verts = cmd_vert_count_db[vbuf_rd];
 
     int rd_efb_count = efb_capture_count_db[rd];
     int rd_efb_next = 0;
@@ -876,7 +898,7 @@ void pc_gx_submit_frame(void) {
             }
         }
         cmd_queue_count_db[rd] = 0;
-        cmd_vert_count_db[rd] = 0;
+        cmd_vert_count_db[vbuf_rd] = 0;
         cmd_last_shader_db[rd] = 0;
         efb_capture_count_db[rd] = 0;
         vita_gpu_skip_draws = 1;
@@ -922,7 +944,7 @@ void pc_gx_submit_frame(void) {
                 gl_cache.scissor_test_enabled = -1;
                 gl_cache.blend = -1;
                 cmd_queue_count_db[rd] = 0;
-                cmd_vert_count_db[rd] = 0;
+                cmd_vert_count_db[vbuf_rd] = 0;
                 cmd_last_shader_db[rd] = 0;
                 efb_capture_count_db[rd] = 0;
                 return;
@@ -940,14 +962,14 @@ void pc_gx_submit_frame(void) {
     // 2 buffers is enough because cmd_write flips once per frame and
     // VitaGL's display queue is never more than one frame behind here.
     extern void vglBufferData(GLenum target, const GLvoid *data);
-    vglBufferData(GL_ARRAY_BUFFER, cmd_verts_db[rd]);
+    vglBufferData(GL_ARRAY_BUFFER, cmd_verts_db[vbuf_rd]);
 
     vita_set_vertex_attrib_pointers();
 
     // index buffer is built inline by the worker as it flushes each draw
     {
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_gx.ebo);
-        vglBufferData(GL_ELEMENT_ARRAY_BUFFER, frame_indices_db[rd]);
+        vglBufferData(GL_ELEMENT_ARRAY_BUFFER, frame_indices_db[vbuf_rd]);
     }
 
     // main-thread pre-dedup safety net. only needed when deferred texture
@@ -1737,7 +1759,7 @@ void pc_gx_submit_frame(void) {
     vita_presubmit_done = 0;
 
     cmd_queue_count_db[rd] = 0;
-    cmd_vert_count_db[rd] = 0;
+    cmd_vert_count_db[vbuf_rd] = 0;
     cmd_last_shader_db[rd] = 0;
     efb_capture_count_db[rd] = 0;
 
