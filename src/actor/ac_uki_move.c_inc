@@ -890,6 +890,10 @@ static void aUKI_set_proc_bite(ACTOR* actorx, GAME* game, int arg) {
 
     aUKI_clear_spd(actorx);
     aUKI_effect_sibuki(actorx, game, 0);
+#if defined(PC_ENHANCEMENTS) && defined(TARGET_VITA)
+    // vita has no rumble motor; audio plonk substitutes for the bite's haptic cue
+    sAdo_OngenTrgStart(NA_SE_10B, &actorx->world.position);
+#endif
 
     switch (uki->gyo_type) {
         case aGYO_TYPE_EMPTY_CAN:
