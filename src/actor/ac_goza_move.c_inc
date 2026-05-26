@@ -72,8 +72,7 @@ static void aGOZ_actor_move(ACTOR* actor, GAME* game) {
 
     int blocks_differ = (bx1 != bx2) || (bz1 != bz2);
 #ifdef TARGET_VITA
-    // free_cam: skip self-delete when player is within 2-block keep-alive
-    // range. matches the BR shop fix pattern.
+    // free_cam: skip self-delete inside 2-block keep-alive.
     if (g_pc_settings.free_cam && blocks_differ) {
         int dx = bx1 - bx2;
         int dz = bz1 - bz2;
@@ -98,7 +97,7 @@ static void aGOZ_actor_init(ACTOR* actor, GAME* game) {
     pos = actor->home.position;
     aGOZ_actor_move(actor, game);
 #ifdef TARGET_VITA
-    if (actor->dw_proc == NULL) return;
+    if (g_pc_settings.free_cam && actor->dw_proc == NULL) return;
 #endif
     mFI_SetFG_common(DUMMY_GOZA, pos, FALSE);
     actor->mv_proc = aGOZ_actor_move;

@@ -91,8 +91,7 @@ static void aTUR_actor_move(ACTOR* actorx, GAME* game) {
 
     int blocks_differ = (turi_bx != player_bx) || (turi_bz != player_bz);
 #ifdef TARGET_VITA
-    // free_cam: skip self-delete inside 2-block keep-alive. matches the
-    // BR shop / buggy / s_car fix pattern.
+    // free_cam: skip self-delete inside 2-block keep-alive.
     if (g_pc_settings.free_cam && blocks_differ) {
         int dx = turi_bx - player_bx;
         int dz = turi_bz - player_bz;
@@ -112,7 +111,7 @@ static void aTUR_actor_move(ACTOR* actorx, GAME* game) {
 static void aTUR_actor_init(ACTOR* actorx, GAME* game) {
     aTUR_actor_move(actorx, game);
 #ifdef TARGET_VITA
-    if (actorx->dw_proc == NULL) return;
+    if (g_pc_settings.free_cam && actorx->dw_proc == NULL) return;
 #endif
     mFI_SetFG_common(DUMMY_TURI, actorx->home.position, FALSE);
     actorx->mv_proc = &aTUR_actor_move;

@@ -108,8 +108,7 @@ static void aCOU_actor_move(ACTOR* actorx, GAME* game) {
 
     int blocks_differ = (count_bx != player_bx) || (count_bz != player_bz);
 #ifdef TARGET_VITA
-    // free_cam: skip self-delete inside 2-block keep-alive. matches the
-    // BR shop / buggy / s_car fix pattern.
+    // free_cam: skip self-delete inside 2-block keep-alive.
     if (g_pc_settings.free_cam && blocks_differ) {
         int dx = count_bx - player_bx;
         int dz = count_bz - player_bz;
@@ -131,7 +130,7 @@ static void aCOU_actor_move(ACTOR* actorx, GAME* game) {
 static void aCOU_actor_init(ACTOR* actorx, GAME* game) {
     aCOU_actor_move(actorx, game);
 #ifdef TARGET_VITA
-    if (actorx->dw_proc == NULL) return;
+    if (g_pc_settings.free_cam && actorx->dw_proc == NULL) return;
 #endif
     mFI_SetFG_common(DUMMY_COUNT02, actorx->home.position, FALSE);
     actorx->mv_proc = aCOU_actor_move;

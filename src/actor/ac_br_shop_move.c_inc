@@ -302,9 +302,8 @@ static void aBRS_actor_move(ACTOR* actor, GAME* game) {
 static void aBRS_actor_init(ACTOR* actor, GAME* game) {
     aBRS_actor_move(actor, game);
 #ifdef TARGET_VITA
-    // if move self-deleted (blocks_differ + outside keep-alive range),
-    // bail before writing FG or mv_proc so we don't orphan the FG slot
-    if (actor->dw_proc == NULL) return;
+    // free_cam: bail if move self-deleted, before writing FG or mv_proc.
+    if (g_pc_settings.free_cam && actor->dw_proc == NULL) return;
 #endif
     mFI_SetFG_common(DUMMY_BROKER_SHOP, actor->home.position, 0);
     actor->mv_proc = aBRS_actor_move;

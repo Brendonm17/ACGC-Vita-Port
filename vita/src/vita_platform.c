@@ -24,8 +24,8 @@
 // vita SDK "directory already exists"
 #define VITA_EEXIST ((int)0x80010011)
 
-// 128MB heap, 4MB stack (1MB caused corruption)
-__attribute__((used)) unsigned int _newlib_heap_size_user = 128 * 1024 * 1024;
+// 120MB heap, 4MB stack (1MB caused corruption)
+__attribute__((used)) unsigned int _newlib_heap_size_user = 120 * 1024 * 1024;
 __attribute__((used)) unsigned int sceUserMainThreadStackSize = 4 * 1024 * 1024;
 
 SDL_Window*   g_pc_window = NULL;     // unused on vita
@@ -149,6 +149,22 @@ unsigned int pc_crash_get_addr(void) {
     return pc_last_crash_addr;
 }
 
+// vita_init runs before vitaGL, so it can't draw the dialog yet. record the
+// message; main() surfaces it via the dialog once pc_platform_init brings
+// vitaGL up.
+static char g_early_fatal_msg[256];
+static int  g_early_fatal_set = 0;
+
+static void vita_record_early_fatal(const char* msg) {
+    strncpy(g_early_fatal_msg, msg, sizeof(g_early_fatal_msg) - 1);
+    g_early_fatal_msg[sizeof(g_early_fatal_msg) - 1] = '\0';
+    g_early_fatal_set = 1;
+}
+
+const char* vita_get_early_fatal(void) {
+    return g_early_fatal_set ? g_early_fatal_msg : NULL;
+}
+
 // caller must have vitaGL initialized; the system overlay composites on top
 // of whatever the app last drew, so we swap a black frame each loop.
 void vita_fatal_dialog_and_exit(const char* msg) {
@@ -181,6 +197,17 @@ void vita_fatal_dialog_and_exit(const char* msg) {
     sceKernelExitProcess(1);
 }
 
+// mkdir that tolerates "already exists" regardless of the exact code the
+// firmware returns: on failure, accept it when the path is already a directory.
+// returns 0 on success, the negative mkdir error otherwise.
+static int vita_ensure_dir(const char* path) {
+    int r = sceIoMkdir(path, 0777);
+    if (r >= 0 || r == VITA_EEXIST) return 0;
+    SceIoStat st;
+    if (sceIoGetstat(path, &st) >= 0 && SCE_S_ISDIR(st.st_mode)) return 0;
+    return r;
+}
+
 void vita_init(void) {
     int ret;
     ret = scePowerSetArmClockFrequency(444);
@@ -191,24 +218,45 @@ void vita_init(void) {
     if (ret < 0) fprintf(stderr, "[VITA] WARNING: Bus overclock failed: 0x%08X\n", ret);
 
     {
-        int mk_ret = sceIoMkdir("ux0:data/AnimalCrossing", 0777);
-        if (mk_ret < 0 && mk_ret != VITA_EEXIST) {
-            fprintf(stderr, "[VITA] FATAL: Cannot create data directory: 0x%08X\n", mk_ret);
-            sceKernelExitProcess(1);
+        int err = vita_ensure_dir("ux0:data/AnimalCrossing");
+        if (err < 0) {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                "Could not create the data folder.\n\n"
+                "ux0:data/AnimalCrossing\nError 0x%08X\n\n"
+                "Your memory card may be read-only or corrupted. Try a filesystem\n"
+                "check (chkdsk/fsck) from a PC, or a different card.", (unsigned)err);
+            fprintf(stderr, "[VITA] FATAL: mkdir data dir: 0x%08X\n", (unsigned)err);
+            vita_record_early_fatal(buf);
+            return;
         }
     }
     {
-        int mk_ret2 = sceIoMkdir("ux0:data/AnimalCrossing/saves", 0777);
-        if (mk_ret2 < 0 && mk_ret2 != VITA_EEXIST) {
-            fprintf(stderr, "[VITA] FATAL: Cannot create saves directory: 0x%08X\n", mk_ret2);
-            sceKernelExitProcess(1);
+        int err = vita_ensure_dir("ux0:data/AnimalCrossing/saves");
+        if (err < 0) {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                "Could not create the saves folder.\n\n"
+                "ux0:data/AnimalCrossing/saves\nError 0x%08X\n\n"
+                "Your memory card may be read-only or corrupted. Try a filesystem\n"
+                "check (chkdsk/fsck) from a PC, or a different card.", (unsigned)err);
+            fprintf(stderr, "[VITA] FATAL: mkdir saves dir: 0x%08X\n", (unsigned)err);
+            vita_record_early_fatal(buf);
+            return;
         }
     }
     {
-        int mk_ret3 = sceIoMkdir("ux0:data/AnimalCrossing/rom", 0777);
-        if (mk_ret3 < 0 && mk_ret3 != VITA_EEXIST) {
-            fprintf(stderr, "[VITA] FATAL: Cannot create rom directory: 0x%08X\n", mk_ret3);
-            sceKernelExitProcess(1);
+        int err = vita_ensure_dir("ux0:data/AnimalCrossing/rom");
+        if (err < 0) {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                "Could not create the rom folder.\n\n"
+                "ux0:data/AnimalCrossing/rom\nError 0x%08X\n\n"
+                "Your memory card may be read-only or corrupted. Try a filesystem\n"
+                "check (chkdsk/fsck) from a PC, or a different card.", (unsigned)err);
+            fprintf(stderr, "[VITA] FATAL: mkdir rom dir: 0x%08X\n", (unsigned)err);
+            vita_record_early_fatal(buf);
+            return;
         }
     }
     {
@@ -527,7 +575,8 @@ void pc_platform_init(void) {
     printf("[VITA] Render resolution: %dx%d\n", g_pc_settings.render_w, g_pc_settings.render_h);
     if (SDL_Init(SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) {
         fprintf(stderr, "[VITA] FATAL: SDL_Init failed: %s\n", SDL_GetError());
-        sceKernelExitProcess(1);
+        vita_fatal_dialog_and_exit("Failed to initialize SDL (input and audio).\n\n"
+            "Try rebooting your Vita and launching again.");
     }
 
     pc_gx_init();

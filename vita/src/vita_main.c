@@ -31,6 +31,16 @@ int main(int argc, char* argv[]) {
     pc_keybindings_load();
     pc_controls_load();
     pc_platform_init();
+
+    // surface any fatal recorded by vita_init (runs before vitaGL) now that
+    // the dialog can render.
+    {
+        extern void vita_fatal_dialog_and_exit(const char* msg);
+        extern const char* vita_get_early_fatal(void);
+        const char* early_fatal = vita_get_early_fatal();
+        if (early_fatal) vita_fatal_dialog_and_exit(early_fatal);
+    }
+
     pc_texture_pack_init();
     extern void vita_vtc_io_init(void);
     vita_vtc_io_init();

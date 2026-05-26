@@ -2718,11 +2718,9 @@ extern int mFI_SetFGStructure_common(mActor_name_t structure_name, int bx, int b
                 if (res == TRUE) {
                     mFI_SetFGUpData();
 #ifdef TARGET_VITA
-                    // free_cam runs the spawn pipeline once per acre; event
-                    // NPCs added later (Redd, Katrina, etc.) need a kick or
-                    // they stay structure-only. Classic acre mode handles
-                    // this on the next transition.
-                    if (set_type == mFI_SET_STRUCTURE_SET) {
+                    // free_cam needs a kick to spawn event structures added mid-acre.
+                    // classic mode spawns them on the normal transition pass.
+                    if (g_pc_settings.free_cam && set_type == mFI_SET_STRUCTURE_SET) {
                         extern void aBC_vita_request_struct_respawn(s8 bx, s8 bz);
                         aBC_vita_request_struct_respawn((s8)bx, (s8)bz);
                     }

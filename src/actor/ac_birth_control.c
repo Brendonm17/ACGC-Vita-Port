@@ -22,19 +22,13 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask);
 #define aBC_MASK_STRUCTS 0x4
 #define aBC_MASK_ALL     0x7
 
-// set when aBC_prespawn_block finishes a block, cleared by Actor_delete
-// when any actor in that block dies. short-circuits the 256-unit scan
-// on re-entry.
+// marks a block's structs/props as spawned; cleared on actor death.
 static u8 aBC_block_spawned_mask[BLOCK_Z_NUM][BLOCK_X_NUM];
 
-// stage machine for the 3-frame current-block spawn split in free_cam:
-//   0 = idle, 1 = props due next frame, 2 = structs due next frame.
-// keeps the per-actor ct_proc cost from stacking on the transition
-// frame.
+// free_cam 3-frame spawn split: 0=idle, 1=props next, 2=structs next.
 static u8 aBC_pending_spawn_stage = 0;
 
-// neighbor prespawn queue, cardinals first. file-scope so the
-// scene-change reset below can clear it.
+// free_cam neighbor prespawn queue, cardinals first.
 static const s8 aBC_prespawn_offsets[8][2] = {
   { -1,  0 }, { +1,  0 }, {  0, -1 }, {  0, +1 },
   { -1, -1 }, { +1, -1 }, { -1, +1 }, { +1, +1 },
@@ -67,9 +61,7 @@ static void aBC_block_reset_spawn_mask(void) {
   memset(aBC_block_spawned_mask, 0, sizeof(aBC_block_spawned_mask));
 }
 
-// free_cam pipeline only runs STRUCTS at frame +2 after scene init, so
-// mid-game FG placements (Redd tent, Saharah, Katrina, Snowman) need a
-// manual re-trigger to spawn the actor.
+// free_cam defers structs; mid-acre FG placements need a manual respawn kick.
 static volatile u8 aBC_force_struct_respawn = 0;
 
 extern void aBC_vita_request_struct_respawn(s8 bx, s8 bz) {
@@ -188,8 +180,7 @@ static int aBC_setupOtherActor(GAME_PLAY* play, mActor_name_t actor_id, s16 prof
 }
 
 #ifdef TARGET_VITA
-// mask bits pick which case types to process. free_cam uses this to
-// run items on the transition frame and defer props/structs.
+// mask picks which case types to spawn (free_cam defers props/structs).
 static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
   mFI_block_tbl_c* block_table = &play->block_table;
   mActor_name_t* item_p = block_table->items;
@@ -199,10 +190,7 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
   mActor_name_t clear_item;
   int ut_z;
   int ut_x;
-  // BG actors (gyroid, houses) aren't cleared by aBC_deleteActor_part
-  // ITEM/NPC sweeps, so a re-entered acre can still have them live.
-  // dedup props and structs unconditionally; quota retries and any
-  // spawn path that reruns against the same block won't duplicate.
+  // dedup props/structs so reruns against the same block don't duplicate.
   const s8 cur_bx = play->block_table.block_x;
   const s8 cur_bz = play->block_table.block_z;
 
@@ -235,8 +223,7 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
 
         case NAME_TYPE_STRUCT:
           if ((mask & aBC_MASK_STRUCTS) && Common_Get(clip).structure_clip != NULL) {
-            // cross-block dedup: same structure in neighbor acres' field
-            // data spawned duplicates with per-block-only check
+            // cross-block dedup: same struct can appear in neighbor acres' data.
             if (aBC_struct_exists_anywhere(play, *item_p)) {
               break;
             }
@@ -261,8 +248,7 @@ static void aBC_setupActor(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) 
     }
     return;
   }
-  // full pass. also reset any deferred stage from a prior free_cam
-  // session so toggling it off mid-pipeline doesn't re-spawn structs.
+  // full pass. reset the deferred stage so toggling free_cam off is safe.
   birth_control->setup_actor_flag = aBC_setupActor_impl(play, aBC_MASK_ALL);
   aBC_pending_spawn_stage = 0;
 }
@@ -453,12 +439,8 @@ static void aBC_set_boat(BIRTH_CONTROL_ACTOR* birth_control, GAME_PLAY* play) {
 }
 
 #ifdef TARGET_VITA
-// walk every actor-part list. items land in ACTOR_PART_ITEM, gyroids
-// and houses in ACTOR_PART_BG, props vary - only checking ITEM was
-// the gyroid-dup bug. skip actors with mv_proc cleared: those are in
-// the post-Actor_delete window where dw_proc is null too. matching
-// them blocks a legitimate respawn for the 1-2 frames before they get
-// fully removed.
+// dedup by name within a block, across all actor parts. skip mv_proc==NULL
+// actors (mid-delete) so a legitimate respawn isn't blocked.
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz) {
   for (int part = 0; part < ACTOR_PART_NUM; part++) {
     ACTOR* actor = play->actor_info.list[part].actor;
@@ -473,9 +455,7 @@ static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 b
   return FALSE;
 }
 
-// cross-block dedup for structures. acre boundary overlap can put the same
-// structure entry in two neighboring acres' field data; without this, both
-// prespawn cycles spawn their own actor and the player sees duplicates.
+// cross-block dedup for structs: acre overlap can list one struct in two acres.
 static int aBC_struct_exists_anywhere(GAME_PLAY* play, mActor_name_t item_id) {
   for (int part = 0; part < ACTOR_PART_NUM; part++) {
     ACTOR* actor = play->actor_info.list[part].actor;
@@ -568,25 +548,16 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   // snapshot before the function clears born_actor below.
   int vita_just_transitioned = mFI_ActorisBorn() == TRUE;
 
-  // detect scene change by pointer + scene_no. pointer catches
-  // reallocation, scene_no catches the allocator reusing the same slot
-  // (mainland <-> island have different block grids).
+  // detect scene change by pointer + scene_no (catches allocator slot reuse).
   const s16 cur_scene_no = Save_Get(scene_no);
   if (birth_control != aBC_last_seen_actor || cur_scene_no != aBC_last_seen_scene) {
     aBC_last_seen_actor = birth_control;
     aBC_last_seen_scene = cur_scene_no;
     aBC_block_reset_spawn_mask();
     aBC_pending_spawn_stage = 0;
-    // event handlers fire FG placements once per event period and won't
-    // re-fire on scene-return, so force a re-walk. dedup in
-    // aBC_setupActor_impl makes this safe if STRUCTS already ran.
+    // force a struct re-walk on scene-return; event FG placements fire once.
     aBC_force_struct_respawn = 1;
-    // arm prespawn for the start block. without this, queue_next stays
-    // at 8 (disabled) until the next acre transition, so neighbors of
-    // the spawn block never get prespawned. the in-block pipeline still
-    // handles the start block itself; the prespawn fills neighbors so
-    // the player doesn't see abrupt struct/prop spawn when they walk
-    // out of the start acre.
+    // arm prespawn for the start block so neighbors fill before the player leaves.
     aBC_prespawn_queue_bx = play->block_table.block_x;
     aBC_prespawn_queue_bz = play->block_table.block_z;
     aBC_prespawn_queue_next = 0;
@@ -618,8 +589,7 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
 
   if (play->game.pad_initialized == TRUE) {
 #ifdef TARGET_VITA
-    // step the 3-frame spawn pipeline. gated on !setup_actor_flag so
-    // we don't race with an items retry on a quota-exhausted frame.
+    // step the 3-frame spawn pipeline (skip while an items retry is pending).
     if (aBC_pending_spawn_stage > 0 && !birth_control->setup_actor_flag) {
       int mask = (aBC_pending_spawn_stage == 1) ? aBC_MASK_PROPS : aBC_MASK_STRUCTS;
       int failed = aBC_setupActor_impl(play, mask);
@@ -629,8 +599,9 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
       // on quota-exhausted stay put; retries next frame.
     }
 
-    // service struct-respawn requested by mFI_SetFGStructure_common
-    if (aBC_force_struct_respawn && !birth_control->setup_actor_flag) {
+    // service struct-respawn requested by mFI_SetFGStructure_common.
+    // free_cam-only: classic mode spawns structs on the normal transition pass.
+    if (g_pc_settings.free_cam && aBC_force_struct_respawn && !birth_control->setup_actor_flag) {
       aBC_force_struct_respawn = 0;
       aBC_setupActor_impl(play, aBC_MASK_STRUCTS);
     }
@@ -657,8 +628,7 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
   }
 
 #ifdef TARGET_VITA
-  // prespawn one neighbor block per frame. cardinals first, diagonals
-  // after. all 8 at once is a 60-120ms spike.
+  // prespawn one neighbor block per frame (all 8 at once spikes 60-120ms).
   if (g_pc_settings.free_cam && play->game.pad_initialized == TRUE) {
     s8 bx = play->block_table.block_x;
     s8 bz = play->block_table.block_z;

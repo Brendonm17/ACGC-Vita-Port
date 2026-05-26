@@ -74,8 +74,7 @@ static void aYAT_actor_move(ACTOR* actor, GAME* game) {
 
     int blocks_differ = (yatai_bx != player_bx) || (yatai_bz != player_bz);
 #ifdef TARGET_VITA
-    // free_cam: skip self-delete inside 2-block keep-alive. matches the
-    // BR shop / buggy / s_car fix pattern.
+    // free_cam: skip self-delete inside 2-block keep-alive.
     if (g_pc_settings.free_cam && blocks_differ) {
         int dx = yatai_bx - player_bx;
         int dz = yatai_bz - player_bz;
@@ -98,7 +97,7 @@ static void aYAT_actor_init(ACTOR* actor, GAME* game){
     STRUCTURE_ACTOR* yatai = (STRUCTURE_ACTOR*)actor;
     aYAT_actor_move(actor, game);
 #ifdef TARGET_VITA
-    if (actor->dw_proc == NULL) return;
+    if (g_pc_settings.free_cam && actor->dw_proc == NULL) return;
 #endif
     mFI_SetFG_common(DUMMY_YATAI, actor->home.position, FALSE);
     actor->mv_proc = aYAT_actor_move;

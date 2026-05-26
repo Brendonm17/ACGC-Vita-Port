@@ -525,7 +525,9 @@ void vita_cmdbuf_init(void) {
         cmd_queue_db[i] = (PCGXDrawCmd*)calloc(CMD_QUEUE_MAX, sizeof(PCGXDrawCmd));
         if (!cmd_queue_db[i]) {
             fprintf(stderr, "[GX] Failed to allocate command queue %d\n", i);
-            exit(1);
+            extern void vita_fatal_dialog_and_exit(const char* msg);
+            vita_fatal_dialog_and_exit("Out of memory while allocating command buffers.\n\n"
+                "Close other apps, reboot your Vita, and try again.");
         }
         cmd_queue_count_db[i] = 0;
         cmd_last_shader_db[i] = 0;
@@ -538,7 +540,9 @@ void vita_cmdbuf_init(void) {
         frame_indices_db[i] = (GLushort*)vglMalloc(FRAME_IDX_MAX * sizeof(GLushort));
         if (!cmd_verts_db[i] || !frame_indices_db[i]) {
             fprintf(stderr, "[GX] Failed to allocate vertex/index buffer %d\n", i);
-            exit(1);
+            extern void vita_fatal_dialog_and_exit(const char* msg);
+            vita_fatal_dialog_and_exit("Out of graphics memory while allocating vertex buffers.\n\n"
+                "Close other apps, reboot your Vita, and try again.");
         }
         cmd_vert_count_db[i] = 0;
         frame_idx_count_db[i] = 0;

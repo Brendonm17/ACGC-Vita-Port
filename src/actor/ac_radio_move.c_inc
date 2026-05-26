@@ -45,8 +45,7 @@ static void aRAD_actor_move(ACTOR* actor, GAME* game){
 
     int blocks_differ = (rbx != pbx) || (rbz != pbz);
 #ifdef TARGET_VITA
-    // free_cam: skip self-delete inside 2-block keep-alive. matches the
-    // BR shop / buggy / s_car fix pattern.
+    // free_cam: skip self-delete inside 2-block keep-alive.
     if (g_pc_settings.free_cam && blocks_differ) {
         int dx = rbx - pbx;
         int dz = rbz - pbz;
@@ -72,7 +71,7 @@ static void aRAD_actor_init(ACTOR* actor, GAME* game){
 
     aRAD_actor_move(actor, game);
 #ifdef TARGET_VITA
-    if (actor->dw_proc == NULL) return;
+    if (g_pc_settings.free_cam && actor->dw_proc == NULL) return;
 #endif
     mFI_SetFG_common(DUMMY_RADIO, pos, 0);
     radio->actor_class.mv_proc = aRAD_actor_move;
