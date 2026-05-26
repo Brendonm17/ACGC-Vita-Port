@@ -31,6 +31,22 @@ enum {
 
 typedef void (*mDE_OVL_PROC)(mDE_Ovl_c* design_ovl);
 
+#ifdef PC_DESIGN_IMPORT
+enum {
+    mDE_SD_OFF,
+    mDE_SD_MENU,
+    mDE_SD_IMPORT,
+};
+
+enum {
+    mDE_SD_MSG_NONE,
+    mDE_SD_MSG_SAVED,
+    mDE_SD_MSG_SAVE_FAIL,
+    mDE_SD_MSG_NO_FILES,
+    mDE_SD_MSG_IMPORT_FAIL,
+};
+#endif
+
 struct design_ovl_s {
     u16* palette_p;
     // u8 pad[32-4]; // 32-byte align pad
@@ -96,6 +112,16 @@ struct design_ovl_s {
     u8 _6DA;
     u8 _6DB;
     u8 _6DC;
+#ifdef PC_DESIGN_IMPORT
+    u8 sd_state;
+    u8 sd_sel;
+    u8 sd_imported;
+    u8 sd_stash_pal;
+    u8 sd_msg;
+    int sd_msg_timer;
+    mNW_original_tex_c sd_stash;
+    u8 sd_name[mNW_ORIGINAL_DESIGN_NAME_LEN];
+#endif
 };
 
 extern void mDE_maskcat_init(MaskCat_c* mask_cat);

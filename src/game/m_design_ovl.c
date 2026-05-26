@@ -10,6 +10,11 @@
 #include "m_needlework_ovl.h"
 #include "m_editEndChk_ovl.h"
 
+#ifdef PC_DESIGN_IMPORT
+#include "m_font.h"
+#include "vita_design_fs.h"
+#endif
+
 #define mDE_POS_MIN 0
 #define mDE_POS_MAX 31
 #define mDE_DESIGN_TEXELS (mNW_ORIGINAL_DESIGN_WIDTH * mNW_ORIGINAL_DESIGN_HEIGHT)
@@ -2093,10 +2098,286 @@ void mDE_move_tool_decide(mDE_Ovl_c* design_ovl) {
     }
 }
 
+#ifdef PC_DESIGN_IMPORT
+#define mDE_SD_LIST_ROWS 7
+
+// load a converted SD design into the live editor canvas
+static void mDE_sd_apply_design(mDE_Ovl_c* design_ovl, const vdc_design_t* src) {
+    bcopy((void*)src->tex, design_ovl->work_texture.data, mNW_DESIGN_TEX_SIZE);
+    bcopy(&design_ovl->work_texture, &design_ovl->texture, sizeof(design_ovl->work_texture));
+    osWritebackDCache(&design_ovl->work_texture, sizeof(design_ovl->work_texture));
+    osWritebackDCache(&design_ovl->texture, sizeof(design_ovl->texture));
+    design_ovl->palette_no = src->palette;
+    design_ovl->palette_p = mNW_PaletteIdx2Palette(design_ovl->palette_no);
+    mDE_pallet_RGB5A3_to_RGB24(design_ovl);
+}
+
+static int mDE_sd_load_file(mDE_Ovl_c* design_ovl, int idx) {
+    vdc_design_t vd;
+    char name[mNW_ORIGINAL_DESIGN_NAME_LEN];
+    long score;
+    int i;
+
+    if (design_fs_import(idx, 0, &vd, name, sizeof(name), &score) != 0) {
+        return -1;
+    }
+    mDE_sd_apply_design(design_ovl, &vd);
+    for (i = 0; i < mNW_ORIGINAL_DESIGN_NAME_LEN && name[i] != '\0'; i++) {
+        design_ovl->sd_name[i] = (u8)name[i];
+    }
+    for (; i < mNW_ORIGINAL_DESIGN_NAME_LEN; i++) {
+        design_ovl->sd_name[i] = CHAR_SPACE;
+    }
+    return 0;
+}
+
+static void mDE_sd_export(mDE_Ovl_c* design_ovl) {
+    mNW_original_design_c* slot = &Now_Private->my_org[design_ovl->image_no & 7];
+    u8 name[mNW_ORIGINAL_DESIGN_NAME_LEN + 1];
+    int ok;
+
+    bcopy(slot->name, name, mNW_ORIGINAL_DESIGN_NAME_LEN);
+    name[mNW_ORIGINAL_DESIGN_NAME_LEN] = '\0';
+    ok = (design_fs_export(design_ovl->texture.data, design_ovl->palette_no, (const char*)name) == 0);
+    design_ovl->sd_msg = ok ? mDE_SD_MSG_SAVED : mDE_SD_MSG_SAVE_FAIL;
+    design_ovl->sd_msg_timer = 90;
+    sAdo_SysTrgStart(ok ? NA_SE_MENU_EXIT : 0x1003);
+}
+
+static void mDE_sd_menu_input(Submenu* submenu, mSM_MenuInfo_c* info, mDE_Ovl_c* design_ovl) {
+    u32 trigger = submenu->overlay->menu_control.trigger;
+
+    if (trigger & BUTTON_B) {
+        design_ovl->sd_state = mDE_SD_OFF;
+        sAdo_SysTrgStart(0x1003);
+        return;
+    }
+    if (trigger & BUTTON_CUP) {
+        if (design_ovl->sd_sel > 0) {
+            design_ovl->sd_sel--;
+            sAdo_SysTrgStart(NA_SE_CURSOL);
+        }
+        return;
+    }
+    if (trigger & BUTTON_CDOWN) {
+        if (design_ovl->sd_sel < 2) {
+            design_ovl->sd_sel++;
+            sAdo_SysTrgStart(NA_SE_CURSOL);
+        }
+        return;
+    }
+    if (!(trigger & (BUTTON_A | BUTTON_START))) {
+        return;
+    }
+
+    switch (design_ovl->sd_sel) {
+        case 0: // save and quit: hand off to the normal confirmation overlay
+            design_ovl->sd_state = mDE_SD_OFF;
+            design_ovl->_698 = 0;
+            design_ovl->_680 = 0;
+            design_ovl->_684 = 0;
+            design_ovl->_688 = 0;
+            design_ovl->_68C = 0;
+            design_ovl->_6CC = 0;
+            design_ovl->_6CD = 0;
+            mSM_open_submenu(submenu, mSM_OVL_EDITENDCHK, mEE_TYPE_ORIGINAL_DESIGN, 0);
+            info->proc_status = mSM_OVL_PROC_WAIT;
+            sAdo_SysTrgStart(NA_SE_MENU_EXIT);
+            break;
+        case 1: // import from SD
+            design_fs_scan();
+            if (design_fs_count() <= 0) {
+                design_ovl->sd_msg = mDE_SD_MSG_NO_FILES;
+                design_ovl->sd_msg_timer = 90;
+                design_ovl->sd_state = mDE_SD_OFF;
+                sAdo_SysTrgStart(0x1003);
+                break;
+            }
+            bcopy(&design_ovl->work_texture, &design_ovl->sd_stash, sizeof(design_ovl->sd_stash));
+            design_ovl->sd_stash_pal = design_ovl->palette_no;
+            design_ovl->sd_sel = 0;
+            if (mDE_sd_load_file(design_ovl, 0) != 0) {
+                design_ovl->sd_msg = mDE_SD_MSG_IMPORT_FAIL;
+                design_ovl->sd_msg_timer = 90;
+                design_ovl->sd_state = mDE_SD_OFF;
+                break;
+            }
+            design_ovl->sd_state = mDE_SD_IMPORT;
+            sAdo_SysTrgStart(NA_SE_MENU_EXIT);
+            break;
+        case 2: // export to SD
+            mDE_sd_export(design_ovl);
+            design_ovl->sd_state = mDE_SD_OFF;
+            break;
+    }
+}
+
+static void mDE_sd_import_input(Submenu* submenu, mDE_Ovl_c* design_ovl) {
+    static int last_stick = 0;
+    u32 trigger = submenu->overlay->menu_control.trigger;
+    int n = design_fs_count();
+    int sx = gamePT->pads[PAD0].now.stick_x;
+    int dir = (sx > 40) ? 1 : (sx < -40 ? -1 : 0);
+
+    if (trigger & (BUTTON_B | BUTTON_START)) {
+        // cancel: restore the prior canvas
+        bcopy(&design_ovl->sd_stash, &design_ovl->work_texture, sizeof(design_ovl->work_texture));
+        bcopy(&design_ovl->work_texture, &design_ovl->texture, sizeof(design_ovl->texture));
+        osWritebackDCache(&design_ovl->work_texture, sizeof(design_ovl->work_texture));
+        osWritebackDCache(&design_ovl->texture, sizeof(design_ovl->texture));
+        design_ovl->palette_no = design_ovl->sd_stash_pal;
+        design_ovl->palette_p = mNW_PaletteIdx2Palette(design_ovl->palette_no);
+        mDE_pallet_RGB5A3_to_RGB24(design_ovl);
+        design_ovl->sd_state = mDE_SD_OFF;
+        last_stick = 0;
+        sAdo_SysTrgStart(0x1003);
+        return;
+    }
+    if (trigger & BUTTON_A) {
+        // keep the previewed image; editor undo (Y) reverts to the prior canvas
+        bcopy(&design_ovl->sd_stash, &design_ovl->undo_texture, sizeof(design_ovl->undo_texture));
+        osWritebackDCache(&design_ovl->undo_texture, sizeof(design_ovl->undo_texture));
+        design_ovl->sd_imported = 1;
+        design_ovl->sd_state = mDE_SD_OFF;
+        last_stick = 0;
+        sAdo_SysTrgStart(NA_SE_MENU_EXIT);
+        return;
+    }
+    if (n > 1) {
+        int sel = design_ovl->sd_sel;
+        int moved = 1;
+        int go_next = (trigger & (BUTTON_DRIGHT | BUTTON_CRIGHT | BUTTON_R)) || (dir > 0 && last_stick <= 0);
+        int go_prev = (trigger & (BUTTON_DLEFT | BUTTON_CLEFT | BUTTON_L)) || (dir < 0 && last_stick >= 0);
+
+        if (go_next) {
+            sel = (sel + 1) % n;
+        } else if (go_prev) {
+            sel = (sel + n - 1) % n;
+        } else {
+            moved = 0;
+        }
+        if (moved) {
+            design_ovl->sd_sel = (u8)sel;
+            mDE_sd_load_file(design_ovl, sel);
+            sAdo_SysTrgStart(NA_SE_CURSOL);
+        }
+    }
+    last_stick = dir;
+}
+
+extern Gfx lat_kakunin_DL_mode[], lat_sentaku_winT_model[], lat_sentaku_c_model[];
+
+// native 3-row selection window + cursor + text (matches EDITENDCHK styling)
+static void mDE_sd_window(Submenu* submenu, GAME* game, u8** rows, int* lens, int n, int sel) {
+    mSM_MenuInfo_c* menu = &submenu->overlay->menu_info[mSM_OVL_DESIGN];
+    GRAPH* graph = game->graph;
+    f32 ax = menu->position[0] + 35.0f;
+    f32 ay = menu->position[1] - 45.0f;
+    f32 tx, ty;
+    int i;
+
+    Matrix_scale(16.0f, 16.0f, 1.0f, MTX_LOAD);
+    Matrix_translate(ax, ay, 140.0f, MTX_MULT);
+    OPEN_POLY_OPA_DISP(graph);
+    gSPMatrix(POLY_OPA_DISP++, _Matrix_to_Mtx_new(graph), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(POLY_OPA_DISP++, lat_kakunin_DL_mode);
+    gSPDisplayList(POLY_OPA_DISP++, lat_sentaku_winT_model);
+    Matrix_scale(16.0f, 16.0f, 1.0f, MTX_LOAD);
+    Matrix_translate(ax, ay - (f32)sel * 16.0f, 140.0f, MTX_MULT);
+    gSPMatrix(POLY_OPA_DISP++, _Matrix_to_Mtx_new(graph), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(POLY_OPA_DISP++, lat_sentaku_c_model);
+    CLOSE_POLY_OPA_DISP(graph);
+
+    (*submenu->overlay->set_char_matrix_proc)(graph);
+    tx = (160.0f + ax) - 81.0f;
+    ty = (120.0f - ay) - 58.0f;
+    for (i = 0; i < n; i++) {
+        int hot = (i == sel);
+        mFont_SetLineStrings(game, rows[i], lens[i], tx, ty, hot ? 100 : 165, hot ? 130 : 185, hot ? 245 : 185, 255,
+                             FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_POLY);
+        ty += 16.0f;
+    }
+}
+
+static void mDE_sd_draw(Submenu* submenu, GAME* game) {
+    static u8 opt0[] = "Save and quit";
+    static u8 opt1[] = "Import from SD";
+    static u8 opt2[] = "Export to SD";
+    static u8 msg_saved[] = "Saved to SD card";
+    static u8 msg_savefail[] = "Save failed";
+    static u8 msg_nofiles[] = "No designs in folder";
+    static u8 msg_impfail[] = "Could not load image";
+    static u8* opts[3] = { opt0, opt1, opt2 };
+    static int optlen[3] = { sizeof(opt0) - 1, sizeof(opt1) - 1, sizeof(opt2) - 1 };
+
+    mDE_Ovl_c* d = submenu->overlay->design_ovl;
+
+    if (d->sd_state == mDE_SD_MENU) {
+        mDE_sd_window(submenu, game, opts, optlen, 3, d->sd_sel);
+    } else if (d->sd_state == mDE_SD_IMPORT) {
+        static u8 larr[] = "<";
+        static u8 rarr[] = ">";
+        static u8 hint[] = "A select    B cancel";
+        const char* fn = design_fs_filename(d->sd_sel);
+        int n = design_fs_count();
+        int len = 0;
+        f32 fx;
+
+        while (fn[len] != '\0' && len < 24) {
+            len++;
+        }
+        (*submenu->overlay->set_char_matrix_proc)(game->graph);
+        fx = 160.0f - mFont_GetStringWidth((u8*)fn, len, TRUE) * 0.5f;
+        mFont_SetLineStrings(game, (u8*)fn, len, fx, 10.0f, 255, 245, 180, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_POLY);
+        if (n > 1) {
+            mFont_SetLineStrings(game, larr, 1, 24.0f, 110.0f, 255, 255, 255, 255, FALSE, TRUE, 1.6f, 1.6f,
+                                 mFont_MODE_POLY);
+            mFont_SetLineStrings(game, rarr, 1, 288.0f, 110.0f, 255, 255, 255, 255, FALSE, TRUE, 1.6f, 1.6f,
+                                 mFont_MODE_POLY);
+        }
+        fx = 160.0f - mFont_GetStringWidth(hint, sizeof(hint) - 1, TRUE) * 0.5f * 0.9f;
+        mFont_SetLineStrings(game, hint, sizeof(hint) - 1, fx, 205.0f, 200, 210, 210, 255, FALSE, TRUE, 0.9f, 0.9f,
+                             mFont_MODE_POLY);
+    }
+
+    if (d->sd_msg_timer > 0) {
+        u8* m = msg_saved;
+        int len = sizeof(msg_saved) - 1;
+        switch (d->sd_msg) {
+            case mDE_SD_MSG_SAVE_FAIL: m = msg_savefail; len = sizeof(msg_savefail) - 1; break;
+            case mDE_SD_MSG_NO_FILES: m = msg_nofiles; len = sizeof(msg_nofiles) - 1; break;
+            case mDE_SD_MSG_IMPORT_FAIL: m = msg_impfail; len = sizeof(msg_impfail) - 1; break;
+            default: break;
+        }
+        (*submenu->overlay->set_char_matrix_proc)(game->graph);
+        mFont_SetLineStrings(game, m, len, 108.0f, 60.0f, 255, 230, 120, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_POLY);
+    }
+}
+#endif // PC_DESIGN_IMPORT
+
 void mDE_move_Play(Submenu* submenu, mSM_MenuInfo_c* info) {
     u32 trigger = submenu->overlay->menu_control.trigger;
     mDE_Ovl_c* design_ovl = submenu->overlay->design_ovl;
     if (submenu->current_menu_type == mSM_OVL_DESIGN) {
+#ifdef PC_DESIGN_IMPORT
+        if (design_ovl->sd_msg_timer > 0) {
+            design_ovl->sd_msg_timer--;
+        }
+        if (design_ovl->sd_state == mDE_SD_MENU) {
+            mDE_sd_menu_input(submenu, info, design_ovl);
+            return;
+        }
+        if (design_ovl->sd_state == mDE_SD_IMPORT) {
+            mDE_sd_import_input(submenu, design_ovl);
+            return;
+        }
+        if ((trigger & BUTTON_START) && !(Save_Get(scene_no) == SCENE_START_DEMO3 || GETREG(NMREG, 0x5f))) {
+            design_ovl->sd_state = mDE_SD_MENU;
+            design_ovl->sd_sel = 0;
+            sAdo_SysTrgStart(NA_SE_MENU_EXIT);
+            return;
+        }
+#endif
         if (trigger & BUTTON_START) {
             design_ovl->_698 = 0;
             design_ovl->_680 = 0;
@@ -2155,6 +2436,12 @@ void mDE_move_Wait(Submenu* submenu, mSM_MenuInfo_c* info) {
                     mNW_original_design_c* my_design = &Now_Private->my_org[design_ovl->image_no & 7];
                     my_design->palette = design_ovl->palette_no;
                     mNW_OverWriteOriginalTexture(my_design, design_ovl->texture.data);
+#ifdef PC_DESIGN_IMPORT
+                    if (design_ovl->sd_imported) {
+                        mNW_OverWriteOriginalName(my_design, design_ovl->sd_name);
+                        design_ovl->sd_imported = 0;
+                    }
+#endif
                 }
                 submenu->item_p->slot_no = 1;
             } break;
@@ -2612,6 +2899,27 @@ void mDE_set_frame_main_dl(Submenu* submenu, GAME* game, mSM_MenuInfo_c* menu) {
     CLOSE_POLY_OPA_DISP(graph);
 }
 
+#ifdef PC_DESIGN_IMPORT
+// import-preview view: wood frame + border + the design canvas only
+// (no mode tabs, colour palette, tools, grid, or cursor)
+static void mDE_sd_preview_dl(Submenu* submenu, GAME* game, mSM_MenuInfo_c* menu) {
+    GRAPH* graph = game->graph;
+    mDE_Ovl_c* design_ovl = submenu->overlay->design_ovl;
+    Matrix_scale(16.f, 16.f, 1.f, MTX_LOAD);
+    Matrix_translate(menu->position[0], menu->position[1], 140.f, MTX_MULT);
+    OPEN_POLY_OPA_DISP(graph);
+    gSPMatrix(POLY_OPA_DISP++, _Matrix_to_Mtx_new(graph), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(POLY_OPA_DISP++, des_win_before_model);
+    gDPSetTextureFilter(POLY_OPA_DISP++, G_TF_POINT);
+    gDPLoadTLUT_Dolphin(POLY_OPA_DISP++, 15, 16, 1, design_ovl->palette_p);
+    gDPLoadTextureBlock_4b_Dolphin(POLY_OPA_DISP++, design_ovl->texture.data, G_IM_FMT_CI, 32, 32, 15, GX_MIRROR,
+                                   GX_MIRROR, 0, 0);
+    gSPDisplayList(POLY_OPA_DISP++, des_win_toubai_model);
+    gSPDisplayList(POLY_OPA_DISP++, des_win_main_model);
+    CLOSE_POLY_OPA_DISP(graph);
+}
+#endif
+
 void mDE_set_frame_dl(Submenu* submenu, GAME* game, mSM_MenuInfo_c* menu) {
     mDE_set_frame_main_dl(submenu, game, menu);
     mDE_set_frame_tool_dl(submenu, game, menu);
@@ -2622,7 +2930,17 @@ void mDE_set_frame_dl(Submenu* submenu, GAME* game, mSM_MenuInfo_c* menu) {
 void mDE_design_ovl_draw(Submenu* submenu, GAME* game) {
     mSM_MenuInfo_c* menu = &submenu->overlay->menu_info[mSM_OVL_DESIGN];
     menu->pre_draw_func(submenu, game);
+#ifdef PC_DESIGN_IMPORT
+    if (submenu->overlay->design_ovl->sd_state == mDE_SD_IMPORT) {
+        mDE_sd_preview_dl(submenu, game, menu);
+        mDE_sd_draw(submenu, game);
+        return;
+    }
+#endif
     mDE_set_frame_dl(submenu, game, menu);
+#ifdef PC_DESIGN_IMPORT
+    mDE_sd_draw(submenu, game);
+#endif
 }
 
 void mDE_design_ovl_set_proc(Submenu* submenu) {

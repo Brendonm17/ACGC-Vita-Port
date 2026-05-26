@@ -302,6 +302,12 @@ static void aNNW_change_camera_return_demo(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLA
     }
 }
 
+#ifdef PC_DESIGN_IMPORT
+// TRUE while Mabel's main 6-way menu is up; the message select-window populate and
+// mChoice_Get_ChoseNum read it to hide the dead "Other things" option and remap the index.
+int g_mNW_hide_other = 0;
+#endif
+
 static void aNNW_set_6_ways(NPC_NEEDLEWORK_ACTOR* actor, mMsg_Window_c* msg_p, int chose_num) {
     switch (chose_num) {
         case mChoice_CHOICE0:
@@ -1306,6 +1312,9 @@ static void aNNW_talk_gba_over_save(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLAY* play
 }
 
 static int aNNW_change_talk_proc(NPC_NEEDLEWORK_ACTOR* actor, u8 talk_idx) {
+#ifdef PC_DESIGN_IMPORT
+    g_mNW_hide_other = (talk_idx == aNNW_TALK_WHAT_HAPPEN || talk_idx == aNNW_TALK_WHAT_HAPPEN_FIRST);
+#endif
     actor->talk_idx = talk_idx;
     actor->gba_wait_frames = 0;
     return TRUE;
@@ -1589,6 +1598,10 @@ static int aNNW_talk_end_chk(ACTOR* actorx, GAME* game) {
 
     ret = FALSE;
     nactorx->movement.mv_add_angl = DEG2SHORT_ANGLE2(11.25f);
+#ifdef PC_DESIGN_IMPORT
+    // re-assert every frame the menu talk is up, not just on entry, so the populate always sees it
+    g_mNW_hide_other = (actor->talk_idx == aNNW_TALK_WHAT_HAPPEN || actor->talk_idx == aNNW_TALK_WHAT_HAPPEN_FIRST);
+#endif
     (*proc[actor->talk_idx])(actor, play);
 
     if (mDemo_CAN_ACTOR_TALK(actorx)) {

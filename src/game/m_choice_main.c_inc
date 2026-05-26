@@ -171,6 +171,14 @@ static void mChoice_Set_DisplayScaleAndDisplayPos(mChoice_c* choice) {
 }
 
 extern int mChoice_Get_ChoseNum(mChoice_c* choice) {
+#ifdef PC_DESIGN_IMPORT
+    // Mabel's menu drops ROM option 4 ("Other things") from display, so displayed slot 4
+    // is really ROM option 5 ("Nothing"). Remap so the message branch and NPC router agree.
+    extern int g_mNW_hide_other;
+    if (g_mNW_hide_other && choice->data.selected_choice_idx >= 4) {
+        return choice->data.selected_choice_idx + 1;
+    }
+#endif
     return choice->data.selected_choice_idx;
 }
 

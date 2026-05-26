@@ -276,6 +276,17 @@ static int mMsg_Main_Cursol_SetSelectString_ControlCursol(mMsg_Window_c* msg_p, 
     id_tbl[5] = id;
   }
 
+#ifdef PC_DESIGN_IMPORT
+  {
+    extern int g_mNW_hide_other;
+    // Mabel's main menu: drop the dead "Other things" (5th of 6); "Nothing" slides to slot 4.
+    if (g_mNW_hide_other && select_count == 6) {
+      id_tbl[4] = id_tbl[5];
+      select_count = 5;
+    }
+  }
+#endif
+
   if (select_count >= 2 && select_count <= mChoice_CHOICE_NUM) {
     static u8 str[mChoice_CHOICE_NUM][mChoice_CHOICE_STRING_LEN];
     int i;

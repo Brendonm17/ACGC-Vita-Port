@@ -1,0 +1,385 @@
+// vita_design_convert.c
+// RGBA <-> Animal Crossing CI4 design conversion (pure, no platform deps)
+
+#include "vita_design_convert.h"
+
+#include <string.h>
+#include <limits.h>
+
+// 16 fixed AC palettes, RGB888 (from m_needlework.c's ARGB8 literals, alpha dropped).
+// index 0 is the shared gray.
+const uint8_t vdc_palette_rgb[VDC_PALETTE_COUNT][VDC_PALETTE_COLORS][3] = {
+    { {0x52,0x52,0x52},{0xCE,0x4A,0x4A},{0xDE,0x84,0x42},{0xE7,0xAD,0x18},{0xE7,0xC6,0x21},{0xD6,0xDE,0x18},{0xB5,0xE7,0x18},{0x84,0xD6,0x52},{0x39,0xC6,0x6B},{0x29,0xAD,0xC6},{0x42,0x7B,0xEF},{0x6B,0x4A,0xE7},{0x94,0x5A,0xCE},{0xBD,0x42,0xB5},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0xFF,0x8C,0x8C},{0xFF,0xCE,0x84},{0xFF,0xE7,0x5A},{0xFF,0xF7,0x63},{0xFF,0xFF,0x84},{0xDE,0xFF,0x52},{0xB5,0xFF,0x84},{0x7B,0xF7,0xAD},{0x63,0xE7,0xF7},{0x84,0xC6,0xFF},{0xA5,0x9C,0xFF},{0xD6,0x9C,0xFF},{0xFF,0x9C,0xF7},{0x8C,0x8C,0x8C},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x9C,0x18,0x18},{0xAD,0x52,0x08},{0xB5,0x7B,0x00},{0xB5,0x94,0x00},{0xA5,0xAD,0x00},{0x84,0xB5,0x00},{0x52,0xA5,0x31},{0x08,0x94,0x39},{0x00,0x7B,0x94},{0x10,0x4A,0xBD},{0x39,0x18,0xAD},{0x5A,0x29,0x94},{0x8C,0x08,0x7B},{0x08,0x08,0x08},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x42,0x94,0x5A},{0x73,0xC6,0x8C},{0x94,0xE7,0xAD},{0x00,0x8C,0x7B},{0x5A,0xB5,0xAD},{0x84,0xC6,0xC6},{0x21,0x73,0xA5},{0x4A,0x9C,0xCE},{0x6B,0xAD,0xDE},{0x73,0x84,0xBD},{0x6B,0x73,0xAD},{0x52,0x52,0x94},{0x39,0x39,0x7B},{0x18,0x18,0x63},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x9C,0x84,0x52},{0xBD,0x94,0x5A},{0xD6,0xBD,0x84},{0x9C,0x52,0x52},{0xCE,0x73,0x63},{0xEF,0x9C,0x8C},{0x8C,0x63,0x84},{0xA5,0x84,0xB5},{0xDE,0xB5,0xDE},{0xBD,0x84,0x84},{0xAD,0x73,0x6B},{0x94,0x52,0x52},{0x7B,0x39,0x39},{0x63,0x18,0x10},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0xEF,0x5A,0x00},{0xFF,0x9C,0x42},{0xFF,0xCE,0x84},{0xFF,0xEF,0xA5},{0x8C,0x4A,0x29},{0xB5,0x7B,0x5A},{0xE7,0xAD,0x8C},{0xFF,0xDE,0xBD},{0x31,0x8C,0xFF},{0x63,0xB5,0xFF},{0x9C,0xDE,0xFF},{0xC6,0xE7,0xFF},{0x6B,0x6B,0x6B},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x39,0xB5,0x42},{0x63,0xDE,0x5A},{0x8C,0xEF,0x84},{0xB5,0xFF,0xAD},{0x21,0x21,0xC6},{0x52,0x52,0xF7},{0x84,0x84,0xFF},{0xB5,0xB5,0xFF},{0xCE,0x39,0x39},{0xDE,0x6B,0x6B},{0xE7,0x8C,0x9C},{0xEF,0xBD,0xBD},{0x6B,0x6B,0x6B},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x08,0x21,0x00},{0x42,0x5A,0x39},{0x6B,0x84,0x63},{0x9C,0xB5,0x94},{0x5A,0x29,0x00},{0x7B,0x4A,0x21},{0xA5,0x73,0x4A},{0xD6,0xA5,0x7B},{0x94,0x7B,0x00},{0xB5,0x94,0x39},{0xCE,0xB5,0x6B},{0xDE,0xD6,0x9C},{0x6B,0x6B,0x6B},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x21,0x21,0xFF},{0xFF,0x21,0x21},{0xD6,0xD6,0x00},{0x63,0x63,0xFF},{0xFF,0x63,0x63},{0xD6,0xD6,0x63},{0x94,0x94,0xFF},{0xFF,0x94,0x94},{0xD6,0xD6,0x94},{0xAD,0xAD,0xFF},{0xFF,0xAD,0xAD},{0xE7,0xE7,0xAD},{0x6B,0x6B,0x6B},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0x21,0xA5,0x21},{0x39,0xAD,0xFF},{0x9C,0x52,0xEF},{0x52,0xBD,0x52},{0x5A,0xC6,0xFF},{0xB5,0x9C,0xFF},{0x6B,0xD6,0x73},{0x8C,0xE7,0xFF},{0xCE,0xB5,0xFF},{0x94,0xDE,0xAD},{0xBD,0xF7,0xFF},{0xD6,0xCE,0xFF},{0x6B,0x6B,0x6B},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0xD6,0x00,0x00},{0xFF,0xBD,0x00},{0xEF,0xF7,0x31},{0x4A,0xCE,0x42},{0x29,0x9C,0x29},{0x52,0x8C,0xBD},{0x42,0x4A,0xAD},{0x94,0x52,0xD6},{0xF7,0x7B,0xDE},{0xA5,0x94,0x39},{0x9C,0x42,0x42},{0x5A,0x31,0x39},{0x6B,0x6B,0x6B},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+    { {0x52,0x52,0x52},{0xE7,0xCE,0x18},{0x21,0xC6,0x18},{0xFF,0x6B,0x00},{0x00,0x00,0xFF},{0x94,0x00,0xBD},{0xE7,0xCE,0x18},{0x00,0xA5,0x00},{0xCE,0x42,0x00},{0x00,0x00,0xD6},{0x5A,0x00,0x8C},{0x9C,0x8C,0x18},{0x00,0x84,0x00},{0xA5,0x21,0x00},{0x00,0x00,0xA5},{0x4A,0x00,0x5A} },
+    { {0x52,0x52,0x52},{0xFF,0x21,0x21},{0xE7,0xD6,0x00},{0xF7,0x39,0xBD},{0x00,0xD6,0x9C},{0x10,0x73,0x10},{0xC6,0x21,0x21},{0xBD,0xA5,0x00},{0xCE,0x39,0x94},{0x00,0x9C,0x6B},{0x21,0x4A,0x21},{0x8C,0x21,0x21},{0x84,0x6B,0x00},{0x94,0x18,0x63},{0x00,0x73,0x4A},{0x18,0x39,0x18} },
+    { {0x52,0x52,0x52},{0xEF,0xD6,0xD6},{0xDE,0xC6,0xC6},{0xCE,0xB5,0xB5},{0xBD,0xA5,0xA5},{0xAD,0x94,0x94},{0x9C,0x84,0x84},{0x8C,0x73,0x73},{0x7B,0x63,0x63},{0x6B,0x52,0x52},{0x5A,0x42,0x42},{0x4A,0x31,0x31},{0x39,0x21,0x21},{0x29,0x10,0x10},{0x18,0x00,0x00},{0x10,0x00,0x00} },
+    { {0x52,0x52,0x52},{0xEF,0xEF,0xEF},{0xDE,0xDE,0xDE},{0xCE,0xCE,0xCE},{0xBD,0xBD,0xBD},{0xAD,0xAD,0xAD},{0x9C,0x9C,0x9C},{0x8C,0x8C,0x8C},{0x7B,0x7B,0x7B},{0x6B,0x6B,0x6B},{0x5A,0x5A,0x5A},{0x4A,0x4A,0x4A},{0x39,0x39,0x39},{0x29,0x29,0x29},{0x18,0x18,0x18},{0x10,0x10,0x10} },
+    { {0x52,0x52,0x52},{0xEF,0x7B,0x7B},{0xD6,0x18,0x18},{0xF7,0x94,0x18},{0xE7,0xE7,0x52},{0x00,0x6B,0x00},{0x39,0xB5,0x39},{0x00,0x39,0xB5},{0x39,0x9C,0xFF},{0x94,0x00,0x94},{0xFF,0x6B,0xFF},{0x94,0x42,0x08},{0xEF,0x9C,0x5A},{0xFF,0xC6,0x94},{0x00,0x00,0x00},{0xFF,0xFF,0xFF} },
+};
+
+int vdc_pos_to_byte(int x, int y) {
+    return (((x & 7) + (y & 7) * 8 + (((x & 0x18) >> 3) + ((y & 0x18) >> 3) * 4) * 0x40) >> 1);
+}
+
+uint8_t vdc_get_index(const uint8_t* tex, int x, int y) {
+    int b = vdc_pos_to_byte(x, y);
+    return (x & 1) ? (tex[b] & 0x0F) : ((tex[b] >> 4) & 0x0F);
+}
+
+void vdc_set_index(uint8_t* tex, int x, int y, uint8_t idx) {
+    int b = vdc_pos_to_byte(x, y);
+    if (x & 1) {
+        tex[b] = (tex[b] & 0xF0) | (idx & 0x0F);
+    } else {
+        tex[b] = (tex[b] & 0x0F) | ((idx & 0x0F) << 4);
+    }
+}
+
+// luma-weighted squared distance, keeps exact matches at zero
+static long color_dist(const int* c, const uint8_t* p) {
+    long dr = c[0] - p[0];
+    long dg = c[1] - p[1];
+    long db = c[2] - p[2];
+    return dr * dr * 3 + dg * dg * 6 + db * db * 1;
+}
+
+static int nearest_idx(const int* c, const uint8_t pal[VDC_PALETTE_COLORS][3], long* out_d) {
+    int best = 0;
+    long bd = color_dist(c, pal[0]);
+    for (int i = 1; i < VDC_PALETTE_COLORS; i++) {
+        long d = color_dist(c, pal[i]);
+        if (d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    if (out_d) {
+        *out_d = bd;
+    }
+    return best;
+}
+
+// box-resample any size to 32x32, flattening alpha over white
+static void resample_to_32(const uint8_t* rgba, int w, int h, int rgb[VDC_DESIGN_H][VDC_DESIGN_W][3]) {
+    for (int dy = 0; dy < VDC_DESIGN_H; dy++) {
+        int sy0 = (dy * h) / VDC_DESIGN_H;
+        int sy1 = ((dy + 1) * h) / VDC_DESIGN_H;
+        if (sy1 <= sy0) {
+            sy1 = sy0 + 1;
+        }
+        if (sy1 > h) {
+            sy1 = h;
+        }
+        for (int dx = 0; dx < VDC_DESIGN_W; dx++) {
+            int sx0 = (dx * w) / VDC_DESIGN_W;
+            int sx1 = ((dx + 1) * w) / VDC_DESIGN_W;
+            if (sx1 <= sx0) {
+                sx1 = sx0 + 1;
+            }
+            if (sx1 > w) {
+                sx1 = w;
+            }
+            long sr = 0, sg = 0, sb = 0, n = 0;
+            for (int sy = sy0; sy < sy1; sy++) {
+                for (int sx = sx0; sx < sx1; sx++) {
+                    const uint8_t* px = rgba + ((long)sy * w + sx) * 4;
+                    int a = px[3];
+                    sr += (px[0] * a + 255 * (255 - a)) / 255;
+                    sg += (px[1] * a + 255 * (255 - a)) / 255;
+                    sb += (px[2] * a + 255 * (255 - a)) / 255;
+                    n++;
+                }
+            }
+            if (n == 0) {
+                n = 1;
+            }
+            rgb[dy][dx][0] = (int)(sr / n);
+            rgb[dy][dx][1] = (int)(sg / n);
+            rgb[dy][dx][2] = (int)(sb / n);
+        }
+    }
+}
+
+static int clamp255(int v) {
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 255) {
+        return 255;
+    }
+    return v;
+}
+
+int vdc_rgba_to_design(const uint8_t* rgba, int w, int h, int dither, vdc_design_t* out, long* out_score) {
+    if (!rgba || w <= 0 || h <= 0 || !out) {
+        return -1;
+    }
+
+    int rgb[VDC_DESIGN_H][VDC_DESIGN_W][3];
+    resample_to_32(rgba, w, h, rgb);
+
+    // pick the palette with the lowest total nearest-color error
+    int best_pal = 0;
+    long best_err = LONG_MAX;
+    for (int p = 0; p < VDC_PALETTE_COUNT; p++) {
+        long err = 0;
+        for (int y = 0; y < VDC_DESIGN_H; y++) {
+            for (int x = 0; x < VDC_DESIGN_W; x++) {
+                long d;
+                nearest_idx(rgb[y][x], vdc_palette_rgb[p], &d);
+                err += d;
+            }
+        }
+        if (err < best_err) {
+            best_err = err;
+            best_pal = p;
+        }
+    }
+
+    memset(out->tex, 0, VDC_TEX_BYTES);
+    out->palette = (uint8_t)best_pal;
+
+    if (!dither) {
+        for (int y = 0; y < VDC_DESIGN_H; y++) {
+            for (int x = 0; x < VDC_DESIGN_W; x++) {
+                int idx = nearest_idx(rgb[y][x], vdc_palette_rgb[best_pal], NULL);
+                vdc_set_index(out->tex, x, y, (uint8_t)idx);
+            }
+        }
+    } else {
+        // Floyd-Steinberg over a mutable working buffer
+        for (int y = 0; y < VDC_DESIGN_H; y++) {
+            for (int x = 0; x < VDC_DESIGN_W; x++) {
+                int c[3] = { clamp255(rgb[y][x][0]), clamp255(rgb[y][x][1]), clamp255(rgb[y][x][2]) };
+                int idx = nearest_idx(c, vdc_palette_rgb[best_pal], NULL);
+                vdc_set_index(out->tex, x, y, (uint8_t)idx);
+                const uint8_t* pc = vdc_palette_rgb[best_pal][idx];
+                int er = c[0] - pc[0];
+                int eg = c[1] - pc[1];
+                int eb = c[2] - pc[2];
+                // right 7/16, below-left 3/16, below 5/16, below-right 1/16
+                if (x + 1 < VDC_DESIGN_W) {
+                    rgb[y][x + 1][0] += er * 7 / 16;
+                    rgb[y][x + 1][1] += eg * 7 / 16;
+                    rgb[y][x + 1][2] += eb * 7 / 16;
+                }
+                if (y + 1 < VDC_DESIGN_H) {
+                    if (x > 0) {
+                        rgb[y + 1][x - 1][0] += er * 3 / 16;
+                        rgb[y + 1][x - 1][1] += eg * 3 / 16;
+                        rgb[y + 1][x - 1][2] += eb * 3 / 16;
+                    }
+                    rgb[y + 1][x][0] += er * 5 / 16;
+                    rgb[y + 1][x][1] += eg * 5 / 16;
+                    rgb[y + 1][x][2] += eb * 5 / 16;
+                    if (x + 1 < VDC_DESIGN_W) {
+                        rgb[y + 1][x + 1][0] += er * 1 / 16;
+                        rgb[y + 1][x + 1][1] += eg * 1 / 16;
+                        rgb[y + 1][x + 1][2] += eb * 1 / 16;
+                    }
+                }
+            }
+        }
+    }
+
+    if (out_score) {
+        *out_score = best_err / (VDC_DESIGN_W * VDC_DESIGN_H);
+    }
+    return 0;
+}
+
+void vdc_design_to_rgba(const uint8_t* tex, int palette, uint8_t* out_rgba) {
+    if (!tex || !out_rgba) {
+        return;
+    }
+    palette &= 15;
+    for (int y = 0; y < VDC_DESIGN_H; y++) {
+        for (int x = 0; x < VDC_DESIGN_W; x++) {
+            uint8_t idx = vdc_get_index(tex, x, y);
+            const uint8_t* c = vdc_palette_rgb[palette][idx];
+            uint8_t* o = out_rgba + ((long)y * VDC_DESIGN_W + x) * 4;
+            o[0] = c[0];
+            o[1] = c[1];
+            o[2] = c[2];
+            o[3] = 0xFF;
+        }
+    }
+}
+
+void vdc_sanitize_name(const char* filename, char* out, int out_size) {
+    if (!out || out_size <= 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!filename) {
+        return;
+    }
+
+    // drop directory
+    const char* base = filename;
+    for (const char* p = filename; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            base = p + 1;
+        }
+    }
+    // drop last extension
+    int len = 0;
+    while (base[len]) {
+        len++;
+    }
+    int stem = len;
+    for (int i = len - 1; i > 0; i--) {
+        if (base[i] == '.') {
+            stem = i;
+            break;
+        }
+    }
+
+    int o = 0;
+    int prev_space = 1; // trims leading spaces
+    for (int i = 0; i < stem && o < out_size - 1; i++) {
+        unsigned char c = (unsigned char)base[i];
+        if (c == '_' || c == '-' || c == ' ') {
+            if (prev_space) {
+                continue;
+            }
+            out[o++] = ' ';
+            prev_space = 1;
+        } else if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            out[o++] = (char)c;
+            prev_space = 0;
+        }
+        // anything else is dropped
+    }
+    while (o > 0 && out[o - 1] == ' ') {
+        o--; // trim trailing space
+    }
+    out[o] = '\0';
+    if (o == 0) {
+        // fall back to a stable default rather than an empty name
+        const char* d = "design";
+        int i = 0;
+        for (; d[i] && i < out_size - 1; i++) {
+            out[i] = d[i];
+        }
+        out[i] = '\0';
+    }
+}
+
+#define VDC_PNG_RAW_MAX 8192
+
+static uint32_t vdc_crc_update(uint32_t crc, const uint8_t* p, int n) {
+    for (int i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++) {
+            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+        }
+    }
+    return crc;
+}
+
+typedef struct {
+    uint8_t* p;
+    int cap;
+    int len;
+    int ok;
+} vdc_buf_t;
+
+static void vdc_put(vdc_buf_t* b, const uint8_t* src, int n) {
+    if (!b->ok || b->len + n > b->cap) {
+        b->ok = 0;
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        b->p[b->len++] = src[i];
+    }
+}
+
+static void vdc_put_u32be(vdc_buf_t* b, uint32_t v) {
+    uint8_t t[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v };
+    vdc_put(b, t, 4);
+}
+
+static void vdc_put_chunk(vdc_buf_t* b, const char* type, const uint8_t* data, int dl) {
+    uint8_t ty[4] = { (uint8_t)type[0], (uint8_t)type[1], (uint8_t)type[2], (uint8_t)type[3] };
+    vdc_put_u32be(b, (uint32_t)dl);
+    vdc_put(b, ty, 4);
+    vdc_put(b, data, dl);
+    uint32_t crc = 0xFFFFFFFFu;
+    crc = vdc_crc_update(crc, ty, 4);
+    crc = vdc_crc_update(crc, data, dl);
+    vdc_put_u32be(b, crc ^ 0xFFFFFFFFu);
+}
+
+int vdc_encode_png(const uint8_t* rgba, int w, int h, uint8_t* out, int out_cap) {
+    if (!rgba || !out || w <= 0 || h <= 0) {
+        return 0;
+    }
+    int raw_len = h * (1 + w * 4);
+    if (raw_len > VDC_PNG_RAW_MAX) {
+        return 0;
+    }
+
+    // filtered scanlines (filter byte 0 per row)
+    uint8_t raw[VDC_PNG_RAW_MAX];
+    int ri = 0;
+    for (int y = 0; y < h; y++) {
+        raw[ri++] = 0;
+        for (int x = 0; x < w * 4; x++) {
+            raw[ri++] = rgba[(long)y * w * 4 + x];
+        }
+    }
+
+    // zlib stream: stored deflate blocks + adler32
+    uint8_t zb[VDC_PNG_RAW_MAX + 128];
+    vdc_buf_t z = { zb, (int)sizeof(zb), 0, 1 };
+    uint8_t zhdr[2] = { 0x78, 0x01 };
+    vdc_put(&z, zhdr, 2);
+    int off = 0;
+    while (off < raw_len) {
+        int block = raw_len - off;
+        if (block > 65535) {
+            block = 65535;
+        }
+        uint8_t bfinal = (uint8_t)((off + block >= raw_len) ? 1 : 0);
+        uint8_t lh[5] = { bfinal, (uint8_t)(block & 0xFF), (uint8_t)(block >> 8),
+                          (uint8_t)(~block & 0xFF), (uint8_t)((~block >> 8) & 0xFF) };
+        vdc_put(&z, lh, 5);
+        vdc_put(&z, raw + off, block);
+        off += block;
+    }
+    uint32_t a = 1, s = 0;
+    for (int i = 0; i < raw_len; i++) {
+        a = (a + raw[i]) % 65521;
+        s = (s + a) % 65521;
+    }
+    vdc_put_u32be(&z, (s << 16) | a);
+    if (!z.ok) {
+        return 0;
+    }
+
+    vdc_buf_t b = { out, out_cap, 0, 1 };
+    static const uint8_t sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    vdc_put(&b, sig, 8);
+
+    uint8_t ihdr[13] = {
+        (uint8_t)(w >> 24), (uint8_t)(w >> 16), (uint8_t)(w >> 8), (uint8_t)w,
+        (uint8_t)(h >> 24), (uint8_t)(h >> 16), (uint8_t)(h >> 8), (uint8_t)h,
+        8, 6, 0, 0, 0
+    };
+    vdc_put_chunk(&b, "IHDR", ihdr, 13);
+    vdc_put_chunk(&b, "IDAT", zb, z.len);
+    vdc_put_chunk(&b, "IEND", NULL, 0);
+
+    return b.ok ? b.len : 0;
+}

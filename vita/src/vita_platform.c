@@ -264,6 +264,9 @@ void vita_init(void) {
         if (mk_ret4 < 0 && mk_ret4 != VITA_EEXIST)
             printf("[VITA] WARNING: banners dir failed: 0x%08X\n", mk_ret4);
     }
+#ifdef PC_DESIGN_IMPORT
+    sceIoMkdir("ux0:data/AnimalCrossing/designs", 0777);
+#endif
     // clean up old texture_pack dir (renamed to texture_packs)
     sceIoRmdir("ux0:data/AnimalCrossing/texture_pack");
     {

@@ -44,6 +44,7 @@ add_compile_definitions(
     HAVE_GLSL
     SKIP_ERROR_CAPTURE
     NO_TEX_COMBINER
+    PC_DESIGN_IMPORT
     # uncomment for measurement builds.
     #VITA_PERF_LOG
     #VITA_DEBUG
@@ -175,6 +176,8 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_texpack.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_fixnes.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_picker.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_design_convert.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_design_fs.c
 
     ${DECOMP_ROOT}/pc/src/pc_gx.c
     ${DECOMP_ROOT}/pc/src/pc_gx_tev.c
