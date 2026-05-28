@@ -63,10 +63,10 @@ static VtcIndexEntry* g_vtc_index = NULL;
 static int g_vtc_count = 0;
 static int g_vtc_active = 0;
 
-// HD textures live in main memory (not CDRAM) under a 32MB LRU budget.
+// HD textures live in main memory (not CDRAM) under a 48MB LRU budget.
 #define VTC_LOADED_CACHE_SIZE 8192
 #define VTC_LOADED_CACHE_MASK (VTC_LOADED_CACHE_SIZE - 1)
-#define VTC_VRAM_BUDGET (32 * 1024 * 1024)
+#define VTC_VRAM_BUDGET (48 * 1024 * 1024)
 
 typedef struct {
     unsigned long long key;

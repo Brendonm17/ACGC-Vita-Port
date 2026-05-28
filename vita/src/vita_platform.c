@@ -24,8 +24,9 @@
 // vita SDK "directory already exists"
 #define VITA_EEXIST ((int)0x80010011)
 
-// 120MB heap, 4MB stack (1MB caused corruption)
-__attribute__((used)) unsigned int _newlib_heap_size_user = 120 * 1024 * 1024;
+// 104MB heap, 4MB stack (1MB caused corruption). kept low so the HD texture
+// cache (VTC_VRAM_BUDGET) shares the main-RAM ceiling without overcommitting.
+__attribute__((used)) unsigned int _newlib_heap_size_user = 104 * 1024 * 1024;
 __attribute__((used)) unsigned int sceUserMainThreadStackSize = 4 * 1024 * 1024;
 
 SDL_Window*   g_pc_window = NULL;     // unused on vita

@@ -847,8 +847,11 @@ void pc_gx_texture_process_deferred_uploads(void) {
 
         unsigned int _drain_t0 = sceKernelGetProcessTimeLow();
         int slot_uploads_this_frame = 0;
-        // drain all ready slots per frame, ~25 us each so worst case ~0.6 ms
-        for (int si = 0; si < 24; si++) {
+        // drain up to 24 ready slots/frame (~0.6ms cap) but rotate across all
+        // 64 IO slots (VTC_IO_SLOTS) so reads in the upper slots aren't skipped.
+        static int drain_start = 0;
+        for (int k = 0; k < 24; k++) {
+            int si = (drain_start + k) % 64;
             unsigned char* dxt_data = NULL;
             int dxt_size = 0, hd_w = 0, hd_h = 0, gl_fmt = 0;
             if (!vita_vtc_check_ready(si, &dxt_data, &dxt_size, &hd_w, &hd_h, &gl_fmt))
@@ -900,6 +903,7 @@ void pc_gx_texture_process_deferred_uploads(void) {
             _drain_kb = dxt_size / 1024;
             slot_uploads_this_frame++;
         }
+        drain_start = (drain_start + 24) % 64;
         _section_drain_us = sceKernelGetProcessTimeLow() - _drain_t0;
     }
 
