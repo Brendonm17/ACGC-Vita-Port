@@ -46,7 +46,8 @@
 #include <direct.h>  /* _mkdir */
 #endif
 #ifdef TARGET_VITA
-#include <psp2/io/stat.h>  /* sceIoMkdir */
+#include <psp2/io/stat.h>   /* sceIoMkdir */
+#include <psp2/io/fcntl.h>  /* sceIoSync */
 #endif
 #include <dolphin/os.h>  /* OSReport */
 
@@ -279,6 +280,15 @@ static void pc_save_rotate_backups(const char* base_path) {
     }
 }
 
+// vita holds closed-file writes and rename metadata in a ux0 write-back
+// cache, so a save that reported success is lost if the user powers off
+// before the os flushes. force the flush so a committed save is durable.
+static void pc_save_fs_sync(void) {
+#ifdef TARGET_VITA
+    sceIoSync("ux0:", 0);
+#endif
+}
+
 static void pc_ensure_save_dirs(void) {
 #ifdef TARGET_VITA
     sceIoMkdir("ux0:data/AnimalCrossing", 0777);
@@ -456,6 +466,7 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
         return FALSE;
     }
 
+    pc_save_fs_sync();
     OSReport("[PC] GCI save: written successfully to %s (backups rotated)\n", gci_path);
     pc_save_loaded = 1;
     return TRUE;
@@ -863,6 +874,7 @@ int pc_save_delete_current_town(void) {
             removed++;
         }
     }
+    pc_save_fs_sync();
     pc_save_loaded = 0;
     pc_save_ready = 0;
     return removed;

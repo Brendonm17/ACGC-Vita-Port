@@ -14,7 +14,7 @@ static void aBC_actor_move(ACTOR*, GAME*);
 
 #ifdef TARGET_VITA
 static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 bx, s8 bz);
-static int aBC_struct_exists_anywhere(GAME_PLAY* play, mActor_name_t item_id);
+static int aBC_struct_exists_at(GAME_PLAY* play, mActor_name_t item_id, f32 x, f32 z);
 static int aBC_setupActor_impl(GAME_PLAY* play, int mask);
 
 #define aBC_MASK_ITEMS   0x1
@@ -214,7 +214,9 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
               clear_item = RSV_NO;
             }
             idx = *item_p - ACTOR_PROP_START;
-            if (aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
+            // dedup only for free_cam prespawn reruns; off this path = upstream.
+            if (g_pc_settings.free_cam &&
+                aBC_item_exists_in_block(play, *item_p, cur_bx, cur_bz)) {
               break;
             }
             setup_actor_flag |= aBC_setupOtherActor(play, *item_p, props_profile_table[idx], base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z], clear_item);
@@ -223,11 +225,14 @@ static int aBC_setupActor_impl(GAME_PLAY* play, int mask) {
 
         case NAME_TYPE_STRUCT:
           if ((mask & aBC_MASK_STRUCTS) && Common_Get(clip).structure_clip != NULL) {
-            // cross-block dedup: same struct can appear in neighbor acres' data.
-            if (aBC_struct_exists_anywhere(play, *item_p)) {
+            f32 sx = base_x + aBC_pos_table[ut_x];
+            f32 sz = base_z + aBC_pos_table[ut_z];
+            // free_cam prespawn can re-list this struct from a neighbor acre;
+            // dedup by id+pos only then. off this path = upstream (no dedup).
+            if (g_pc_settings.free_cam && aBC_struct_exists_at(play, *item_p, sx, sz)) {
               break;
             }
-            STRUCTURE_ACTOR* actor = (*Common_Get(clip).structure_clip->setup_actor_proc)((GAME*)play, *item_p, -1, base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
+            STRUCTURE_ACTOR* actor = (*Common_Get(clip).structure_clip->setup_actor_proc)((GAME*)play, *item_p, -1, sx, sz);
             setup_actor_flag |= actor == NULL;
           }
           break;
@@ -455,13 +460,18 @@ static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 b
   return FALSE;
 }
 
-// cross-block dedup for structs: acre overlap can list one struct in two acres.
-static int aBC_struct_exists_anywhere(GAME_PLAY* play, mActor_name_t item_id) {
+// dedup free_cam prespawn's acre-overlap copy by id AND position; matching
+// id alone would suppress a distinct same-id structure elsewhere.
+static int aBC_struct_exists_at(GAME_PLAY* play, mActor_name_t item_id, f32 x, f32 z) {
   for (int part = 0; part < ACTOR_PART_NUM; part++) {
     ACTOR* actor = play->actor_info.list[part].actor;
     while (actor != NULL) {
       if (actor->mv_proc != NULL && actor->npc_id == item_id) {
-        return TRUE;
+        f32 dx = actor->world.position.x - x;
+        f32 dz = actor->world.position.z - z;
+        if (dx * dx + dz * dz < 16.0f) {  // same tile (tiles are 40 apart)
+          return TRUE;
+        }
       }
       actor = actor->next_actor;
     }
@@ -523,15 +533,16 @@ static void aBC_prespawn_block(GAME_PLAY* play, s8 bx, s8 bz) {
             base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z], clear, bx, bz);
           break;
         }
-        case NAME_TYPE_STRUCT:
-          // cross-block dedup: same struct in adjacent acres' field data
+        case NAME_TYPE_STRUCT: {
+          f32 sx = base_x + aBC_pos_table[ut_x];
+          f32 sz = base_z + aBC_pos_table[ut_z];
           if (Common_Get(clip).structure_clip != NULL &&
-              !aBC_struct_exists_anywhere(play, item)) {
+              !aBC_struct_exists_at(play, item, sx, sz)) {
             (*Common_Get(clip).structure_clip->setup_actor_proc)(
-              (GAME*)play, item, -1,
-              base_x + aBC_pos_table[ut_x], base_z + aBC_pos_table[ut_z]);
+              (GAME*)play, item, -1, sx, sz);
           }
           break;
+        }
       }
     }
   }
