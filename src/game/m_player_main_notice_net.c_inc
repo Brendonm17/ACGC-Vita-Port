@@ -59,6 +59,9 @@ static void Player_actor_setup_main_Notice_net(ACTOR* actor, GAME* game) {
 
             if (idx != aINS_INSECT_TYPE_SPIRIT) {
                 mSM_COLLECT_INSECT_SET(idx);
+#ifdef VITA_TROPHIES
+                vita_trophy_unlock(TROPHY_NET_GAIN);
+#endif
             }
 
             mark_check = FALSE;

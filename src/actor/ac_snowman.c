@@ -9,6 +9,10 @@
 #include "m_handbill.h"
 #include "m_malloc.h"
 
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 enum {
     aSMAN_PART0,
     aSMAN_PART1,
@@ -1222,6 +1226,9 @@ static void aSMAN_process_combine_head_jump_init(ACTOR* actorx, GAME* game) {
 
     if (actor->result == mSN_RESULT_PERFECT) {
         aSMAN_SendPresentMail();
+#ifdef VITA_TROPHIES
+        vita_trophy_unlock(TROPHY_LET_IT_SNOW);
+#endif
     }
 
     Save_Set(snowman_year, Common_Get(time.rtc_time.year) % 100);

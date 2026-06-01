@@ -1,5 +1,9 @@
 #include "ac_countdown.h"
 
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 #include "m_common_data.h"
 #include "m_name_table.h"
 #include "m_player_lib.h"

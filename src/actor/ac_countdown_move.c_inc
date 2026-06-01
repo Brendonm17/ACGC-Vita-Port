@@ -45,6 +45,9 @@ static void aCOU_wait(COUNT_ACTOR* actor) {
 
         if (time->month == lbRTC_DECEMBER && time->day == 31 && time->hour == 23 && time->min == 59) {
             action = aCOU_ACT_MOVE;
+#ifdef VITA_TROPHIES
+            vita_trophy_unlock(TROPHY_FESTIVAL_SPIRIT);
+#endif
         }
 
         aCOU_setup_action(actor, action);

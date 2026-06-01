@@ -1,5 +1,9 @@
 #include "m_player_lib.h"
 
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 #include "libultra/libultra.h"
 #include "m_play.h"
 #include "m_common_data.h"

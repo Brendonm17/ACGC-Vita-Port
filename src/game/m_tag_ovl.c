@@ -27,6 +27,10 @@
 #include "m_roll_lib.h"
 #include "m_house.h"
 
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 static void mTG_mark_main_CLR(Submenu* submenu, const mSM_MenuInfo_c* menu_info);
 
 enum {
@@ -3823,6 +3827,9 @@ static void mTG_island_check_fruit_plant(mActor_name_t item) {
         case ITM_FOOD_COCONUT:
             mISL_SetNowPlayerAction(mISL_PLAYER_ACTION_PLANT_COCONUT_TREE);
             mISL_SetNowPlayerAction(mISL_PLAYER_ACTION_PLANT_TREE);
+#ifdef VITA_TROPHIES
+            vita_trophy_unlock(TROPHY_GOING_COCONUTS);
+#endif
             break;
     }
 }

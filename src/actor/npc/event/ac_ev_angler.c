@@ -1,4 +1,7 @@
 #include "ac_ev_angler.h"
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
 #include "m_common_data.h"
 #include "m_player_lib.h"
 #include "m_string.h"

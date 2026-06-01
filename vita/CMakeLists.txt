@@ -45,6 +45,7 @@ add_compile_definitions(
     SKIP_ERROR_CAPTURE
     NO_TEX_COMBINER
     PC_DESIGN_IMPORT
+    VITA_TROPHIES
     # uncomment for measurement builds.
     #VITA_PERF_LOG
     #VITA_DEBUG
@@ -178,6 +179,7 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_nes_picker.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_design_convert.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_design_fs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_trophy.c
 
     ${DECOMP_ROOT}/pc/src/pc_gx.c
     ${DECOMP_ROOT}/pc/src/pc_gx_tev.c
@@ -342,6 +344,7 @@ target_link_libraries(${PROJECT_NAME}
     vitaGL vitashark SceShaccCgExt taihen_stub SceShaccCg_stub
     SceDisplay_stub SceCtrl_stub SceAudio_stub SceAudioIn_stub
     SceSysmodule_stub SceGxm_stub SceCommonDialog_stub SceTouch_stub
+    SceNpTrophy_stub
     SceHid_stub SceMotion_stub ScePower_stub SceAppMgr_stub
     SceAppUtil_stub SceKernelDmacMgr_stub SceKernelThreadMgr_stub
     mathneon pthread m z c stdc++
@@ -358,6 +361,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
+    FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/trophy/${VITA_TITLEID}_00/TROPHY.TRP sce_sys/trophy/${VITA_TITLEID}_00/TROPHY.TRP
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/../pc/shaders/default.vert shaders/default.vert
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/../pc/shaders/default.frag shaders/default.frag
 )

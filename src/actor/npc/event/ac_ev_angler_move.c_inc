@@ -204,6 +204,9 @@ static void aEANG_demo_measure(EV_ANGLER_ACTOR* angler, GAME_PLAY* play) {
             set_top_of_angler_size(angler->size);
             set_top_of_angler_pID(Now_Private->player_ID);
             mEv_fishRecord_set(&Now_Private->player_ID, angler->size);
+#ifdef VITA_TROPHIES
+            vita_trophy_unlock(TROPHY_TOURNEY_CHAMP);
+#endif
             (*angler->setup_talk_proc)(angler, play, aEANG_TALK_DEMO_HOUBI);
             angler->item = aEANG_SelectRandomItem();
             mPr_SetFreePossessionItem(Now_Private, angler->item, mPr_ITEM_COND_NORMAL);

@@ -447,6 +447,9 @@ static void aEBR2_sell_after(EV_BROKER2_ACTOR* broker2, GAME_PLAY* play) {
             } else {
                 mPr_SetPossessionItem(Now_Private, idx, item, mPr_ITEM_COND_NORMAL);
                 mSP_get_sell_price(sell_price);
+#ifdef VITA_TROPHIES
+                vita_trophy_unlock(TROPHY_BLACK_MARKET);
+#endif
                 CLIP(broker_design_clip)->report_sales_proc(item_ux[item_idx], item_uz[item_idx]);
 
                 if (save_p->used < mEv_BROKER_ITEM_NUM - 1) {

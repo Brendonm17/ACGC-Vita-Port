@@ -9,6 +9,7 @@
 #include "pc_assets.h"
 #include "pc_disc.h"
 #include "vita_banner.h"
+#include "vita_trophy.h"
 
 #include <psp2/kernel/processmgr.h>
 
@@ -57,6 +58,8 @@ int main(int argc, char* argv[]) {
             "ux0:data/AnimalCrossing/rom/");
     }
     pc_assets_init();
+
+    vita_trophy_init();
 
     printf("[VITA] Initialization complete, entering game...\n");
 

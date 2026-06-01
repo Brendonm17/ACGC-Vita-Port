@@ -1,3 +1,7 @@
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 enum aNSC_action {
     aNSC_ACTION_EMPTY,
     aNSC_ACTION_SAY_HELLO_APPROACH,
@@ -2217,6 +2221,12 @@ static void aNSC_buy_check(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY* play) 
                     } else {
                         mActor_name_t item = Now_Private->inventory.pockets[submenu_item->slot_no];
                         mSP_PlusSales(shop_common->money / 2);
+#ifdef VITA_TROPHIES
+                        if (ITEM_NAME_GET_TYPE(item) == NAME_TYPE_ITEM1 && ITEM_NAME_GET_CAT(item) == ITEM1_CAT_KABU &&
+                            Kabu_get_price() > Save_Get(kabu_price_schedule.daily_price[lbRTC_SUNDAY])) {
+                            vita_trophy_unlock(TROPHY_STALK_MARKET);
+                        }
+#endif
                         if (counter == 1) {
                             next = aNSC_buy_item_only_one(&bells, item, (u8*)submenu_item, shop_common->money);
                         } else if (play->submenu.selected_item_num > 1) {

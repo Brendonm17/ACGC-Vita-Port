@@ -16,6 +16,10 @@
 #include "m_common_data.h"
 #include "m_scene_table.h"
 
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 static int mPO_keep_contents(Mail_c* mail) {
     int res = FALSE;
 
@@ -100,6 +104,9 @@ static int mPO_receipt_check_mail(Mail_c* mail) {
             res = mPO_keep_contents(mail);
             if (res == TRUE) {
                 Save_Get(post_office).keep_mail_sum_npcs++;
+#ifdef VITA_TROPHIES
+                vita_trophy_unlock(TROPHY_PENPAL);
+#endif
             }
 
             break;
