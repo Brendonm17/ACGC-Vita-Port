@@ -154,6 +154,36 @@ static void aHNW_wait(HANIWA_ACTOR* haniwa, GAME* game) {
     }
 }
 
+#ifdef TARGET_VITA
+// register the player into a random present neighbor's memory, exactly as a
+// first greeting would, so the intro save-gate can never trap the player.
+static void aHNW_vita_grant_save_friend(void) {
+    PersonalID_c* pid = &Common_Get(now_private)->player_ID;
+    Animal_c* anim = Save_Get(animals);
+    int present[ANIMAL_NUM_MAX];
+    int present_num = 0;
+    int i;
+
+    for (i = 0; i < ANIMAL_NUM_MAX; i++) {
+        if (mNpc_CheckFreeAnimalPersonalID(&anim[i].id) == FALSE) {
+            present[present_num++] = i;
+        }
+    }
+
+    if (present_num != 0) {
+        Animal_c* animal = &anim[present[RANDOM(present_num)]];
+        Anmmem_c* memory = animal->memories;
+
+        if (mNpc_GetAnimalMemoryIdx(pid, memory, ANIMAL_MEMORY_NUM) == -1) {
+            int mem_idx = mNpc_ForceGetFreeAnimalMemoryIdx(animal, memory, ANIMAL_MEMORY_NUM);
+            if (mem_idx != -1) {
+                mNpc_SetAnimalMemory(pid, &animal->id, memory + mem_idx);
+            }
+        }
+    }
+}
+#endif
+
 static int aHNW_decide_msg_idx_dance(HANIWA_ACTOR* haniwa) {
     Haniwa_c* house_haniwa;
     int house_idx = haniwa->house_idx;
@@ -166,6 +196,12 @@ static int aHNW_decide_msg_idx_dance(HANIWA_ACTOR* haniwa) {
         Haniwa_c* house_haniwa = &Save_Get(homes[house_idx]).haniwa;
         int house_arrange_idx = mHS_get_arrange_idx(Common_Get(player_no));
         mHm_hs_c* house = Save_GetPointer(homes[house_arrange_idx]);
+#ifdef TARGET_VITA
+        if (house->flags.has_saved == FALSE && mEv_CheckFirstJob() == TRUE &&
+            mNpc_GetFriendAnimalNum(&Common_Get(now_private)->player_ID) == 0) {
+            aHNW_vita_grant_save_friend();
+        }
+#endif
         if (house->flags.has_saved == FALSE && mEv_CheckFirstJob() == TRUE &&
             mNpc_GetFriendAnimalNum(&Common_Get(now_private)->player_ID) == 0) {
             res =
