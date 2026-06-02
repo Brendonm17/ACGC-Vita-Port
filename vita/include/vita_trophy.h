@@ -49,8 +49,11 @@ enum {
     TROPHY_INTERIOR_DESIGNER = 34,
     TROPHY_GYROID_FOUND = 35,
     TROPHY_LET_IT_SNOW = 36,
+    TROPHY_PACK_RAT = 37,
+    TROPHY_RESETTIS_NEMESIS = 38,
+    TROPHY_BEACH_BUM = 39,
 
-    TROPHY_COUNT = 37
+    TROPHY_COUNT = 40
 };
 
 // Boots the NP trophy context + setup dialog. Call once after vitaGL init and

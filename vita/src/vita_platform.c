@@ -6,6 +6,7 @@
 #include "pc_settings.h"
 #include "vita_shared.h"
 #include "vita_gx_cmdbuf.h"
+#include "vita_trophy.h"
 
 #include <psp2/power.h>
 #include <psp2/appmgr.h>
@@ -672,6 +673,9 @@ int pc_platform_poll_events(void) {
 
     // safety-net periodic save. no-op when feature off or not yet due.
     pc_auto_save_tick();
+
+    // self-rate-limited; scans save state to award unlocked trophies.
+    vita_trophy_poll();
 
     // these SDL lifecycle events rarely fire on vita (the power callback
     // above is the real hook), but wire them up anyway as belt-and-braces.
