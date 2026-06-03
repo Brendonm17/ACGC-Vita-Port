@@ -361,7 +361,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/livearea/contents/bg0.png sce_sys/livearea/contents/bg0.png
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
-    FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/trophy/${VITA_TITLEID}_00/TROPHY.TRP sce_sys/trophy/${VITA_TITLEID}_00/TROPHY.TRP
+    FILE ${CMAKE_CURRENT_SOURCE_DIR}/sce_sys/trophy/${VITA_TITLEID}_01/TROPHY.TRP sce_sys/trophy/${VITA_TITLEID}_01/TROPHY.TRP
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/../pc/shaders/default.vert shaders/default.vert
     FILE ${CMAKE_CURRENT_SOURCE_DIR}/../pc/shaders/default.frag shaders/default.frag
 )

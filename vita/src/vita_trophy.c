@@ -54,6 +54,7 @@ extern int sceNpTrophyGetTrophyUnlockState(int ctx, int handle, SceNpTrophyUnloc
 #define TROPHY_FRIENDSHIP_MAX 127 // s8 cap enforced by mNpc_AddFriendship
 #define TROPHY_GOLDEN_ALL_MASK 0x0F // axe|net|rod|shovel = mPlayer_GOLDEN_ITEM_TYPE_NUM bits
 #define TROPHY_POLL_INTERVAL 60 // frames between save-state scans
+#define TROPHY_QUEUE_SIZE 64 // unlock handoff ring; > TROPHY_COUNT (each id once)
 
 static char s_comm_id[12] = { 0 };
 // NP Communication Signature for the NoTrpDrm homebrew trophy workflow.
@@ -82,8 +83,9 @@ static char s_signature[160] = {
 static int s_ctx;
 static int s_plat_id = -1;
 static int s_available = 0;
-static volatile int s_req_id;
-static SceUID s_req_sema, s_done_sema;
+static volatile uint8_t s_queue[TROPHY_QUEUE_SIZE]; // game thread -> worker ring
+static volatile int s_q_head, s_q_tail;
+static SceUID s_req_sema;
 static SceNpTrophyUnlockState s_unlocks;
 static int s_poll_div = 0;
 
@@ -104,12 +106,12 @@ static int trophies_unlocker(SceSize args, void* argp) {
     (void)argp;
     for (;;) {
         sceKernelWaitSema(s_req_sema, 1, NULL);
-        int id = s_req_id;
+        int id = s_queue[s_q_head];
+        s_q_head = (s_q_head + 1) % TROPHY_QUEUE_SIZE;
         int handle;
         sceNpTrophyCreateHandle(&handle);
         sceNpTrophyUnlockTrophy(s_ctx, handle, id, &s_plat_id);
         sceNpTrophyDestroyHandle(handle);
-        sceKernelSignalSema(s_done_sema, 1);
     }
     return 0;
 }
@@ -125,14 +127,17 @@ void vita_trophy_unlock(uint32_t id) {
     if (!s_available || id >= TROPHY_COUNT || vita_trophy_is_unlocked(id)) {
         return;
     }
+    // mark unlocked now so re-polls do not re-enqueue, then hand the id to the
+    // worker without blocking the game thread on the trophy-DB write.
     s_unlocks.flag[id >> 5] |= (1u << (id & 31));
-    sceKernelWaitSema(s_done_sema, 1, NULL);
-    s_req_id = (int)id;
+    s_queue[s_q_tail] = (uint8_t)id;
+    s_q_tail = (s_q_tail + 1) % TROPHY_QUEUE_SIZE;
     sceKernelSignalSema(s_req_sema, 1);
 }
 
 void vita_trophy_init(void) {
     strcpy(s_comm_id, "ACGC00001");
+    s_comm_id[10] = 1; // comm id num -> _01 (fresh set; _00 left a corrupt on-device registration)
     sceSysmoduleLoadModule(SCE_SYSMODULE_NP_TROPHY);
     sceNpTrophyInit(NULL);
 
@@ -151,8 +156,7 @@ void vita_trophy_init(void) {
     }
     sceNpTrophySetupDialogTerm();
 
-    s_done_sema = sceKernelCreateSema("trophy_done", 0, 1, 1, NULL);
-    s_req_sema = sceKernelCreateSema("trophy_req", 0, 0, 1, NULL);
+    s_req_sema = sceKernelCreateSema("trophy_req", 0, 0, TROPHY_QUEUE_SIZE, NULL);
     SceUID thd = sceKernelCreateThread("trophy_unlocker", &trophies_unlocker, 0x10000100, 0x10000, 0, 0, NULL);
     sceKernelStartThread(thd, 0, NULL);
 
