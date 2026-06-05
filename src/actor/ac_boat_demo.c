@@ -6,6 +6,10 @@
 #include "m_bgm.h"
 #include "m_msg.h"
 
+#ifdef VITA_TROPHIES
+#include "vita_trophy.h"
+#endif
+
 /* For whatever reason, this file seems to have -pool off */
 #pragma push
 #pragma pool_data off

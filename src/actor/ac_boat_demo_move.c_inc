@@ -223,6 +223,12 @@ static void aBTD_touch_wharf_end_wait(BOAT_DEMO_ACTOR* boat_demo, GAME_PLAY* pla
 
 static void aBTD_pl_ride_off_start_wait(BOAT_DEMO_ACTOR* boat_demo, GAME_PLAY* play) {
     if (boat_demo->demo_act == aBTD_DEMO_PL_RIDE_OFF_END) {
+#ifdef VITA_TROPHIES
+        // player just stepped off the boat; at_island FALSE == arriving at the island
+        if (boat_demo->at_island == FALSE) {
+            vita_trophy_unlock(TROPHY_ISLAND_GETAWAY);
+        }
+#endif
         aBTD_setupAction(boat_demo, play, aBTD_ACTION_PL_RIDE_OFF_END_WAIT);
     }
 }
