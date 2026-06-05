@@ -48,8 +48,29 @@
 #ifdef TARGET_VITA
 #include <psp2/io/stat.h>   /* sceIoMkdir */
 #include <psp2/io/fcntl.h>  /* sceIoSync */
+#include <psp2/kernel/threadmgr.h>  /* save mutex */
 #endif
 #include <dolphin/os.h>  /* OSReport */
+
+// the game thread and the power callback both save; serialize them.
+#ifdef TARGET_VITA
+static SceUID s_save_mutex = -1;
+static void pc_save_lock(void)   { if (s_save_mutex >= 0) sceKernelLockMutex(s_save_mutex, 1, NULL); }
+static void pc_save_unlock(void) { if (s_save_mutex >= 0) sceKernelUnlockMutex(s_save_mutex, 1); }
+static void pc_save_mutex_init(void) {
+    // recursive so the autosave wrappers can re-enter via mCD_SaveHome_bg
+    if (s_save_mutex < 0) s_save_mutex = sceKernelCreateMutex("ac_save", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
+}
+// lets the trophy poll skip its scan while a save holds the lock
+int  pc_save_poll_try_lock(void) { return (s_save_mutex < 0) ? 1 : (sceKernelTryLockMutex(s_save_mutex, 1) == 0); }
+void pc_save_poll_unlock(void)   { pc_save_unlock(); }
+#else
+static void pc_save_lock(void)   {}
+static void pc_save_unlock(void) {}
+static void pc_save_mutex_init(void) {}
+int  pc_save_poll_try_lock(void) { return 1; }
+void pc_save_poll_unlock(void)   {}
+#endif
 
 /* --- Path constants --- */
 #ifdef TARGET_VITA
@@ -308,6 +329,9 @@ static void pc_ensure_save_dirs(void) {
     pc_save_resolve_paths();
 }
 
+// periodic autosave only: one rolling backup, no whole-device sync
+static int s_pc_save_light = 0;
+
 static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path);
 
 static int pc_save_write_gci(void) {
@@ -319,46 +343,79 @@ static int pc_save_write_gci(void) {
     return result;
 }
 
-static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
-    FILE* fp;
-    u8* file_data;
-    CARDDir dir_hdr;
+// build buffer in BSS, not on the heap, so a save can't fail to allocate it.
+// the save path is serialized, so one shared buffer is fine.
+static u8 s_gci_image_buf[GCI_FILE_DATA_SIZE];
+static u8* pc_save_image_buf(void) {
+    memset(s_gci_image_buf, 0, sizeof(s_gci_image_buf));
+    return s_gci_image_buf;
+}
+
+// write the image and flush just this file, not the whole device
+static int pc_save_write_image_file(const char* path, const void* hdr, u32 hdr_len,
+                                    const void* body, u32 body_len) {
+#ifdef TARGET_VITA
+    SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+    if (fd < 0) {
+        OSReport("[PC] GCI save: sceIoOpen('%s') failed (0x%08X)\n", path, (unsigned)fd);
+        return FALSE;
+    }
+    if (sceIoWrite(fd, hdr, hdr_len) != (SceSSize)hdr_len ||
+        sceIoWrite(fd, body, body_len) != (SceSSize)body_len) {
+        OSReport("[PC] GCI save: sceIoWrite failed (disk full?)\n");
+        sceIoClose(fd);
+        remove(path);
+        return FALSE;
+    }
+    sceIoSyncByFd(fd, 0);
+    sceIoClose(fd);
+    return TRUE;
+#else
+    FILE* fp = fopen(path, "wb");
+    if (fp == NULL) {
+        OSReport("[PC] GCI save: failed to open temp file '%s'\n", path);
+        return FALSE;
+    }
+    if (fwrite(hdr, hdr_len, 1, fp) != 1 || fwrite(body, body_len, 1, fp) != 1) {
+        OSReport("[PC] GCI save: fwrite failed (disk full?)\n");
+        fclose(fp);
+        remove(path);
+        return FALSE;
+    }
+    fflush(fp);
+    fclose(fp);
+    return TRUE;
+#endif
+}
+
+// build the GCI image from the passed-in save + ARAM (not live globals), so
+// the writer thread can build it from a snapshot
+static void pc_save_build_image(u8* file_data, CARDDir* dir_hdr,
+                                const Save_t* save, u8* const* aram) {
     Save_t* save_copy;
     u16 checksum;
-    u8* others_ptr;
-
-    if (!pc_save_ready) return TRUE;
-
-    pc_ensure_save_dirs();
-
-    Save_Get(save_exist) = TRUE;
-    Save_Get(save_check).version = mFRm_VERSION;
-    mFRm_SetSaveCheckData(Save_GetPointer(save_check));
-
-    file_data = (u8*)calloc(1, GCI_FILE_DATA_SIZE);
-    if (!file_data) return FALSE;
+    u8* others_ptr = file_data + GCI_OTHERS_OFFSET;
+    u16 land_id = save->land_info.id;
 
     /* Others block (offset 0) -comment, banner, ARAM blocks */
-    others_ptr = file_data + GCI_OTHERS_OFFSET;
     {
         const char* title = "DobutsunomoriP (AC PC Port)";
         u8* comment = others_ptr;
         memset(comment, 0, CARD_COMMENT_SIZE);
         strncpy((char*)comment, title, 32);
-        memcpy(comment + 32, Save_Get(land_info).name, 8);
+        memcpy(comment + 32, save->land_info.name, 8);
     }
 
     /* ARAM blocks: mail, original, diary (GC/Dolphin order).
      * Set landid on mail block so load-time detection identifies the order. */
     {
         u32 offset = sizeof(MemcardHeader_c) + 32; /* 0x1460 */
-        u16 land_id = Save_Get(land_info).id;
 
         offset = ALIGN_NEXT(offset, 32);
-        if (l_aram_block_p_table[mCD_ARAM_DATA_MAIL]) {
+        if (aram[mCD_ARAM_DATA_MAIL]) {
             u8* blk = others_ptr + offset;
             u32 sz = l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL];
-            memcpy(blk, l_aram_block_p_table[mCD_ARAM_DATA_MAIL], sz);
+            memcpy(blk, aram[mCD_ARAM_DATA_MAIL], sz);
             pc_save_bswap_keep_mail((mCD_keep_mail_c*)blk, PC_BSWAP_TO_BE);
             /* Set landid (BE u16 at offset 2) so load detects GC order */
             put_be16(blk + 2, land_id);
@@ -371,10 +428,10 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
         offset += l_aram_alloc_size_table[mCD_ARAM_DATA_MAIL];
 
         offset = ALIGN_NEXT(offset, 32);
-        if (l_aram_block_p_table[mCD_ARAM_DATA_ORIGINAL]) {
+        if (aram[mCD_ARAM_DATA_ORIGINAL]) {
             u8* blk = others_ptr + offset;
             u32 sz = l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL];
-            memcpy(blk, l_aram_block_p_table[mCD_ARAM_DATA_ORIGINAL], sz);
+            memcpy(blk, aram[mCD_ARAM_DATA_ORIGINAL], sz);
             pc_save_bswap_keep_original((mCD_keep_original_c*)blk, PC_BSWAP_TO_BE);
             blk[0] = 0;
             blk[1] = 0;
@@ -383,10 +440,10 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
         offset += l_aram_alloc_size_table[mCD_ARAM_DATA_ORIGINAL];
 
         offset = ALIGN_NEXT(offset, 32);
-        if (l_aram_block_p_table[mCD_ARAM_DATA_DIARY]) {
+        if (aram[mCD_ARAM_DATA_DIARY]) {
             u8* blk = others_ptr + offset;
             u32 sz = l_aram_alloc_size_table[mCD_ARAM_DATA_DIARY];
-            memcpy(blk, l_aram_block_p_table[mCD_ARAM_DATA_DIARY], sz);
+            memcpy(blk, aram[mCD_ARAM_DATA_DIARY], sz);
             pc_save_bswap_keep_diary((mCD_keep_diary_c*)blk, PC_BSWAP_TO_BE);
             blk[0] = 0;
             blk[1] = 0;
@@ -396,7 +453,7 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
 
     /* Main Save_t (offset 0x26000) */
     save_copy = (Save_t*)(file_data + GCI_SAVE_MAIN_OFFSET);
-    memcpy(save_copy, &common_data.save.save, sizeof(Save_t));
+    memcpy(save_copy, save, sizeof(Save_t));
 
     pc_save_bswap(save_copy, PC_BSWAP_TO_BE);
     {
@@ -411,54 +468,51 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
     memcpy(file_data + GCI_SAVE_BACK_OFFSET, file_data + GCI_SAVE_MAIN_OFFSET, sizeof(Save));
 
     /* CARDDir header */
-    memset(&dir_hdr, 0, sizeof(dir_hdr));
-    memcpy(dir_hdr.gameName, "GAFE", 4);
-    memcpy(dir_hdr.company, "01", 2);
-    dir_hdr.bannerFormat = 0;
-    strncpy((char*)dir_hdr.fileName, "DobutsunomoriP_MURA", CARD_FILENAME_MAX);
+    memset(dir_hdr, 0, sizeof(*dir_hdr));
+    memcpy(dir_hdr->gameName, "GAFE", 4);
+    memcpy(dir_hdr->company, "01", 2);
+    dir_hdr->bannerFormat = 0;
+    strncpy((char*)dir_hdr->fileName, "DobutsunomoriP_MURA", CARD_FILENAME_MAX);
     {
         // use the pc_os-anchored clock so this is local wall time. direct
         // time(NULL) produced UTC on Vita (no TZ in newlib) and the GC
         // memcard browser expects local.
         u32 gc_secs = (u32)(OSGetTime() / OS_TIMER_CLOCK);
-        put_be32((u8*)&dir_hdr.time, gc_secs);
+        put_be32((u8*)&dir_hdr->time, gc_secs);
     }
-    put_be32((u8*)&dir_hdr.iconAddr, 0xFFFFFFFF);
-    put_be16((u8*)&dir_hdr.iconFormat, 0);
-    put_be16((u8*)&dir_hdr.iconSpeed, 0);
-    dir_hdr.permission = 0x04;
-    dir_hdr.copyTimes = 0;
-    put_be16((u8*)&dir_hdr.startBlock, 5);
-    put_be16((u8*)&dir_hdr.length, (u16)(GCI_FILE_DATA_SIZE / GCI_SECTOR_SIZE));
-    put_be32((u8*)&dir_hdr.commentAddr, 0);
+    put_be32((u8*)&dir_hdr->iconAddr, 0xFFFFFFFF);
+    put_be16((u8*)&dir_hdr->iconFormat, 0);
+    put_be16((u8*)&dir_hdr->iconSpeed, 0);
+    dir_hdr->permission = 0x04;
+    dir_hdr->copyTimes = 0;
+    put_be16((u8*)&dir_hdr->startBlock, 5);
+    put_be16((u8*)&dir_hdr->length, (u16)(GCI_FILE_DATA_SIZE / GCI_SECTOR_SIZE));
+    put_be32((u8*)&dir_hdr->commentAddr, 0);
+}
 
-    /* write temp file → rotate backups → rename */
-    fp = fopen(tmp_path, "wb");
-    if (!fp) {
-        OSReport("[PC] GCI save: failed to open temp file '%s'\n", tmp_path);
-        free(file_data);
+// temp file, rotate backups, rename into place. light keeps one rolling backup
+// and skips the device sync; full rotates 3 and syncs.
+static int pc_save_commit_image(const u8* file_data, const CARDDir* dir_hdr,
+                                const char* gci_path, const char* tmp_path, int light) {
+    if (!pc_save_write_image_file(tmp_path, dir_hdr, GCI_HEADER_SIZE,
+                                  file_data, GCI_FILE_DATA_SIZE)) {
         return FALSE;
     }
 
-    if (fwrite(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1 ||
-        fwrite(file_data, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
-        OSReport("[PC] GCI save: fwrite failed (disk full?)\n");
-        fclose(fp);
-        remove(tmp_path);
-        free(file_data);
-        return FALSE;
+    if (light) {
+        char bak1[400];
+        snprintf(bak1, sizeof(bak1), "%s.bak1", gci_path);
+        remove(bak1);
+        rename(gci_path, bak1);
+    } else {
+        pc_save_rotate_backups(gci_path);
     }
 
-    fflush(fp);
-    fclose(fp);
-    free(file_data);
-
-    pc_save_rotate_backups(gci_path);
     if (rename(tmp_path, gci_path) != 0) {
         OSReport("[PC] GCI save: rename '%s' -> '%s' failed, recovering...\n",
                  tmp_path, gci_path);
         {
-            char bak1[300];
+            char bak1[400];
             snprintf(bak1, sizeof(bak1), "%s.bak1", gci_path);
             rename(bak1, gci_path);
         }
@@ -466,10 +520,32 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
         return FALSE;
     }
 
-    pc_save_fs_sync();
-    OSReport("[PC] GCI save: written successfully to %s (backups rotated)\n", gci_path);
+    if (!light) pc_save_fs_sync();
+    OSReport("[PC] GCI save: written to %s (%s)\n", gci_path, light ? "light" : "full + sync");
     pc_save_loaded = 1;
     return TRUE;
+}
+
+static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
+    u8* file_data;
+    CARDDir dir_hdr;
+
+    if (!pc_save_ready) return TRUE;
+
+    pc_ensure_save_dirs();
+
+    Save_Get(save_exist) = TRUE;
+    Save_Get(save_check).version = mFRm_VERSION;
+    mFRm_SetSaveCheckData(Save_GetPointer(save_check));
+
+    file_data = pc_save_image_buf();  // reused 456 KB buffer, zeroed each save
+    if (!file_data) {
+        OSReport("[PC] GCI save: image buffer alloc failed (out of memory)\n");
+        return FALSE;
+    }
+
+    pc_save_build_image(file_data, &dir_hdr, &common_data.save.save, l_aram_block_p_table);
+    return pc_save_commit_image(file_data, &dir_hdr, gci_path, tmp_path, s_pc_save_light);
 }
 
 /* Read a GCI file into common_data (for home town / Card A) */
@@ -898,7 +974,15 @@ void mCD_init_card(void) {
     CARDInit();
 }
 
+#ifdef TARGET_VITA
+static void pc_save_writer_init(void);  // background save writer, defined below
+#endif
+
 void mCD_InitAll(void) {
+    pc_save_mutex_init();
+#ifdef TARGET_VITA
+    pc_save_writer_init();
+#endif
     /* ARAM blocks must persist -- don't null them */
     memset(&l_mcd_foreigner_file, 0, sizeof(l_mcd_foreigner_file));
     l_keepSave_set = FALSE;
@@ -1058,9 +1142,13 @@ static void pc_save_rearm_reset_code(void) {
 static int s_pc_save_is_incremental = 0;
 
 int mCD_SaveHome_bg(int param_1, int* chan) {
-    int slot = mCD_GetThisLandSlotNo();
+    int slot;
     int result;
+    int ret;
     (void)param_1;
+
+    pc_save_lock();
+    slot = mCD_GetThisLandSlotNo();
 
     if (s_pc_save_is_incremental) {
         pc_save_prep_incremental();
@@ -1068,24 +1156,34 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
         pc_save_prep_explicit();
     }
 
-    if (slot == mCD_SLOT_B && l_card_b_gci_path[0] != '\0') {
+    if (slot == mCD_SLOT_B) {
         // visiting another town; save back to Card B
-        char tmp_path[300];
-        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
-        result = pc_save_write_gci_to(l_card_b_gci_path, tmp_path);
         if (chan) *chan = mCD_SLOT_B;
+        if (l_card_b_gci_path[0] != '\0') {
+            char tmp_path[320];
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
+            result = pc_save_write_gci_to(l_card_b_gci_path, tmp_path);
+        } else {
+            // no card B path: skip, don't overwrite the home file with the
+            // visited town's data
+            OSReport("[PC] mCD_SaveHome_bg: slot B with no Card B path, skipping save\n");
+            result = TRUE;
+        }
     } else {
         result = pc_save_write_gci();
         if (chan) *chan = mCD_SLOT_A;
     }
 
-    if (!result) {
+    if (result) {
+        pc_save_rearm_reset_code();
+        ret = mCD_TRANS_ERR_NONE;
+    } else {
         OSReport("[PC] mCD_SaveHome_bg: save failed!\n");
-        return mCD_TRANS_ERR_IOERROR;
+        ret = mCD_TRANS_ERR_IOERROR;
     }
 
-    pc_save_rearm_reset_code();
-    return mCD_TRANS_ERR_NONE;
+    pc_save_unlock();
+    return ret;
 }
 
 // auto-save driven from the per-frame poll. only fires when the player
@@ -1137,6 +1235,82 @@ static int pc_auto_save_player_busy(void) {
     }
 }
 
+#ifdef TARGET_VITA
+// background save writer: the periodic autosave stages here and signals, this
+// thread does the file write so the game thread never blocks on it. gyroid /
+// quit / travel saves stay synchronous.
+extern int mCD_GetThisLandSlotNo(void);
+
+static SceUID s_writer_thread = -1;
+static SceUID s_writer_req = -1;
+static volatile int s_writer_run = 1;
+static char s_stage_gci[320];
+static char s_stage_tmp[324];
+
+static int pc_save_writer_loop(SceSize args, void* argp) {
+    (void)args; (void)argp;
+    while (s_writer_run) {
+        if (sceKernelWaitSema(s_writer_req, 1, NULL) < 0) break;
+        if (!s_writer_run) break;
+        sceKernelLockMutex(s_save_mutex, 1, NULL);
+        if (l_save_snapshot_valid) {
+            // build straight from the snapshot the stager captured
+            CARDDir hdr;
+            u8* buf = pc_save_image_buf();
+            pc_save_build_image(buf, &hdr, &l_save_snapshot, l_aram_snapshot);
+            pc_save_commit_image(buf, &hdr, s_stage_gci, s_stage_tmp, 1 /* light */);
+        }
+        sceKernelUnlockMutex(s_save_mutex, 1);
+    }
+    return 0;
+}
+
+static void pc_save_writer_init(void) {
+    if (s_writer_thread >= 0) return;
+    s_writer_req = sceKernelCreateSema("ac_save_req", 0, 0, 8, NULL);
+    if (s_writer_req < 0) { s_writer_req = -1; return; }
+    SceUID t = sceKernelCreateThread("ac_save_writer", pc_save_writer_loop,
+                                     0x10000110, 0x8000, 0, 0, NULL);
+    if (t < 0) return;
+    s_writer_thread = t;
+    sceKernelStartThread(t, 0, NULL);
+}
+
+// stage for the writer and return without touching disk. 1 = handled (or
+// skipped because a save is already running), 0 = writer down, do it sync.
+static int pc_save_submit_async(void) {
+    int slot;
+    if (s_writer_thread < 0 || s_writer_req < 0) return 0;
+    // already saving (sync save or writer busy); skip, next tick catches up
+    if (sceKernelTryLockMutex(s_save_mutex, 1) != 0) return 1;
+
+    if (!pc_save_ready) { sceKernelUnlockMutex(s_save_mutex, 1); return 1; }
+
+    pc_auto_save_flush_world_state();
+    pc_save_prep_incremental();
+    Save_Get(save_exist) = TRUE;
+    Save_Get(save_check).version = mFRm_VERSION;
+    mFRm_SetSaveCheckData(Save_GetPointer(save_check));
+
+    slot = mCD_GetThisLandSlotNo();
+    if (slot == mCD_SLOT_B) {
+        if (l_card_b_gci_path[0] == '\0') { sceKernelUnlockMutex(s_save_mutex, 1); return 1; }
+        snprintf(s_stage_gci, sizeof(s_stage_gci), "%s", l_card_b_gci_path);
+    } else {
+        snprintf(s_stage_gci, sizeof(s_stage_gci), "%s", PC_GCI_PATH);
+    }
+    snprintf(s_stage_tmp, sizeof(s_stage_tmp), "%s.tmp", s_stage_gci);
+
+    // snapshot doubles as the writer's source, so no extra staging copy
+    pc_save_snapshot_capture();
+    pc_save_rearm_reset_code();
+
+    sceKernelUnlockMutex(s_save_mutex, 1);
+    sceKernelSignalSema(s_writer_req, 1);
+    return 1;
+}
+#endif // TARGET_VITA
+
 void pc_auto_save_tick(void) {
     time_t now;
 
@@ -1163,10 +1337,21 @@ void pc_auto_save_tick(void) {
     {
         int chan = 0;
         int result;
+#ifdef TARGET_VITA
+        // off-thread on vita; fall back to sync if the writer isn't up
+        if (pc_save_submit_async()) {
+            s_pc_auto_save_last = now;
+            return;
+        }
+#endif
+        pc_save_lock();
         pc_auto_save_flush_world_state();
         s_pc_save_is_incremental = 1;
+        s_pc_save_light = 1;
         result = mCD_SaveHome_bg(0, &chan);
+        s_pc_save_light = 0;
         s_pc_save_is_incremental = 0;
+        pc_save_unlock();
         if (result == mCD_TRANS_ERR_NONE) {
             OSReport("[PC] Auto-save complete (chan=%d)\n", chan);
             s_pc_auto_save_last = now;
@@ -1204,10 +1389,12 @@ int pc_auto_save_force(void) {
         return 0;
     }
 
+    pc_save_lock();
     pc_auto_save_flush_world_state();
     s_pc_save_is_incremental = 1;
     result = mCD_SaveHome_bg(0, &chan);
     s_pc_save_is_incremental = 0;
+    pc_save_unlock();
     if (result == mCD_TRANS_ERR_NONE) {
         OSReport("[PC] Forced save complete (chan=%d)\n", chan);
         s_pc_auto_save_last = time(NULL);
@@ -1355,7 +1542,18 @@ static void pc_build_foreigner_file(void) {
 // persist current town and swap in the other town via l_keepSave.
 //  - resident: save card A (home) with player flagged "away", load card B
 //  - foreigner: refresh passport, save card B (visit state), load card A
+static int mCD_SaveStation_NextLand_bg_locked(s32* chan);
+
+// lock around the travel save so the power callback can't write at the same time
 int mCD_SaveStation_NextLand_bg(s32* chan) {
+    int r;
+    pc_save_lock();
+    r = mCD_SaveStation_NextLand_bg_locked(chan);
+    pc_save_unlock();
+    return r;
+}
+
+static int mCD_SaveStation_NextLand_bg_locked(s32* chan) {
     int is_foreigner = mLd_PlayerManKindCheck();
     OSReport("[PC] SaveStation_NextLand_bg: enter (is_foreigner=%d)\n", is_foreigner);
 
@@ -1454,7 +1652,17 @@ int mCD_SaveStation_NextLand_bg(s32* chan) {
 // home town saved too so the player isn't stuck watching a never-ending
 // "saving..." dialogue when card_b is empty. for foreigners the passport
 // is already in memory (refreshed by SaveStation_NextLand_bg).
+static int mCD_SaveStation_Passport_bg_locked(s32* chan);
+
 int mCD_SaveStation_Passport_bg(s32* chan) {
+    int r;
+    pc_save_lock();
+    r = mCD_SaveStation_Passport_bg_locked(chan);
+    pc_save_unlock();
+    return r;
+}
+
+static int mCD_SaveStation_Passport_bg_locked(s32* chan) {
     int is_foreigner = mLd_PlayerManKindCheck();
     if (chan) *chan = mCD_SLOT_B;
 
@@ -1483,7 +1691,17 @@ int mCD_SaveStation_Passport_bg(s32* chan) {
 
 /* Transition to the other town. Called from scene cleanup when switching to the visited town.
  * Faithfully reproduces the original mCD_toNextLand from m_card.c:7188. */
+static void mCD_toNextLand_locked(void);
+
+// rebuilds common_data mid-travel; lock so the power callback can't save the
+// half-built state
 void mCD_toNextLand(void) {
+    pc_save_lock();
+    mCD_toNextLand_locked();
+    pc_save_unlock();
+}
+
+static void mCD_toNextLand_locked(void) {
     Save_t* save = &l_keepSave.save;
     int scene_no;
     mCD_persistent_data_c persis;

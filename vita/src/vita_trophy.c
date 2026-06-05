@@ -331,6 +331,10 @@ static void poll_platinum(void) {
     vita_trophy_unlock(TROPHY_MAYORS_COMMENDATION);
 }
 
+// skip the scan while a save holds the lock, so we don't read Save_t mid-write
+extern int  pc_save_poll_try_lock(void);
+extern void pc_save_poll_unlock(void);
+
 void vita_trophy_poll(void) {
     if (!s_available) {
         return;
@@ -340,7 +344,11 @@ void vita_trophy_poll(void) {
     }
     s_poll_div = 0;
 
+    if (!pc_save_poll_try_lock()) {
+        return; // a save is running, scan next tick
+    }
     poll_save_state();
+    pc_save_poll_unlock();
     poll_platinum();
 }
 
