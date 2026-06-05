@@ -61,14 +61,28 @@ static void aBC_block_reset_spawn_mask(void) {
   memset(aBC_block_spawned_mask, 0, sizeof(aBC_block_spawned_mask));
 }
 
-// free_cam defers structs; mid-acre FG placements need a manual respawn kick.
+// free_cam defers structs; scene-return re-walks the current acre's structs.
 static volatile u8 aBC_force_struct_respawn = 0;
+
+// free_cam: event structures land in a for-sale lot that is usually not the
+// player's acre, so queue the exact block instead of respawning the current one.
+#define aBC_STRUCT_RESPAWN_MAX 8
+static s8 aBC_struct_respawn_bx[aBC_STRUCT_RESPAWN_MAX];
+static s8 aBC_struct_respawn_bz[aBC_STRUCT_RESPAWN_MAX];
+static u8 aBC_struct_respawn_count = 0;
 
 extern void aBC_vita_request_struct_respawn(s8 bx, s8 bz) {
   if (bx < 0 || bx >= BLOCK_X_NUM) return;
   if (bz < 0 || bz >= BLOCK_Z_NUM) return;
   aBC_block_spawned_mask[bz][bx] = 0;
-  aBC_force_struct_respawn = 1;
+  for (int i = 0; i < aBC_struct_respawn_count; i++) {
+    if (aBC_struct_respawn_bx[i] == bx && aBC_struct_respawn_bz[i] == bz) return;
+  }
+  if (aBC_struct_respawn_count < aBC_STRUCT_RESPAWN_MAX) {
+    aBC_struct_respawn_bx[aBC_struct_respawn_count] = bx;
+    aBC_struct_respawn_bz[aBC_struct_respawn_count] = bz;
+    aBC_struct_respawn_count++;
+  }
 }
 #endif
 
@@ -568,6 +582,8 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
     aBC_last_seen_scene = cur_scene_no;
     aBC_block_reset_spawn_mask();
     aBC_pending_spawn_stage = 0;
+    // drop targeted requests from the old scene; their block coords are stale now.
+    aBC_struct_respawn_count = 0;
     // force a struct re-walk on scene-return; event FG placements fire once.
     aBC_force_struct_respawn = 1;
     // arm prespawn for the start block so neighbors fill before the player leaves.
@@ -617,6 +633,13 @@ static void aBC_actor_move(ACTOR* actorx, GAME* game) {
     if (g_pc_settings.free_cam && aBC_force_struct_respawn && !birth_control->setup_actor_flag) {
       aBC_force_struct_respawn = 0;
       aBC_setupActor_impl(play, aBC_MASK_STRUCTS);
+    }
+
+    // spawn event structures placed in a non-current acre, one block per frame.
+    if (g_pc_settings.free_cam && aBC_struct_respawn_count > 0 && !birth_control->setup_actor_flag) {
+      aBC_struct_respawn_count--;
+      aBC_prespawn_block(play, aBC_struct_respawn_bx[aBC_struct_respawn_count],
+                         aBC_struct_respawn_bz[aBC_struct_respawn_count]);
     }
 #endif
 

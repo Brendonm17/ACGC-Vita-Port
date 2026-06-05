@@ -159,7 +159,7 @@ GLuint vita_get_simple_shader(void) { return vita_simple[0]; }
 
 // specialized shaders for top TEV configs
 #define VITA_SPEC_COUNT 8  // L/F/A = 3 bits = 8 variants each
-#define VITA_CFG_COUNT  51
+#define VITA_CFG_COUNT  52
 
 typedef struct {
     const char* name;
@@ -311,6 +311,9 @@ typedef struct {
 #ifndef VITA_HAS_CFG51
 #define VITA_HAS_CFG51 0
 #endif
+#ifndef VITA_HAS_CFG52
+#define VITA_HAS_CFG52 0
+#endif
 
 // dummy data for unavailable configs
 static const unsigned char* vita_gxp_dummy_variants[8] = {0};
@@ -401,6 +404,10 @@ static const unsigned int vita_gxp_dummy_sizes[8] = {0};
 #define gxp_cfg51_variants vita_gxp_dummy_variants
 #define gxp_cfg51_variant_sizes vita_gxp_dummy_sizes
 #endif
+#if !VITA_HAS_CFG52
+#define gxp_cfg52_variants vita_gxp_dummy_variants
+#define gxp_cfg52_variant_sizes vita_gxp_dummy_sizes
+#endif
 
 #define CFG_ENTRY(n, avail) { "CFG" #n, {0}, \
     avail ? (const unsigned char**)gxp_cfg##n##_variants : vita_gxp_dummy_variants, \
@@ -459,6 +466,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
     CFG_ENTRY(49, VITA_HAS_CFG49),
     CFG_ENTRY(50, VITA_HAS_CFG50),
     CFG_ENTRY(51, VITA_HAS_CFG51),
+    CFG_ENTRY(52, VITA_HAS_CFG52),
 };
 
 // map old vita_cfgN[] names to table entries
@@ -513,6 +521,7 @@ static VitaCfgDesc vita_cfgs[VITA_CFG_COUNT] = {
 #define vita_cfg49 vita_cfgs[48].programs
 #define vita_cfg50 vita_cfgs[49].programs
 #define vita_cfg51 vita_cfgs[50].programs
+#define vita_cfg52 vita_cfgs[51].programs
 
 // pre-hashed lookup for literal-only TEV configs; pattern configs fall through.
 typedef struct {
@@ -641,6 +650,9 @@ static void tev_lit_build(void) {
     // the shared shader reads u_tev1_cb; other variants fall back to uber.
     TEV_INS_2(15,8,10,15, 7,4,3,7,    15,4,0,15,  7,7,7,0, vita_cfg50, 50, 0);
 
+    // cfg52: waterfall rainbow. tex color, alpha = PRIM.a*ENV.a*tex.a
+    TEV_INS_2(15,15,15,8, 7,2,3,7,    15,15,15,0, 7,0,4,7, vita_cfg52, 52, 0);
+
     // 3-stage literal configs
     TEV_INS_3(15,15,15,8, 7,7,7,4,    15,0,8,0,  7,0,4,7,
               15,10,4,0, 7,7,7,0,  vita_cfg12, 0xFF, 1);
@@ -688,7 +700,12 @@ static GLuint vita_load_gxp(GLenum type, const unsigned char* gxp, unsigned int 
 
 static GLuint vita_load_vertex_shader(int flags) {
     (void)flags;
-    return vita_load_gxp(GL_VERTEX_SHADER, gxp_vertex, gxp_vertex_size);
+    // every program uses the identical gxp_vertex; share one VS object so GXM
+    // dedups the vertex program instead of registering a copy per program
+    static GLuint shared_vs = 0;
+    if (shared_vs == 0)
+        shared_vs = vita_load_gxp(GL_VERTEX_SHADER, gxp_vertex, gxp_vertex_size);
+    return shared_vs;
 }
 
 static GLuint vita_load_variant(int flags) {
@@ -1258,6 +1275,16 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
                 vita_cfg23[fa]) {
                 vita_tev_specialized_draws++;
                 return vita_cfg23[fa];
+            }
+
+            // CFG52: waterfall rainbow. color=TEXEL0, alpha=PRIM.a*ENV.a*TEXEL0.a
+            if (s0->color_a==15 && s0->color_b==15 && s0->color_c==15 && s0->color_d==8 &&
+                s0->alpha_a==7  && s0->alpha_b==2  && s0->alpha_c==3  && s0->alpha_d==7 &&
+                s1->color_a==15 && s1->color_b==15 && s1->color_c==15 && s1->color_d==0 &&
+                s1->alpha_a==7  && s1->alpha_b==0  && s1->alpha_c==4  && s1->alpha_d==7 &&
+                vita_cfg52[fa] && !VITA_CFG_DISABLED(52)) {
+                vita_tev_specialized_draws++;
+                return vita_cfg52[fa];
             }
 
             // CFG2 (7.7%): lerp(ras,tex,A0) then lerp(C2,C1,prev)

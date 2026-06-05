@@ -1,0 +1,49 @@
+// cfg52_f.cg
+// waterfall rainbow: color = TEXEL0, alpha = PRIM.a * ENV.a * TEXEL0.a
+// S0 c(15,15,15,8) a(7,2,3,7): color=TEXC, alpha=A1*A2 (pre-resolved aval.y*aval.z)
+// S1 c(15,15,15,0) a(7,0,4,7): color passthrough, alpha=prev*TEXA
+// Compile variants: -DLIGHTING -DFOG -DALPHA_TEST
+
+void main(
+    half4 v_color : COLOR0,
+    float2 v_texcoord0 : TEXCOORD0,
+    float2 v_texcoord1 : TEXCOORD1,
+    float3 v_normal : TEXCOORD2,
+    float v_fog_z : TEXCOORD3,
+
+    uniform sampler2D u_texture0 : TEXUNIT0,
+    uniform half u_use_texture0,
+    uniform half u_tev0_tc_src,
+    // stage 0 alpha registers: .y = A1 (PRIM.a), .z = A2 (ENV.a)
+    uniform half4 u_tev0_aval,
+
+#ifdef FOG
+    uniform half u_fog_start,
+    uniform half u_fog_end,
+    uniform half4 u_fog_color,
+#endif
+
+#ifdef ALPHA_TEST
+    uniform half u_alpha_ref0,
+#endif
+
+    out half4 out_color : COLOR
+) {
+    float2 tc0 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev0_tc_src));
+    half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
+
+    // color = TEXEL0; alpha = tex.a * A1 * A2
+    half3 prev_c = tex0.rgb;
+    half prev_a = tex0.a * u_tev0_aval.y * u_tev0_aval.z;
+
+#ifdef ALPHA_TEST
+    if (prev_a < u_alpha_ref0) discard;
+#endif
+
+#ifdef FOG
+    float ff = saturate((v_fog_z - (float)u_fog_start) / max((float)u_fog_end - (float)u_fog_start, 0.001));
+    prev_c = lerp(prev_c, u_fog_color.rgb, (half)ff);
+#endif
+
+    out_color = half4(prev_c, prev_a);
+}

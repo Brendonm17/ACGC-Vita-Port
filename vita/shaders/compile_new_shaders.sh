@@ -87,6 +87,7 @@ compile_lfa cfg48_f.cg cfg48 "CFG48: lerp(ras,C1,A0)*tex color + tex.a alpha"
 compile_lfa cfg49_f.cg cfg49 "CFG49: C2*ras color + A2*tex.a alpha"
 compile_lfa cfg50_f.cg cfg50 "CFG50: tex*C1*ras color + A_reg*tex.a alpha (UBER3+UBER4)"
 compile_lfa cfg51_f.cg cfg51 "CFG51: post office text / tex edge alpha=32 overlay (cfg22 + u_tev_reg1)"
+compile_lfa cfg52_f.cg cfg52 "CFG52: waterfall rainbow tex color + PRIM.a*ENV.a*tex.a alpha"
 
 # Composite shader for depth-aware water FBO compositing (single variant each)
 echo "Compiling composite_v.gxp"
