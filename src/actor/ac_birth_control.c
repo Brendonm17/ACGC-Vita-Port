@@ -461,14 +461,16 @@ static int aBC_item_exists_in_block(GAME_PLAY* play, mActor_name_t item_id, s8 b
 }
 
 // dedup free_cam prespawn's acre-overlap copy by id AND position; matching
-// id alone would suppress a distinct same-id structure elsewhere.
+// id alone would suppress a distinct same-id structure elsewhere. compare
+// home.position: some structures (island bungalow) shift world.position in ct,
+// which would push the match past the tile threshold and spawn a duplicate.
 static int aBC_struct_exists_at(GAME_PLAY* play, mActor_name_t item_id, f32 x, f32 z) {
   for (int part = 0; part < ACTOR_PART_NUM; part++) {
     ACTOR* actor = play->actor_info.list[part].actor;
     while (actor != NULL) {
       if (actor->mv_proc != NULL && actor->npc_id == item_id) {
-        f32 dx = actor->world.position.x - x;
-        f32 dz = actor->world.position.z - z;
+        f32 dx = actor->home.position.x - x;
+        f32 dz = actor->home.position.z - z;
         if (dx * dx + dz * dz < 16.0f) {  // same tile (tiles are 40 apart)
           return TRUE;
         }

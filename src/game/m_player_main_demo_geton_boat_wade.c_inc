@@ -34,6 +34,11 @@ static void Player_actor_setup_main_Demo_geton_boat_wade(ACTOR* actorx, GAME* ga
     demo_geton_boat_wade_p->timer = 0.0f;
     Player_actor_setup_main_Base(actorx, game);
 
+#ifdef TARGET_VITA
+    // free_cam follows the boat seamlessly; skip the wade camera's
+    // block-clamped retarget so acre crossings don't snap.
+    if (!g_pc_settings.free_cam)
+#endif
     {
         xyz_t camera_pos = demo_geton_boat_wade_p->end_pos;
 

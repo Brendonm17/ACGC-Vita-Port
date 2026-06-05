@@ -12,6 +12,10 @@
 #include "m_rcp.h"
 #include "libforest/gbi_extensions.h"
 
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
+
 enum {
     Cottage_DATA_PLAYER_STANDARD,
     Cottage_DATA_PLAYER_WINTER,
@@ -867,6 +871,16 @@ static void Cottage_actor_move(ACTOR* actor, GAME* game) {
     play = (GAME_PLAY*)game;
 
     cottage_data = Cottage_data_get(cottage);
+
+#ifdef TARGET_VITA
+    // free_cam keeps the cottage alive across the island BG/FG reload that
+    // wipes its ct/init collision + door stamp; re-apply to keep it solid.
+    if (g_pc_settings.free_cam) {
+        (*cottage_data->set_bg_offset_proc)(cottage, 1);
+        mFI_SetFG_common(cottage_data->actor_name, actor->home.position, FALSE);
+    }
+#endif
+
     (*cottage->action_proc)(cottage, play);
     (*cottage_data->light_control_proc)(cottage);
 }
