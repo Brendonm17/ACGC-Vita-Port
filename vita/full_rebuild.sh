@@ -2,9 +2,8 @@
 # full pipeline: shaders -> header -> sync -> build -> copy VPK
 set -e
 
-VITASDK=/usr/local/vitasdk
-export VITASDK
-export PATH=$VITASDK/bin:$PATH
+export VITASDK="${VITASDK:-/usr/local/vitasdk}"
+export PATH="$VITASDK/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WIN_SRC="${WIN_SRC:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -16,6 +15,12 @@ export CCACHE_DIR="$HOME/.ccache_vita"
 export CCACHE_MAXSIZE="4G"
 export CCACHE_COMPRESS=1
 export CCACHE_COMPRESSLEVEL=6
+
+command -v psp2cgc >/dev/null || {
+    echo "psp2cgc not found. It ships with Sony's official SCE SDK, not the open-source"
+    echo "VitaSDK. Precompiled shaders are committed; use build.sh unless editing shaders."
+    exit 1
+}
 
 echo "Compiling shaders..."
 cd "$WIN_SRC/vita/shaders"

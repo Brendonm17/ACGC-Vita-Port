@@ -3,7 +3,7 @@
 # usage: ./build_vita.sh [reconfig|clean]
 set -e
 
-export VITASDK=/usr/local/vitasdk
+export VITASDK="${VITASDK:-/usr/local/vitasdk}"
 export PATH="$VITASDK/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 BUILD_DIR="$HOME/ac_vita_build/ACGC-PC-Port/vita/build"

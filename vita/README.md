@@ -13,7 +13,7 @@ Port of [ACGC-PC-Port](https://github.com/flyngmt/ACGC-PC-Port) to PS Vita using
 - [VitaSDK](https://vitasdk.org/)
 - WSL or Linux (NTFS build is painfully slow)
 - ccache (optional, speeds up rebuilds)
-- psp2cgc (shader compiler, in VitaSDK)
+- psp2cgc (only needed to recompile shaders; Sony's Cg compiler from the official SCE SDK, not part of the open-source VitaSDK)
 - Python 3 (for shader header generation)
 
 ### VitaGL
@@ -33,8 +33,8 @@ This clones the fork, applies the CG row-major matrix-multiply fix, compiles wit
 All build scripts live in `vita/`. They sync source to an ext4 filesystem first because NTFS I/O from WSL is 10-50x slower.
 
 ```bash
-# first time: full pipeline (shaders + build + VPK)
-bash vita/full_rebuild.sh
+# build + VPK (uses the committed precompiled shaders, no psp2cgc needed)
+bash vita/build.sh vpk
 
 # fast iteration: build + deploy eboot.bin to Vita
 bash vita/deploy.sh
@@ -44,6 +44,9 @@ bash vita/build.sh
 
 # just rebuild (already on ext4)
 bash vita/build_vita.sh
+
+# full pipeline incl. shader recompile (only after editing .cg files, needs psp2cgc)
+bash vita/full_rebuild.sh
 ```
 
 Override paths via environment variables if needed:
@@ -128,7 +131,7 @@ The converter re-encodes textures as DXT1 (opaque) or DXT5 (alpha) for hardware-
 
 ## Shaders
 
-Shaders are pre-compiled CG programs (`.cg` source -> `.gxp` binary via psp2cgc). The compiled binaries are embedded in `vita_gxp_shaders.h` as C arrays.
+Shaders are pre-compiled CG programs (`.cg` source -> `.gxp` binary via psp2cgc). The compiled binaries are embedded in `vita_gxp_shaders.h` as C arrays. The generated header is committed, so a normal build needs no shader tooling.
 
 To recompile after editing shader source:
 
@@ -138,7 +141,7 @@ bash compile_new_shaders.sh
 python3 gen_header.py
 ```
 
-27 specialized shader configs handle common TEV combiner setups. An uber shader covers the rest.
+52 specialized shader configs handle common TEV combiner setups. An uber shader covers the rest.
 
 ## Directory Layout
 

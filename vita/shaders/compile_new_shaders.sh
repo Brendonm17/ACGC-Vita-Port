@@ -1,7 +1,8 @@
 #!/bin/bash
 # Compile ALL CG shaders to GXP binaries.
 # Run from vita/shaders/ directory with psp2cgc in PATH.
-# psp2cgc is part of the Vita SDK ($VITASDK/bin/psp2cgc)
+# psp2cgc is Sony's Cg compiler from the official SCE Vita SDK,
+# not part of the open-source vitasdk toolchain.
 set -e
 
 FP_FLAGS="-profile sce_fp_psp2"

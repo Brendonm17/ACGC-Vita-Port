@@ -29,7 +29,6 @@ build.ninja
 *.vpk
 *.gxp
 vita/shaders/gxp/
-vita/include/vita_gxp_shaders.h
 
 # decompctx output
 ctx.*
