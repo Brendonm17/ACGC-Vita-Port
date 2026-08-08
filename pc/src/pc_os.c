@@ -4,6 +4,7 @@
 #include <time.h>
 #ifdef TARGET_VITA
 #include <psp2/rtc.h>
+#include <malloc.h>
 #endif
 
 /* --- Memory arena --- */

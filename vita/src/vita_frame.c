@@ -11,6 +11,9 @@
 #include <psp2/kernel/processmgr.h>
 #include <stdio.h>
 
+extern void JW_BeginFrame(void);
+extern void JW_EndFrame(void);
+
 static int vita_first_frame = 1;
 static int vita_worker_pending = 0;
 

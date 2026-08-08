@@ -161,6 +161,7 @@ extern int vbuf_w;
 void vita_cmdbuf_init(void);
 void vita_cmdbuf_shutdown(void);
 void vita_cmdbuf_begin_frame(void);
+void gl_cache_reset(void);
 void vita_gx_flush_vertices_cmdbuf(int count);
 void vita_normalize_light(int i);
 void vita_set_vertex_attrib_pointers(void);

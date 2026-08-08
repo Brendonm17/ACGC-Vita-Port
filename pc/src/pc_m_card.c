@@ -544,7 +544,7 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
         return FALSE;
     }
 
-    pc_save_build_image(file_data, &dir_hdr, &common_data.save.save, l_aram_block_p_table);
+    pc_save_build_image(file_data, &dir_hdr, &common_data.save.save, (u8* const*)l_aram_block_p_table);
     return pc_save_commit_image(file_data, &dir_hdr, gci_path, tmp_path, s_pc_save_light);
 }
 

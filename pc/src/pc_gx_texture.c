@@ -12,6 +12,7 @@
 static int pc_gx_tlut_force_be(void);
 static void decode_rgb5a3_entry(u16 val, u8* r, u8* g, u8* b, u8* a);
 static u32 tlut_content_hash(const void* data, int tlut_fmt, int n_entries, int is_be);
+void pc_gx_texture_invalidate_gl_tex(GLuint tex);
 
 #ifdef TARGET_VITA
 unsigned int vita_texload_us = 0;

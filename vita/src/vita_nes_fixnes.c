@@ -31,6 +31,7 @@ uint32_t emuPrgRAMsize = 0;
 static int fixnes_initialized = 0;
 int g_custom_rom_selected = -1;
 static int vita_nes_load_custom_rom(uint8_t *buf, int buf_size);
+void pc_fixnes_cleanup(void);
 static GLuint fixnes_texture = 0;
 static int fixnes_frame_ready = 0;
 static uint32_t rgba_buf[NES_SCREEN_WIDTH * NES_VISIBLE_HEIGHT];

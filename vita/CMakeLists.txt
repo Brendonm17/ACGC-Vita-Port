@@ -226,7 +226,9 @@ set_source_files_properties(
 add_compile_options($<$<COMPILE_LANGUAGE:C>:-Dnullptr=NULL>)
 
 # decomp: -Og is the only level that doesn't crash (pervasive UB)
-set(DECOMP_C_FLAGS "-Og;-w")
+# gcc14 made these errors by default; decomp predates that, keep them warnings
+set(GCC14_COMPAT "$<$<COMPILE_LANGUAGE:C>:-Wno-error=implicit-function-declaration>;$<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>;$<$<COMPILE_LANGUAGE:C>:-Wno-error=int-conversion>")
+set(DECOMP_C_FLAGS "-Og;-w;${GCC14_COMPAT}")
 set(DECOMP_CXX_FLAGS "-Og;-w;-fpermissive")
 set_source_files_properties(${CODE_C_SOURCES}
     PROPERTIES COMPILE_OPTIONS "${DECOMP_C_FLAGS}"
@@ -245,7 +247,7 @@ set_source_files_properties(
     "${DECOMP_ROOT}/src/graph.c"
     "${DECOMP_ROOT}/src/game/m_actor.c"
     "${DECOMP_ROOT}/src/game/m_play.c"
-    PROPERTIES COMPILE_OPTIONS "-O3;-w;-fno-strict-aliasing;-fwrapv;-fno-tree-vrp;-funroll-loops;-ffast-math;-ftree-vectorize"
+    PROPERTIES COMPILE_OPTIONS "-O3;-w;-fno-strict-aliasing;-fwrapv;-fno-tree-vrp;-funroll-loops;-ffast-math;-ftree-vectorize;${GCC14_COMPAT}"
 )
 set_source_files_properties(${GAME_CXX_SOURCES}
     PROPERTIES COMPILE_OPTIONS "${DECOMP_CXX_FLAGS}"

@@ -5,6 +5,7 @@
 #include "pc_gx_internal.h"
 #include "pc_settings.h"
 #include "pc_keybindings.h"
+#include "pc_controls.h"
 #include "pc_texture_pack.h"
 #include "pc_assets.h"
 #include "pc_disc.h"
