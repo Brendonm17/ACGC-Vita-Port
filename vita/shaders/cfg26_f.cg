@@ -57,9 +57,9 @@ void main(
     /* Stage 0: color = register C1 (passthrough D) */
     half3 prev_c = u_tev0_cd;
 
-    /* Stage 0: alpha = RASA * A1
-     * aval.z = pre-resolved A1 register value */
-    half prev_a = ras_a * u_tev0_aval.z;
+    /* Stage 0: alpha = RASA * register. The matcher takes both operand orders;
+     * RASA's slot resolves to 0, so aval.y + aval.z is the register */
+    half prev_a = ras_a * (u_tev0_aval.y + u_tev0_aval.z);
 
 #ifdef ALPHA_TEST
     if (prev_a < u_alpha_ref0) discard;

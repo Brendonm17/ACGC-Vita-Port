@@ -324,6 +324,10 @@ Gfx rst_win_waku10T_model[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef TARGET_PC
+extern Gfx rst_win_mode[];
+#endif
+
 Gfx ledit_common_mode[] = {
     gsDPPipeSync(),
     gsSPLoadGeometryMode(G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH | G_DECAL_LEQUAL),
@@ -332,6 +336,10 @@ Gfx ledit_common_mode[] = {
                      G_AC_NONE | G_ZS_PIXEL | G_RM_PASS | G_RM_AA_TEX_EDGE2),
     gsSPTexture(65535, 65535, 0, G_TX_RENDERTILE, G_ON),
     gsDPSetCombineLERP(0, 0, 0, TEXEL0, 0, 0, 0, TEXEL1, 0, 0, 0, COMBINED, 0, 0, 0, COMBINED),
+#ifdef TARGET_PC
+    // the original runs on into rst_win_mode; the PC linker puts other lists after this one
+    gsSPBranchList(rst_win_mode),
+#endif
 };
 
 Gfx rst_win_mode[] = {

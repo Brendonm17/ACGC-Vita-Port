@@ -127,6 +127,7 @@ typedef struct {
     int widescreen_stretch;
 
     u8 tev_tex_remap;
+    u8 vp_changed; // viewport/scissor differ from the previous draw; merges stop here
 } PCGXDrawCmd;
 
 typedef struct {
@@ -166,8 +167,10 @@ void vita_gx_flush_vertices_cmdbuf(int count);
 void vita_normalize_light(int i);
 void vita_set_vertex_attrib_pointers(void);
 void vita_efb_setup_texture(u32 dest_ptr, GLuint tex);
+void vita_efb_init_tex(GLuint tex);
 
-void vita_cmdbuf_prededup(void);
+void vita_cmdbuf_prededup(int wr);
+void vita_cmdbuf_precreate_efb_targets(void);
 void vita_cmdbuf_frustum_cull(void);
 void vita_cmdbuf_presubmit(void);
 extern volatile int vita_presubmit_done;

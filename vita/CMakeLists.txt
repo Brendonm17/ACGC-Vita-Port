@@ -74,6 +74,14 @@ include_directories(
     ${NOFRENDO_DIR}/libsnss
 )
 
+# this port's own vitaGL build (vita/rebuild_vitagl.sh); the SDK's shared copy may be
+# another project's, built with options our precompiled shaders can't be loaded with
+set(ACGC_VITAGL_DIR "$ENV{VITASDK}/arm-vita-eabi/acgc")
+if(NOT EXISTS "${ACGC_VITAGL_DIR}/lib/libvitaGL.a")
+    message(FATAL_ERROR "This port's vitaGL is not built yet: run vita/rebuild_vitagl.sh")
+endif()
+include_directories(BEFORE "${ACGC_VITAGL_DIR}/include")
+
 # game source files (same filtering as PC port)
 file(GLOB_RECURSE GAME_C_SOURCES CONFIGURE_DEPENDS "${DECOMP_ROOT}/src/*.c")
 file(GLOB_RECURSE GAME_CXX_SOURCES CONFIGURE_DEPENDS "${DECOMP_ROOT}/src/*.cpp")
@@ -377,7 +385,7 @@ target_link_options(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME}
     game_data
     SDL2
-    vitaGL vitashark SceShaccCgExt taihen_stub SceShaccCg_stub
+    ${ACGC_VITAGL_DIR}/lib/libvitaGL.a vitashark SceShaccCgExt taihen_stub SceShaccCg_stub
     SceDisplay_stub SceCtrl_stub SceAudio_stub SceAudioIn_stub
     SceSysmodule_stub SceGxm_stub SceCommonDialog_stub SceTouch_stub SceIme_stub
     SceNpTrophy_stub

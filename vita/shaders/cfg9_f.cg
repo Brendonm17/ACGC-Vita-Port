@@ -78,7 +78,7 @@ void main(
     half3 ras_c = lerp(half3(1,1,1), matC, step(0.5h, u_num_chans));
 
     /* Stage 0: color = D + B * ras */
-    half3 prev_c = u_tev0_cd + u_tev0_cb * ras_c;
+    half3 prev_c = saturate(u_tev0_cd + u_tev0_cb * ras_c);
 
     /* Stage 0: alpha = TEXA * register (B or C slot) */
     half prev_a = tex0.a * (u_tev0_aval.y + u_tev0_aval.z);

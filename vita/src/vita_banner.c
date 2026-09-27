@@ -31,7 +31,7 @@ void banner_scan_folder(void) {
 
     DIR* dir = opendir(BANNER_DIR);
     if (!dir) {
-        fprintf(stderr, "[VITA] banner_scan_folder: cannot open %s (errno=%d)\n", BANNER_DIR, errno);
+        pc_log_error("[VITA] banner_scan_folder: cannot open %s (errno=%d)\n", BANNER_DIR, errno);
         return;
     }
 
@@ -101,7 +101,7 @@ static void banner_load_file(const char* name) {
     int w, h, channels;
     unsigned char* data = stbi_load(path, &w, &h, &channels, 4);
     if (!data) {
-        fprintf(stderr, "[VITA] banner_load_file: failed to load %s: %s\n", path, stbi_failure_reason());
+        pc_log_error("[VITA] banner_load_file: failed to load %s: %s\n", path, stbi_failure_reason());
         return;
     }
 
@@ -310,6 +310,14 @@ void vita_efb_draw_fullscreen(GLuint tex) {
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
+    // direct push like the banner: vitaGL's cache can skip the bind after the cmd loop's pushes
+    {
+        extern SceGxmContext* vglGetGxmContext(void);
+        extern const SceGxmTexture* vglGetGxmTextureById(GLuint id);
+        SceGxmContext* gxm_ctx = vglGetGxmContext();
+        const SceGxmTexture* gt = vglGetGxmTextureById(tex);
+        if (gxm_ctx && gt) sceGxmSetFragmentTexture(gxm_ctx, 0, gt);
+    }
     if (s_uloc.tex0 >= 0) glUniform1i(s_uloc.tex0, 0);
 
     glDisable(GL_DEPTH_TEST);

@@ -69,7 +69,7 @@ void main(
     half3 ras_c = lerp(half3(1,1,1), matC, step(0.5h, u_num_chans));
 
     // S0: color = C2 + C1 * tex, alpha = A2
-    half3 s0_c = u_tev0_cd + u_tev0_cc * tex0.rgb;
+    half3 s0_c = saturate(u_tev0_cd + u_tev0_cc * tex0.rgb); // stage 0 clamps before the multiply
     // S1: color = prev * ras, alpha = prev
     half3 prev_c = s0_c * ras_c;
     // aval.w = pre-resolved A2

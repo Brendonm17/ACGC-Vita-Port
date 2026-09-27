@@ -2,7 +2,7 @@
  * ALL TEV input selection done on CPU. Shader uses lerp/step only.
  * Uses half precision for 2x throughput on SGX543.
  * Optimized: rcp() fog, frac/floor light mask, swizzle splats.
- * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST -DTEV2 */
+ * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST -DTEV2, and -DTEV3 (with TEV2) for 3 stages */
 #pragma warning (disable:7203)
 
 void main(
@@ -40,6 +40,21 @@ void main(
     uniform half4 u_tev1_aval,
     uniform half4 u_tev1_param,
     uniform half2 u_tev1_aparam, /* [alpha_scale, alpha_op] */
+#endif
+
+#ifdef TEV3
+    uniform sampler2D u_texture2 : TEXUNIT2,
+    uniform half u_use_texture2,
+    uniform half u_tev2_tc_src,
+    uniform half4 u_tev2_csrc,
+    uniform half3 u_tev2_ca,
+    uniform half3 u_tev2_cb,
+    uniform half3 u_tev2_cc,
+    uniform half3 u_tev2_cd,
+    uniform half4 u_tev2_asrc,
+    uniform half4 u_tev2_aval,
+    uniform half4 u_tev2_param,
+    uniform half2 u_tev2_aparam, /* [alpha_scale, alpha_op] */
 #endif
 
     uniform half u_num_chans,
@@ -159,6 +174,45 @@ void main(
 
     prev_c = saturate((s1cd + u_tev1_param.w * lerp(s1ca, s1cb, s1cc) + u_tev1_param.xxx) * u_tev1_param.z);
     prev_a = saturate((s1ad + u_tev1_aparam.y * lerp(s1aa, s1ab, s1ac) + u_tev1_param.y) * u_tev1_aparam.x);
+
+#ifdef TEV3
+    float2 tc2 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev2_tc_src));
+    half4 tex2 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture2, tc2), step(0.5h, u_use_texture2));
+
+    /* Stage 2: same sources as stage 1 */
+    half3 s2ca = lerp(lerp(lerp(lerp(u_tev2_ca, tex2.rgb, step(0.5h,u_tev2_csrc.x)),
+                    tex2.aaa, step(1.5h,u_tev2_csrc.x)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev2_csrc.x)),
+                    step(2.5h,u_tev2_csrc.x)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev2_csrc.x)),
+                    step(4.5h,u_tev2_csrc.x));
+    half3 s2cb = lerp(lerp(lerp(lerp(u_tev2_cb, tex2.rgb, step(0.5h,u_tev2_csrc.y)),
+                    tex2.aaa, step(1.5h,u_tev2_csrc.y)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev2_csrc.y)),
+                    step(2.5h,u_tev2_csrc.y)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev2_csrc.y)),
+                    step(4.5h,u_tev2_csrc.y));
+    half3 s2cc = lerp(lerp(lerp(lerp(u_tev2_cc, tex2.rgb, step(0.5h,u_tev2_csrc.z)),
+                    tex2.aaa, step(1.5h,u_tev2_csrc.z)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev2_csrc.z)),
+                    step(2.5h,u_tev2_csrc.z)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev2_csrc.z)),
+                    step(4.5h,u_tev2_csrc.z));
+    half3 s2cd = lerp(lerp(lerp(lerp(u_tev2_cd, tex2.rgb, step(0.5h,u_tev2_csrc.w)),
+                    tex2.aaa, step(1.5h,u_tev2_csrc.w)),
+                    lerp(ras_c, ras_a.xxx, step(3.5h,u_tev2_csrc.w)),
+                    step(2.5h,u_tev2_csrc.w)),
+                    lerp(prev_c, prev_a.xxx, step(5.5h,u_tev2_csrc.w)),
+                    step(4.5h,u_tev2_csrc.w));
+
+    half s2aa = lerp(lerp(u_tev2_aval.x, tex2.a, step(0.5h,u_tev2_asrc.x)), lerp(ras_a, prev_a, step(2.5h,u_tev2_asrc.x)), step(1.5h,u_tev2_asrc.x));
+    half s2ab = lerp(lerp(u_tev2_aval.y, tex2.a, step(0.5h,u_tev2_asrc.y)), lerp(ras_a, prev_a, step(2.5h,u_tev2_asrc.y)), step(1.5h,u_tev2_asrc.y));
+    half s2ac = lerp(lerp(u_tev2_aval.z, tex2.a, step(0.5h,u_tev2_asrc.z)), lerp(ras_a, prev_a, step(2.5h,u_tev2_asrc.z)), step(1.5h,u_tev2_asrc.z));
+    half s2ad = lerp(lerp(u_tev2_aval.w, tex2.a, step(0.5h,u_tev2_asrc.w)), lerp(ras_a, prev_a, step(2.5h,u_tev2_asrc.w)), step(1.5h,u_tev2_asrc.w));
+
+    prev_c = saturate((s2cd + u_tev2_param.w * lerp(s2ca, s2cb, s2cc) + u_tev2_param.xxx) * u_tev2_param.z);
+    prev_a = saturate((s2ad + u_tev2_aparam.y * lerp(s2aa, s2ab, s2ac) + u_tev2_param.y) * u_tev2_aparam.x);
+#endif
 #endif
 
 #ifdef ALPHA_TEST

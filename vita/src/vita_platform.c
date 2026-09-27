@@ -315,29 +315,33 @@ extern void emu64_taskstart(void* dl);
 // skip GL calls on worker thread (VitaGL not thread-safe)
 volatile int vita_on_worker_thread = 0;
 
-// core 2 prededup thread state.
+// core 2 prededup thread state. one request and one done semaphore per cmd buffer:
+// a buffer is only re-recorded after its submit waited, so neither can be lost or go stale
 static SceUID prededup_start_sema = -1;
-static SceUID prededup_done_sema = -1;
+static SceUID prededup_done_sema[2] = {-1, -1};
 static SceUID prededup_thread_tid = -1;
 static volatile int prededup_thread_running = 0;
-static volatile int prededup_pending = 0;
-// captured by the worker before signaling core 2; main may flip
-// cmd_write before core 2 wakes.
-volatile int pdd_buffer_idx = 0;
+static volatile int prededup_pending[2] = {0, 0};
+static volatile int prededup_req[2] = {0, 0};
 
 static int prededup_thread_func(SceSize args, void* argp) {
     (void)args; (void)argp;
     while (prededup_thread_running) {
         sceKernelWaitSema(prededup_start_sema, 1, NULL);
         if (!prededup_thread_running) break;
+        // two requests can share one wake
+        for (int b = 0; b < 2; b++) {
+            if (!prededup_req[b]) continue;
+            prededup_req[b] = 0;
 #ifdef VITA_DEBUG
-        unsigned int _pdd_t0 = sceKernelGetProcessTimeLow();
+            unsigned int _pdd_t0 = sceKernelGetProcessTimeLow();
 #endif
-        vita_cmdbuf_prededup();
+            vita_cmdbuf_prededup(b);
 #ifdef VITA_DEBUG
-        vita_timing.prededup_us = sceKernelGetProcessTimeLow() - _pdd_t0;
+            vita_timing.prededup_us = sceKernelGetProcessTimeLow() - _pdd_t0;
 #endif
-        sceKernelSignalSema(prededup_done_sema, 1);
+            sceKernelSignalSema(prededup_done_sema[b], 1);
+        }
     }
     return 0;
 }
@@ -370,11 +374,12 @@ static int emu64_worker_func(SceSize args, void* argp) {
             // dispatch prededup to core 2 (runs in parallel with
             // game logic on core 0 while core 1 signals done).
             if (prededup_thread_running) {
-                pdd_buffer_idx = cmd_write;
-                prededup_pending = 1;
+                int b = cmd_write;
+                prededup_pending[b] = 1;
+                prededup_req[b] = 1;
                 sceKernelSignalSema(prededup_start_sema, 1);
             } else {
-                vita_cmdbuf_prededup();
+                vita_cmdbuf_prededup(cmd_write);
             }
             vita_on_worker_thread = 0;
             {
@@ -450,8 +455,9 @@ void vita_emu64_worker_init(void) {
     // core 2 prededup thread: lightweight, runs prededup in parallel
     // with game logic so it's off the emu64 critical path.
     prededup_start_sema = sceKernelCreateSema("pdd_start", 0, 0, 1, NULL);
-    prededup_done_sema = sceKernelCreateSema("pdd_done", 0, 0, 1, NULL);
-    if (prededup_start_sema >= 0 && prededup_done_sema >= 0) {
+    prededup_done_sema[0] = sceKernelCreateSema("pdd_done0", 0, 0, 1, NULL);
+    prededup_done_sema[1] = sceKernelCreateSema("pdd_done1", 0, 0, 1, NULL);
+    if (prededup_start_sema >= 0 && prededup_done_sema[0] >= 0 && prededup_done_sema[1] >= 0) {
         prededup_thread_running = 1;
         prededup_thread_tid = sceKernelCreateThread(
             "prededup", prededup_thread_func,
@@ -486,10 +492,10 @@ void vita_emu64_wait_done(void) {
 // wait for core 2 prededup to finish. called before submit reads
 // the cmd buffer. usually a no-op since prededup (~0.5ms) finishes
 // well before game_logic + swap (~4ms) completes.
-void vita_wait_prededup(void) {
-    if (!prededup_pending) return;
-    sceKernelWaitSema(prededup_done_sema, 1, NULL);
-    prededup_pending = 0;
+void vita_wait_prededup(int wr) {
+    if (!prededup_pending[wr]) return;
+    sceKernelWaitSema(prededup_done_sema[wr], 1, NULL);
+    prededup_pending[wr] = 0;
 }
 
 void vita_emu64_signal_work(void* dl) {

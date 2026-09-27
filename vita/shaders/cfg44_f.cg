@@ -13,6 +13,8 @@ void main(
     uniform sampler2D u_texture0 : TEXUNIT0,
     uniform half u_use_texture0,
     uniform half u_tev0_tc_src,
+    uniform sampler2D u_texture1 : TEXUNIT1,
+    uniform half u_use_texture1,
     uniform half u_tev1_tc_src,
 
     // S0 color_d=6 (C2 register)
@@ -72,9 +74,9 @@ void main(
     // S0: alpha = RASA * TEXA (a(7,4,5,7): B=TEXA, C=RASA, D=0)
     half prev_a = rasa * tex0.a;
 
-    // S1 tex sample (may be different tc_src)
+    // S1 samples its own texture (TEXMAP1)
     float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
-    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc1), step(0.5h, u_use_texture0));
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
 
     // S1: color = CPREV passthrough
     // S1: alpha = APREV + RASA * TEXA (a(7,4,5,0): B=TEXA, C=RASA, D=APREV)

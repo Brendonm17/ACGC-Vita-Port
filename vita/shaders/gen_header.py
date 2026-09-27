@@ -39,23 +39,25 @@ with open(OUT_FILE, "w") as f:
         total += os.path.getsize(vlit_path)
         f.write("#define VITA_HAS_VERTEX_LIGHTING 1\n\n")
 
-    # 16 complex fragment variants (full branchless TEV)
+    # complex fragment variants (full branchless TEV): 0-15 L/F/A/TEV2, 24-31 3-stage (TEV2|TEV3)
     flags_names = {0:"base", 1:"L", 2:"F", 3:"LF", 4:"A", 5:"LA", 6:"FA", 7:"LFA",
-                   8:"T", 9:"LT", 10:"FT", 11:"LFT", 12:"AT", 13:"LAT", 14:"FAT", 15:"LFAT"}
-    for i in range(16):
+                   8:"T", 9:"LT", 10:"FT", 11:"LFT", 12:"AT", 13:"LAT", 14:"FAT", 15:"LFAT",
+                   24:"T3", 25:"LT3", 26:"FT3", 27:"LFT3", 28:"AT3", 29:"LAT3", 30:"FAT3", 31:"LFAT3"}
+    complex_ids = list(range(16)) + list(range(24, 32))
+    for i in complex_ids:
         f.write(f"/* Complex fragment variant {i}: {flags_names[i]} */\n")
         p = os.path.join(SHADER_DIR, f"frag_v{i}.gxp")
         emit_array(f, f"gxp_frag_v{i}", p)
         total += os.path.getsize(p)
 
-    f.write("/* Complex fragment variant lookup table */\n")
-    f.write("static const unsigned char* gxp_frag_variants[16] = {\n")
-    for i in range(16):
-        f.write(f"    gxp_frag_v{i},\n")
+    f.write("/* Complex fragment variant lookup table (16-23 unused: TEV3 needs TEV2) */\n")
+    f.write("static const unsigned char* gxp_frag_variants[32] = {\n")
+    for i in range(32):
+        f.write(f"    gxp_frag_v{i},\n" if i in complex_ids else "    0,\n")
     f.write("};\n")
-    f.write("static const unsigned int gxp_frag_variant_sizes[16] = {\n")
-    for i in range(16):
-        f.write(f"    gxp_frag_v{i}_size,\n")
+    f.write("static const unsigned int gxp_frag_variant_sizes[32] = {\n")
+    for i in range(32):
+        f.write(f"    gxp_frag_v{i}_size,\n" if i in complex_ids else "    0,\n")
     f.write("};\n\n")
 
     # 8 simple fragment variants (tex * ras MODULATE, half precision)

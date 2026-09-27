@@ -242,6 +242,7 @@ static void vita_frame_run_threaded(ucode_info* ucode, void* gfx_list) {
     emu64_set_ucode_info(2, ucode);
     emu64_set_first_ucode(ucode[0].ucode_p);
 
+    if (!vita_first_frame) vita_cmdbuf_precreate_efb_targets();
     vita_emu64_signal_work(gfx_list);
     vita_worker_pending = 1;
 
@@ -280,9 +281,7 @@ static void vita_frame_run_single(ucode_info* ucode, void* gfx_list) {
         emu64_taskstart(gfx_list);
         // TEV resolve is inlined into prededup's per-cmd loop. Single-
         // threaded fallback has to do all core 2 work inline here.
-        extern volatile int pdd_buffer_idx;
-        pdd_buffer_idx = cmd_write;
-        vita_cmdbuf_prededup();
+        vita_cmdbuf_prededup(cmd_write);
         vita_cmdbuf_frustum_cull();
 #ifdef VITA_DEBUG
         vita_timing.emu64_us = sceKernelGetProcessTimeLow() - t0;
@@ -338,8 +337,9 @@ void vita_frame_run(ucode_info* ucode, void* gfx_list) {
         // worker dispatches prededup before signaling done, so the core 2
         // thread can still be running when we reach here. without this
         // wait, single mode's inline prededup races it on shared state
-        extern void vita_wait_prededup(void);
-        vita_wait_prededup();
+        extern void vita_wait_prededup(int wr);
+        vita_wait_prededup(0);
+        vita_wait_prededup(1);
         // entry seam fence: belt-and-suspenders for ARM weak ordering
         // over sceKernelWaitSema's implied acquire on g_gx writes.
         __sync_synchronize();

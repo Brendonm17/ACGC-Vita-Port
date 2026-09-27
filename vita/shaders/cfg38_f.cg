@@ -88,7 +88,7 @@ void main(
     half prev_a = u_tev0_aval.w;
 
     /* Stage 1: color = CPREV + RASC * C1, alpha = TEX1A * APREV */
-    prev_c = prev_c + ras_c * u_tev1_cb;
+    prev_c = saturate(prev_c + ras_c * u_tev1_cb);
     prev_a = tex1.a * prev_a;
 
 #ifdef ALPHA_TEST

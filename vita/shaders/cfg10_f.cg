@@ -89,7 +89,7 @@ void main(
 
     /* S0: color = lerp(C2, C1, tex0), then S1: color = tex1 + ras * S0 */
     half3 s0_c = lerp(u_tev0_ca, u_tev0_cb, tex0.rgb);
-    half3 prev_c = tex1.rgb + ras_c * s0_c;
+    half3 prev_c = saturate(tex1.rgb + ras_c * s0_c);
 
     /* S0 alpha: A1 + tex0.a * A0, S1 alpha: S0 + tex1.a * A0
      * Final: A1 + (tex0.a + tex1.a) * A0 = aval.w + (tex0.a + tex1.a) * aval.z */

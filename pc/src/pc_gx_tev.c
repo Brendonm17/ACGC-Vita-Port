@@ -149,7 +149,8 @@ static GLuint link_program(GLuint vert, GLuint frag) {
 #define VITA_VF_FOG        (1 << 1)
 #define VITA_VF_ALPHA_TEST (1 << 2)
 #define VITA_VF_TEV2       (1 << 3)
-#define VITA_VF_COUNT      16
+#define VITA_VF_TEV3       (1 << 4) // third stage; always set with TEV2
+#define VITA_VF_COUNT      32
 #define VITA_SIMPLE_COUNT  8
 
 static GLuint vita_variants[VITA_VF_COUNT];
@@ -786,6 +787,7 @@ void pc_gx_tev_init(void) {
 
     // uber-shader fallback
     for (int i = 0; i < VITA_VF_COUNT; i++) {
+        if ((i & VITA_VF_TEV3) && !(i & VITA_VF_TEV2)) continue;
         vita_variants[i] = vita_load_variant(i);
         if (vita_variants[i]) ok++;
         glFinish();
@@ -1073,9 +1075,8 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
             !state->z_update_enable &&
             (state->blend_src == GX_BL_SRCALPHA || state->blend_src == GX_BL_DSTALPHA) &&
             (state->blend_dst == GX_BL_INVSRCALPHA || state->blend_dst == GX_BL_INVDSTALPHA));
-        // RGB5A3's smallest non-zero alpha is 36; half-precision rounding can
-        // drop it under tex_edge_alpha=32. raise gate to 33/255 so AA edges survive.
-        if (!blended_no_zwrite && eff_ref > 33.0f/255.0f) key |= VITA_VF_ALPHA_TEST;
+        // any positive ref discards on GX (tex edge 32 on the post office, 3 on winter houses)
+        if (!blended_no_zwrite && eff_ref > 0.0f) key |= VITA_VF_ALPHA_TEST;
     }
     int lfa = key & 0x7; // L/F/A bits
     int fa = lfa & ~VITA_VF_LIGHTING; // F/A only, VS handles LIGHTING
@@ -1564,29 +1565,24 @@ static GLuint pc_gx_tev_get_shader_inner(PCGXState* state) {
                 return vita_cfg33[fa];
             }
 
-            // simple shader (tex*ras): MODULATE and PASSTHROUGH patterns
+            // simple shader (tex*ras): exact PASSTHROUGH and MODULATE only. emu64 binds TEXMAP0 even
+            // for shade-only stages, so looser shapes came out multiplied by a stray texture
             {
                 int ca = s0->color_a, cb = s0->color_b, cc = s0->color_c, cd = s0->color_d;
                 int aa = s0->alpha_a, ab = s0->alpha_b, ac = s0->alpha_c, ad = s0->alpha_d;
 
-                // pure-texture passthrough (D=TEXC/TEXA): neutralize ras to (1,1,1,1).
+                // D = TEXC/TEXA: ras neutralized to (1,1,1,1)
                 if (ca == 15 && (cb == 15 || cc == 15) &&
                     aa == 7  && (ab == 7  || ac == 7) &&
-                    (cd == 8 || cd == 10 || cd == 15) &&
-                    (ad == 4 || ad == 5  || ad == 7) &&
-                    vita_simple[fa]) {
-                    // Flag: D references texture but not ras → neutralize ras
-                    if (cd == 8 || ad == 4)
-                        vita_tev_passthrough = 1;
+                    cd == 8 && ad == 4 && vita_simple[fa]) {
+                    vita_tev_passthrough = 1;
                     return vita_simple[fa];
                 }
 
-                // MODULATE: result = B*C
+                // MODULATE: TEXC*RASC, TEXA*RASA
                 if (cd == 15 && ca == 15 && ad == 7 && aa == 7 &&
-                    (cb == 8 || cb == 10 || cb == 15) &&
-                    (cc == 8 || cc == 10 || cc == 15) &&
-                    (ab == 4 || ab == 5  || ab == 7) &&
-                    (ac == 4 || ac == 5  || ac == 7) &&
+                    cb + cc == 18 && (cb == 8 || cb == 10) &&
+                    ab + ac == 9 && (ab == 4 || ab == 5) &&
                     vita_simple[fa]) {
                     return vita_simple[fa];
                 }
@@ -1787,8 +1783,11 @@ use_complex:
     if (state->num_tev_stages >= 3)
         vita_tev_is_ocean = 1;
     tev_config_record(state);
-    if (state->num_tev_stages > 1) key |= VITA_VF_TEV2;
+    // the TEV2 uber evaluates stages 0-1 only; 3-stage configs need TEV3
+    if (state->num_tev_stages > 2) key |= VITA_VF_TEV2 | VITA_VF_TEV3;
+    else if (state->num_tev_stages > 1) key |= VITA_VF_TEV2;
     if (vita_variants[key] != 0) return vita_variants[key];
+    if (vita_variants[key & ~VITA_VF_TEV3] != 0) return vita_variants[key & ~VITA_VF_TEV3];
     return vita_variants[0];
 }
 

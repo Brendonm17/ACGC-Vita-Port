@@ -23,6 +23,16 @@ for i in $(seq 0 15); do
     psp2cgc $FP_FLAGS $DEFS -o frag_v${i}.gxp default_f.cg
 done
 
+# 3-stage variants 24-31: TEV2|TEV3 with the same L/F/A bits
+for i in $(seq 24 31); do
+    DEFS="-DTEV2 -DTEV3"
+    [ $((i & 1)) -ne 0 ] && DEFS="$DEFS -DLIGHTING"
+    [ $((i & 2)) -ne 0 ] && DEFS="$DEFS -DFOG"
+    [ $((i & 4)) -ne 0 ] && DEFS="$DEFS -DALPHA_TEST"
+    echo "Compiling frag_v${i}.gxp (complex 3-stage, flags=$i $DEFS)"
+    psp2cgc $FP_FLAGS $DEFS -o frag_v${i}.gxp default_f.cg
+done
+
 # Helper: compile 8 L/F/A variants for a given source file and output prefix
 compile_lfa() {
     local src=$1 prefix=$2 label=$3

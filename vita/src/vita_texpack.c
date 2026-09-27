@@ -4,6 +4,7 @@
 #ifdef TARGET_VITA
 
 #include "vita_texpack.h"
+#include "pc_platform.h"
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
@@ -20,7 +21,7 @@ void texpack_scan_folder(void) {
 
     DIR* dir = opendir(TEXPACK_DIR);
     if (!dir) {
-        fprintf(stderr, "[VITA] texpack_scan_folder: cannot open %s (errno=%d)\n", TEXPACK_DIR, errno);
+        pc_log_error("[VITA] texpack_scan_folder: cannot open %s (errno=%d)\n", TEXPACK_DIR, errno);
         return;
     }
 

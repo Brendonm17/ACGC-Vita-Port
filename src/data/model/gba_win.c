@@ -177,10 +177,18 @@ gsSPNTriangles_5b(31, 28, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0),
 gsSPEndDisplayList(),
 };
 
+#ifdef TARGET_PC
+extern Gfx gba_win_mb1_model[];
+#endif
+
 Gfx gba_win_mb_before_model[] = {
 gsSPTexture(0, 0, 0, G_TX_RENDERTILE, G_ON),
 gsDPSetCombineLERP(0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, COMBINED, 0, 0, 0, COMBINED),
 gsDPSetRenderMode(G_RM_PASS, G_RM_XLU_SURF2),
+#ifdef TARGET_PC
+// the original runs on into gba_win_mb1_model; the PC linker puts other lists after this one
+gsSPBranchList(gba_win_mb1_model),
+#endif
 };
 
 Gfx gba_win_mb1_model[] = {

@@ -58,7 +58,7 @@ void main(
     half4 tex0 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture0, tc0), step(0.5h, u_use_texture0));
 
     /* Stage 0: color = C2 + A0*C1 (all registers), alpha = A1*tex.a */
-    half3 prev_c = u_tev0_cd + u_tev0_cc * u_tev0_cb;
+    half3 prev_c = saturate(u_tev0_cd + u_tev0_cc * u_tev0_cb);
     half prev_a = (u_tev0_aval.y + u_tev0_aval.z) * tex0.a;
 
 #ifdef ALPHA_TEST

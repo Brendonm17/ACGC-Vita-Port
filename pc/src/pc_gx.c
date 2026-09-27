@@ -114,6 +114,9 @@ GLuint pc_gx_efb_capture_get_or_create(u32 dest_ptr) {
             // slot exists but tex is 0, allocate in place
             GLuint tex = 0;
             glGenTextures(1, &tex);
+#ifdef TARGET_VITA
+            vita_efb_init_tex(tex);
+#endif
             s_efb_captures[i].gl_tex = tex;
             return tex;
         }
@@ -128,6 +131,9 @@ GLuint pc_gx_efb_capture_get_or_create(u32 dest_ptr) {
     }
     GLuint tex = 0;
     glGenTextures(1, &tex);
+#ifdef TARGET_VITA
+    vita_efb_init_tex(tex);
+#endif
     s_efb_captures[s_efb_capture_count].dest_ptr = dest_ptr;
     s_efb_captures[s_efb_capture_count].gl_tex = tex;
     s_efb_capture_count++;
@@ -1914,6 +1920,13 @@ void GXSetCoPlanar(GXBool enable) { (void)enable; }
 
 /* --- Fog --- */
 void GXSetFog(u32 type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
+    // emu64 re-sends fog-off on every state check; unchanged fog must not dirty the draw
+    // (FOG dirty defeats the shader-selection cache)
+    if (g_gx.fog_type == type && g_gx.fog_start == startz && g_gx.fog_end == endz &&
+        g_gx.fog_near == nearz && g_gx.fog_far == farz &&
+        g_gx.fog_color[0] == color.r / 255.0f && g_gx.fog_color[1] == color.g / 255.0f &&
+        g_gx.fog_color[2] == color.b / 255.0f && g_gx.fog_color[3] == color.a / 255.0f)
+        return;
     pc_gx_flush_if_begin_complete();
     g_gx.fog_color[0] = color.r / 255.0f;
     g_gx.fog_color[1] = color.g / 255.0f;

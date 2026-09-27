@@ -1,14 +1,7 @@
-/* Specialized shader for CFG29: additive-saturate color, 2-tex alpha multiply.
- * Stage 0: color = saturate(ONE + RASC*TEXA_clr) = 1.0, alpha = TEXA
- * Stage 1: color = saturate(PREV + A2*TEXC) = 1.0, alpha = TEXA1*APREV
- * Final: color = 1.0 (white, additive ops saturate), alpha = tex1.a * tex0.a
- *
- * TEV inputs:
- *   S0 c(15,10,4,6)  a(7,7,7,4) — ONE+RASC*TEXA_clr (->1.0), TEXA alpha
- *   S1 c(15,8,3,0)   a(7,0,4,7) — PREV+A2*TEXC (->1.0), TEXA1*APREV alpha
- *
- * Color always saturates to 1.0. Fog applied from white.
- * Uses 2 textures. Needs all 8 L/F/A variants.
+/* Specialized shader for CFG29 (waterfall body).
+ * S0 c(15,10,4,6) a(7,7,7,4): C2 + C1*RASC color, TEXA alpha
+ * S1 c(15,8,3,0)  a(7,0,4,7): PREV + A0*TEXC1 color, TEXA1*APREV alpha
+ * C2 and C1 arrive pre-resolved in u_tev0_cd/u_tev0_cc, A0 in u_tev1_cc.
  * Compile variants: -DLIGHTING -DFOG -DALPHA_TEST */
 
 void main(
@@ -24,6 +17,10 @@ void main(
     uniform sampler2D u_texture1  : TEXUNIT1,
     uniform half      u_use_texture1,
     uniform half      u_tev1_tc_src,
+
+    uniform half3 u_tev0_cc,
+    uniform half3 u_tev0_cd,
+    uniform half3 u_tev1_cc,
 
     uniform half  u_num_chans,
     uniform half4 u_mat_color,
@@ -56,11 +53,24 @@ void main(
     float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
     half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
 
-    /* Color saturates to 1.0 in both stages — implement correctly but result is white */
-    half3 prev_c = half3(1,1,1);
+    half3 matC = lerp(u_mat_color.rgb, v_color.rgb, step(0.5h, u_chan_mat_src));
+#ifdef LIGHTING
+    half3 n = (half3)normalize(v_normal);
+    half3 lA = lerp(u_amb_color.rgb, v_color.rgb, step(0.5h, u_chan_amb_src));
+    lA += max(dot(n, u_light_pos[0]), 0.0h) * u_light_color[0].rgb;
+    lA += max(dot(n, u_light_pos[1]), 0.0h) * u_light_color[1].rgb;
+    lA += max(dot(n, u_light_pos[2]), 0.0h) * u_light_color[2].rgb;
+    lA += max(dot(n, u_light_pos[3]), 0.0h) * u_light_color[3].rgb;
+    lA += max(dot(n, u_light_pos[4]), 0.0h) * u_light_color[4].rgb;
+    lA += max(dot(n, u_light_pos[5]), 0.0h) * u_light_color[5].rgb;
+    lA += max(dot(n, u_light_pos[6]), 0.0h) * u_light_color[6].rgb;
+    lA += max(dot(n, u_light_pos[7]), 0.0h) * u_light_color[7].rgb;
+    matC *= saturate(lA);
+#endif
+    half3 ras_c = lerp(half3(1,1,1), matC, step(0.5h, u_num_chans));
 
-    /* Alpha: S0=TEXA, S1=TEXA1*APREV
-     * a(7,0,4,7): A=0, B=APREV, C=TEXA1, D=0 -> TEXA1*APREV */
+    /* every term is >= 0, so one clamp equals GX's clamp per stage */
+    half3 prev_c = saturate(u_tev0_cd + u_tev0_cc * ras_c + u_tev1_cc * tex1.rgb);
     half prev_a = tex1.a * tex0.a;
 
 #ifdef ALPHA_TEST

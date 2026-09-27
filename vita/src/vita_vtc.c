@@ -10,8 +10,7 @@
 #include <string.h>
 #include <vitaGL.h>
 
-// OSReport is the only reliable path to error.log; freopen(stderr) drops
-// through newlib on Vita. See pc_os.c:pc_log_open.
+// the VITA_DEBUG access logger reports through OSReport (silent in release builds)
 extern void OSReport(const char* fmt, ...);
 
 // VTC file format
@@ -82,7 +81,6 @@ typedef struct {
 static VtcLoadedEntry g_vtc_loaded[VTC_LOADED_CACHE_SIZE];
 static int g_vtc_vram_used = 0;       // total vRAM used by loaded HD textures
 static unsigned int g_vtc_frame = 0;  // frame counter for LRU
-static int g_vtc_evictions = 0;       // stat: total LRU evictions
 
 // Negative cache: skip textures not in the pack
 #define VTC_NEG_CACHE_SIZE 2048
@@ -173,20 +171,6 @@ static unsigned int vtc_key_cache_slot(unsigned int data_ptr, unsigned int data_
     return h & VTC_KEY_CACHE_MASK;
 }
 
-// Stats (main + worker combined)
-static int g_vtc_stat_lookups = 0;
-static int g_vtc_stat_hits = 0;
-static int g_vtc_stat_loaded = 0;
-static int g_vtc_stat_cache_hits = 0;
-static int g_vtc_stat_neg_hits = 0;
-static int g_vtc_stat_worker_lookups = 0;
-static int g_vtc_stat_worker_hits = 0;
-static int g_vtc_stat_worker_neg = 0;
-static int g_vtc_compute_calls = 0;
-static int g_vtc_compute_hits = 0;
-static int g_vtc_keycache_hits = 0;
-static int g_vtc_io_preread_hits = 0;  // I/O thread pre-read was ready (main thread found READY slot)
-static int g_vtc_sync_reads = 0;       // fell back to sync fread on main thread
 static volatile int g_vtc_io_completed = 0;
 static volatile int g_vtc_io_queued = 0;
 
@@ -195,13 +179,6 @@ unsigned int vita_vtc_upgrade_us = 0;
 int vita_vtc_upgrade_count = 0;
 int vita_vtc_requeue_count = 0;
 unsigned int vita_vtc_prefetch_us = 0;  // accumulated prefetch I/O time (worker idle)
-
-// IO thread phase timing (us). Dumped+reset every N uploads.
-static volatile unsigned int g_io_fread_us = 0;
-static volatile unsigned int g_io_alloc_us = 0;
-static volatile unsigned int g_io_finalize_us = 0;
-static volatile unsigned int g_io_bytes_read = 0;
-static volatile int g_io_phase_count = 0;
 
 // Access logger: stream of first-touch cache_keys to vtc_access.log so
 // the build tool can reorder the pack by access order. Truncated on launch.
@@ -355,10 +332,22 @@ static VtcLoadedEntry* vtc_loaded_find(unsigned long long key) {
     return NULL;
 }
 
+// evicted HD ids whose tex_cache rows still need scrubbing. eviction runs under the loaded lock and
+// the worker takes tex_cache then loaded, so the scrub waits for the unlock (evictions are main-thread)
+#define VTC_SCRUB_MAX 32
+static GLuint s_vtc_scrub[VTC_SCRUB_MAX];
+static int s_vtc_scrub_n = 0;
+
+static void vtc_flush_scrubs(void) {
+    extern void pc_gx_texture_evict_tex_cache_for_gl_tex(GLuint tex);
+    while (s_vtc_scrub_n > 0) pc_gx_texture_evict_tex_cache_for_gl_tex(s_vtc_scrub[--s_vtc_scrub_n]);
+}
+
 // evict the oldest entry with no outstanding references from the loaded
 // cache. entries with ref_count > 0 are owned by tex_cache entries and
 // must not be deleted out from under them.
 static void vtc_loaded_evict_oldest(void) {
+    if (s_vtc_scrub_n >= VTC_SCRUB_MAX) return; // no progress; the caller fails this insert
     int oldest_idx = -1;
     unsigned int oldest_frame = 0xFFFFFFFF;
 
@@ -374,20 +363,14 @@ static void vtc_loaded_evict_oldest(void) {
     VtcLoadedEntry* victim = &g_vtc_loaded[oldest_idx];
 
     extern void vita_defer_tex_delete(GLuint tex);
-    extern void pc_gx_texture_evict_tex_cache_for_gl_tex(GLuint tex);
-    // strip the id out of any live binding before queuing the delete;
-    // pc_gx_texture.c holds the delete one extra frame so no in-flight cmd
-    // snapshot can still reference it when glGenTextures reuses the id
-    pc_gx_texture_invalidate_gl_tex(victim->gl_tex);
-    // also clear any tex_cache/salvage row pointing at this gl_tex so the
+    // clear any tex_cache/salvage row pointing at this gl_tex (after the unlock) so the
     // next lookup misses and re-resolves instead of returning a recycled id
-    pc_gx_texture_evict_tex_cache_for_gl_tex(victim->gl_tex);
+    s_vtc_scrub[s_vtc_scrub_n++] = victim->gl_tex;
     // and drop kc_cache rows resolving to this key, otherwise subsequent
     // compute_key on the same data_ptr returns a key that's about to die
     vtc_kc_invalidate_for_key(victim->key);
     vita_defer_tex_delete(victim->gl_tex);
     g_vtc_vram_used -= victim->vram_bytes;
-    g_vtc_evictions++;
 
     victim->occupied = 0;
     victim->tombstone = 1; // keep the probe chain intact for find()
@@ -395,9 +378,6 @@ static void vtc_loaded_evict_oldest(void) {
     victim->gl_tex = 0;
     victim->key = 0;
 }
-
-static int g_vtc_vram_skips = 0;      // bookkeeping budget refused
-static int g_vtc_vram_real_skips = 0; // real CDRAM margin refused
 
 // evict unreferenced LRU entries until we fit, or fail. returns 0 when
 // every entry is currently held by a tex_cache (ref_count > 0)
@@ -428,7 +408,6 @@ void vtc_loaded_insert_locked(unsigned long long key, GLuint tex, int w, int h, 
     // eventually exhausted real CDRAM
     if (!vtc_make_room_within_budget(vram_bytes)) {
         vita_defer_tex_delete(tex);
-        g_vtc_vram_skips++;
         return;
     }
 
@@ -493,6 +472,7 @@ void vtc_loaded_insert(unsigned long long key, GLuint tex, int w, int h, int vra
     vtc_loaded_lock();
     vtc_loaded_insert_locked(key, tex, w, h, vram_bytes);
     vtc_loaded_unlock();
+    vtc_flush_scrubs();
 }
 
 // Call once per frame to advance LRU counter
@@ -529,19 +509,20 @@ static VtcIndexEntry* vtc_find(unsigned long long cache_key) {
 // TLUT hash computation (Dolphin-compatible)
 static unsigned long long vtc_compute_tlut_hash(const void* image_data, int hash_size,
                                                   const void* tlut_data, int tlut_entries,
-                                                  int tlut_is_be) {
+                                                  int tlut_is_be, unsigned int fmt) {
     if (!tlut_data || tlut_entries <= 0) return 0;
 
     const unsigned char* tex = (const unsigned char*)image_data;
     unsigned int pal_min = 0xFFFF, pal_max = 0;
 
-    if (tlut_entries <= 16) { // CI4
+    // the index width comes from the format (like Dolphin); N64-style TLUT loads hold more entries
+    if (fmt == 0x8) { // CI4
         for (int i = 0; i < hash_size; i++) {
             unsigned int lo = tex[i] & 0xF, hi = tex[i] >> 4;
             if (lo < pal_min) pal_min = lo; if (hi < pal_min) pal_min = hi;
             if (lo > pal_max) pal_max = lo; if (hi > pal_max) pal_max = hi;
         }
-    } else if (tlut_entries <= 256) { // CI8
+    } else if (fmt == 0x9) { // CI8
         for (int i = 0; i < hash_size; i++) {
             unsigned int idx = tex[i];
             if (idx < pal_min) pal_min = idx; if (idx > pal_max) pal_max = idx;
@@ -591,7 +572,6 @@ void vita_vtc_init(void) {
                  g_pc_settings.texture_pack);
     } else {
         g_vtc_path[0] = '\0';
-        printf("[VTC] No texture pack selected\n");
         return;
     }
 
@@ -599,34 +579,32 @@ void vita_vtc_init(void) {
     // Only the worker thread handle is kept open for runtime reads.
     FILE* init_file = fopen(g_vtc_path, "rb");
     if (!init_file) {
-        printf("[VTC] No cache file found at %s\n", g_vtc_path);
+        pc_log_error("[VTC] texture pack not found: %s\n", g_vtc_path);
         return;
     }
 
     // Read header
     unsigned int header[4];
     if (fread(header, 4, 4, init_file) != 4) {
-        printf("[VTC] Invalid header\n");
+        pc_log_error("[VTC] %s: invalid header\n", g_vtc_path);
         fclose(init_file);
         return;
     }
     if (header[0] != VTC_MAGIC) {
-        printf("[VTC] Wrong magic: %08X\n", header[0]);
+        pc_log_error("[VTC] %s: wrong magic %08X\n", g_vtc_path, header[0]);
         fclose(init_file);
         return;
     }
     if (header[1] != VTC_VERSION_V2 && header[1] != VTC_VERSION_V3) {
-        printf("[VTC] Unsupported version: %d (this build supports v2 and v3)\n", header[1]);
+        pc_log_error("[VTC] %s: unsupported version %d (this build supports v2 and v3)\n", g_vtc_path, header[1]);
         fclose(init_file);
         return;
     }
     g_vtc_format_version = (int)header[1];
-    // OSReport so the load shows in error.log; printf stdout is dropped.
-    OSReport("[VTC] loaded format v%d: %s\n", g_vtc_format_version, g_vtc_path);
 
     int count = (int)header[2];
     if (count <= 0 || count > 100000) {
-        printf("[VTC] Invalid count: %d\n", count);
+        pc_log_error("[VTC] %s: invalid count %d\n", g_vtc_path, count);
         fclose(init_file);
         return;
     }
@@ -634,13 +612,13 @@ void vita_vtc_init(void) {
     // Load index table
     g_vtc_index = (VtcIndexEntry*)malloc(count * sizeof(VtcIndexEntry));
     if (!g_vtc_index) {
-        printf("[VTC] Failed to allocate index (%d entries, %d KB)\n",
-               count, (int)(count * sizeof(VtcIndexEntry) / 1024));
+        pc_log_error("[VTC] Failed to allocate index (%d entries, %d KB)\n",
+                     count, (int)(count * sizeof(VtcIndexEntry) / 1024));
         fclose(init_file);
         return;
     }
     if ((int)fread(g_vtc_index, sizeof(VtcIndexEntry), count, init_file) != count) {
-        printf("[VTC] Failed to read index table\n");
+        pc_log_error("[VTC] %s: failed to read index table\n", g_vtc_path);
         free(g_vtc_index); g_vtc_index = NULL;
         fclose(init_file);
         return;
@@ -650,7 +628,7 @@ void vita_vtc_init(void) {
     // Open worker thread file handle (the ONLY runtime file handle)
     g_vtc_file_worker = fopen(g_vtc_path, "rb");
     if (!g_vtc_file_worker) {
-        printf("[VTC] WARNING: failed to open worker file handle, worker thread HD textures disabled\n");
+        pc_log_error("[VTC] failed to open worker file handle, worker thread HD textures disabled\n");
     } else {
         // 256KB stdio buffer so adjacent Phase-2-sorted reads share refills
         setvbuf(g_vtc_file_worker, NULL, _IOFBF, 256 * 1024);
@@ -696,14 +674,6 @@ static inline void vtc_access_log_record(VtcIndexEntry* entry, unsigned long lon
 }
 
 void vita_vtc_shutdown(void) {
-    if (g_vtc_active) {
-        printf("[VTC] Stats: %d lookups, %d hits, %d loaded, %d cache hits, %d neg skips, %d evictions, %dKB vRAM, %d budget-skips, %d real-vram-skips\n",
-               g_vtc_stat_lookups, g_vtc_stat_hits, g_vtc_stat_loaded,
-               g_vtc_stat_cache_hits, g_vtc_stat_neg_hits,
-               g_vtc_evictions, g_vtc_vram_used / 1024,
-               g_vtc_vram_skips, g_vtc_vram_real_skips);
-    }
-
     for (int i = 0; i < VTC_LOADED_CACHE_SIZE; i++) {
         if (g_vtc_loaded[i].occupied && g_vtc_loaded[i].gl_tex)
             glDeleteTextures(1, &g_vtc_loaded[i].gl_tex);
@@ -811,7 +781,7 @@ GLuint vita_vtc_lookup(const void* data, int data_size,
     int hash_size = gc_texture_data_size(w, h, fmt);
     if (hash_size > data_size) hash_size = data_size;
     unsigned long long data_hash = xxhash64(data, hash_size);
-    unsigned long long tlut_hash = vtc_compute_tlut_hash(data, hash_size, tlut_data, tlut_entries, tlut_is_be);
+    unsigned long long tlut_hash = vtc_compute_tlut_hash(data, hash_size, tlut_data, tlut_entries, tlut_is_be, fmt);
 
     unsigned long long key = vtc_cache_key(data_hash, tlut_hash, fmt, (unsigned int)w, (unsigned int)h);
 
@@ -830,7 +800,6 @@ GLuint vita_vtc_lookup(const void* data, int data_size,
         GLuint snap_tex = loaded->gl_tex;
         loaded->ref_count++; // caller takes ownership of this ref
         vtc_loaded_unlock();
-        g_vtc_stat_cache_hits++;
         if (out_w) *out_w = snap_w;
         if (out_h) *out_h = snap_h;
         if (out_key) *out_key = matched_key;
@@ -854,7 +823,7 @@ unsigned char* vita_vtc_lookup_deferred(const void* data, int data_size,
     int hash_size = gc_texture_data_size(w, h, fmt);
     if (hash_size > data_size) hash_size = data_size;
     unsigned long long data_hash = xxhash64(data, hash_size);
-    unsigned long long tlut_hash = vtc_compute_tlut_hash(data, hash_size, tlut_data, tlut_entries, tlut_is_be);
+    unsigned long long tlut_hash = vtc_compute_tlut_hash(data, hash_size, tlut_data, tlut_entries, tlut_is_be, fmt);
 
     unsigned long long key = vtc_cache_key(data_hash, tlut_hash, fmt, (unsigned int)w, (unsigned int)h);
 
@@ -866,8 +835,6 @@ unsigned char* vita_vtc_lookup_deferred(const void* data, int data_size,
     }
 
     // Binary search VTC index (exact + wildcard, skip neg-cached)
-    g_vtc_stat_worker_lookups++;
-
     VtcIndexEntry* entry = NULL;
     if (!vtc_neg_check(key))
         entry = vtc_find(key);
@@ -879,11 +846,9 @@ unsigned char* vita_vtc_lookup_deferred(const void* data, int data_size,
         }
     }
     if (!entry) {
-        g_vtc_stat_worker_neg++;
         vtc_neg_insert(key);
         return NULL;
     }
-    g_vtc_stat_worker_hits++;
 
     // Read DXT data from file (worker thread handle, separate from main)
     if (!g_vtc_file_worker) return NULL;
@@ -909,7 +874,6 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
                                          const void* tlut_data, int tlut_entries, int tlut_is_be,
                                          unsigned int data_ptr, unsigned int data_hash_fnv,
                                          unsigned int tlut_hash_fnv) {
-    g_vtc_compute_calls++;
     if (!g_vtc_active || !data || data_size <= 0) return 0;
 
     // XXHash64 result cache. Snapshot under lock so a main-thread
@@ -932,10 +896,11 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
     }
     vtc_kc_unlock();
     if (kc_hit) {
-        g_vtc_keycache_hits++;
         if (cached_key != 0) {
+#ifdef VITA_DEBUG
             VtcIndexEntry* logged_entry = vtc_find(cached_key);
             if (logged_entry) vtc_access_log_record(logged_entry, cached_key);
+#endif
             // Re-queue for prefetch in case it was evicted from loaded_cache
             vtc_loaded_lock();
             int in_loaded = (vtc_loaded_find(cached_key) != NULL);
@@ -955,7 +920,7 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
     int hash_size = gc_texture_data_size(w, h, fmt);
     if (hash_size > data_size) hash_size = data_size;
     unsigned long long data_hash = xxhash64(data, hash_size);
-    unsigned long long tlut_hash = vtc_compute_tlut_hash(data, hash_size, tlut_data, tlut_entries, tlut_is_be);
+    unsigned long long tlut_hash = vtc_compute_tlut_hash(data, hash_size, tlut_data, tlut_entries, tlut_is_be, fmt);
     unsigned long long key = vtc_cache_key(data_hash, tlut_hash, fmt, (unsigned int)w, (unsigned int)h);
 
     unsigned long long result_key = 0; // default: not in VTC
@@ -1015,9 +980,10 @@ unsigned long long vita_vtc_compute_key(const void* data, int data_size,
     vtc_kc_unlock();
 
     if (result_key != 0) {
-        g_vtc_compute_hits++;
+#ifdef VITA_DEBUG
         VtcIndexEntry* logged_entry = vtc_find(result_key);
         if (logged_entry) vtc_access_log_record(logged_entry, result_key);
+#endif
         // Queue for prefetch. Worker thread will read VTC data during idle time.
         vtc_prefetch_lock();
         if (g_vtc_prefetch_count < VTC_PREFETCH_MAX) {
@@ -1055,7 +1021,6 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             // it ARM can reorder pending/buffer loads ahead of state.
             __sync_synchronize();
             // I/O thread already read this. Zero file I/O on main thread.
-            g_vtc_io_preread_hits++;
             int hd_w = g_vtc_io_slots[si].hd_w;
             int hd_h = g_vtc_io_slots[si].hd_h;
             unsigned char slot_fmt = g_vtc_io_slots[si].dxt_format;
@@ -1063,13 +1028,15 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             // preflight both caps. releasing the slot frees the io
             // thread's pending texture (already allocated cdram)
             int vram_needed = vtc_estimate_vram(hd_w, hd_h, slot_fmt);
-            if (!vtc_make_room_within_budget(vram_needed)) {
-                g_vtc_vram_skips++;
+            vtc_loaded_lock();
+            int room = vtc_make_room_within_budget(vram_needed);
+            vtc_loaded_unlock();
+            vtc_flush_scrubs();
+            if (!room) {
                 vita_vtc_release_slot(si);
                 return 0;
             }
             if (!vtc_check_real_vram_ok(vram_needed)) {
-                g_vtc_vram_real_skips++;
                 vita_vtc_release_slot(si);
                 return 0;
             }
@@ -1121,12 +1088,20 @@ GLuint vita_vtc_lookup_by_key(unsigned long long key, int* out_w, int* out_h) {
             vtc_loaded_lock();
             vtc_loaded_insert_locked(key, tex, hd_w, hd_h, vram);
             VtcLoadedEntry* inserted = vtc_loaded_find(key);
-            if (inserted) inserted->ref_count++;
+            GLuint kept = 0;
+            if (inserted) {
+                inserted->ref_count++;
+                kept = inserted->gl_tex;
+                hd_w = inserted->tex_w;
+                hd_h = inserted->tex_h;
+            }
             vtc_loaded_unlock();
+            vtc_flush_scrubs();
+            if (!kept) return 0;
 
             if (out_w) *out_w = hd_w;
             if (out_h) *out_h = hd_h;
-            return tex;
+            return kept;
         }
     }
 
@@ -1148,15 +1123,14 @@ static int vtc_io_thread_func(SceSize args, void* argp) {
             if (g_vtc_io_slots[i].state != VTC_SLOT_QUEUED) continue;
 
             VtcIoSlot* slot = &g_vtc_io_slots[i];
-            slot->state = VTC_SLOT_READING;
+            // a scene change can free a queued slot at the same moment; only the winner proceeds
+            if (!__sync_bool_compare_and_swap(&slot->state, VTC_SLOT_QUEUED, VTC_SLOT_READING)) continue;
             GLenum gl_fmt = vtc_fmt_to_gl(slot->dxt_format);
 
             if (g_vtc_format_version == VTC_VERSION_V3) {
                 // Direct path: fread straight into GPU memory.
-                unsigned int _t_alloc = sceKernelGetProcessTimeLow();
                 slot->pending = vglPrepareEmptyCompressedTexture2D(
                     gl_fmt, slot->hd_w, slot->hd_h);
-                g_io_alloc_us += sceKernelGetProcessTimeLow() - _t_alloc;
                 if (!slot->pending) {
                     slot->state = VTC_SLOT_FREE;
                     continue;
@@ -1164,12 +1138,8 @@ static int vtc_io_thread_func(SceSize args, void* argp) {
                 void* gpu_buf = vglGetPendingTextureBuffer(slot->pending);
                 uint32_t expected = vglGetPendingTextureSize(slot->pending);
                 if (gpu_buf && expected == (uint32_t)slot->dxt_size) {
-                    unsigned int _t_read = sceKernelGetProcessTimeLow();
                     fseek(g_vtc_file_io, slot->file_offset, SEEK_SET);
                     size_t got = fread(gpu_buf, 1, slot->dxt_size, g_vtc_file_io);
-                    g_io_fread_us += sceKernelGetProcessTimeLow() - _t_read;
-                    g_io_bytes_read += slot->dxt_size;
-                    g_io_phase_count++;
                     if (got == (size_t)slot->dxt_size) {
                         slot->buffer = NULL; // v3 direct: no raw fallback
                         slot->malloc_buf = NULL;
@@ -1199,18 +1169,12 @@ static int vtc_io_thread_func(SceSize args, void* argp) {
                     slot->malloc_buf = buf;
                     if (!buf) { slot->state = VTC_SLOT_FREE; continue; }
                 }
-                unsigned int _t_read = sceKernelGetProcessTimeLow();
                 fseek(g_vtc_file_io, slot->file_offset, SEEK_SET);
                 size_t got = fread(buf, 1, slot->dxt_size, g_vtc_file_io);
-                g_io_fread_us += sceKernelGetProcessTimeLow() - _t_read;
-                g_io_bytes_read += slot->dxt_size;
-                g_io_phase_count++;
                 if (got == (size_t)slot->dxt_size) {
                     slot->buffer = buf;
-                    unsigned int _t_fin = sceKernelGetProcessTimeLow();
                     slot->pending = vglPrepareCompressedTexture2D(
                         gl_fmt, slot->hd_w, slot->hd_h, buf, slot->dxt_size);
-                    g_io_finalize_us += sceKernelGetProcessTimeLow() - _t_fin;
                     // barrier before READY publish; see v3 note above.
                     __sync_synchronize();
                     slot->state = VTC_SLOT_READY;
@@ -1221,23 +1185,6 @@ static int vtc_io_thread_func(SceSize args, void* argp) {
                     slot->pending = NULL;
                     slot->state = VTC_SLOT_FREE;
                 }
-            }
-            // Dump io phase breakdown every 64 uploads to error.log.
-            if (g_io_phase_count >= 64) {
-                // integer fixed-point: %f pulls in newlib's FP stdio.
-                unsigned int kb_avg_x10 = g_io_phase_count
-                    ? (g_io_bytes_read * 10u) / (g_io_phase_count * 1024u) : 0;
-                unsigned int mbs_x10 = g_io_fread_us
-                    ? (g_io_bytes_read * 10u) / g_io_fread_us : 0; // bytes/us ~= MB/s
-                OSReport(
-                    "[VTC IO] %d uploads: fread=%u us alloc=%u us finalize=%u us bytes=%u avg=%u.%u KB mbs=%u.%u\n",
-                    g_io_phase_count, g_io_fread_us, g_io_alloc_us, g_io_finalize_us, g_io_bytes_read,
-                    kb_avg_x10 / 10, kb_avg_x10 % 10, mbs_x10 / 10, mbs_x10 % 10);
-                g_io_phase_count = 0;
-                g_io_fread_us = 0;
-                g_io_alloc_us = 0;
-                g_io_finalize_us = 0;
-                g_io_bytes_read = 0;
             }
             // Don't break. Drain ALL queued slots in one wake cycle.
         }
@@ -1385,7 +1332,8 @@ void vita_vtc_prefetch(void) {
         slot->file_offset = entry->offset;
 
         if (have_io_thread) {
-            // Queue for I/O thread. No file I/O on worker thread.
+            // Queue for I/O thread. No file I/O on worker thread. Metadata first, then the state.
+            __sync_synchronize();
             slot->state = VTC_SLOT_QUEUED;
             g_vtc_io_queued++;
             signaled++;
@@ -1502,6 +1450,7 @@ int vita_vtc_request_read(unsigned long long key) {
             g_vtc_io_slots[i].hd_h = entry->hd_height;
             g_vtc_io_slots[i].dxt_format = entry->format;
             g_vtc_io_slots[i].file_offset = entry->offset;
+            __sync_synchronize();
             g_vtc_io_slots[i].state = VTC_SLOT_QUEUED;
             g_vtc_io_queued++;
             sceKernelSignalSema(g_vtc_io_sema, 1);
@@ -1517,6 +1466,7 @@ int vita_vtc_check_ready(int slot, unsigned char** out_dxt, int* out_size,
                           int* out_w, int* out_h, int* out_gl_fmt) {
     if (slot < 0 || slot >= VTC_IO_SLOTS) return 0;
     if (g_vtc_io_slots[slot].state != VTC_SLOT_READY) return 0;
+    __sync_synchronize(); // pairs with the I/O thread's store before READY
 
     *out_dxt = g_vtc_io_slots[slot].buffer;
     *out_size = g_vtc_io_slots[slot].dxt_size;
@@ -1532,6 +1482,7 @@ int vita_vtc_check_ready(int slot, unsigned char** out_dxt, int* out_size,
 vglPendingTexture* vita_vtc_take_ready_pending(int slot, int* out_w, int* out_h) {
     if (slot < 0 || slot >= VTC_IO_SLOTS) return NULL;
     if (g_vtc_io_slots[slot].state != VTC_SLOT_READY) return NULL;
+    __sync_synchronize(); // pairs with the I/O thread's store before READY
     vglPendingTexture* p = g_vtc_io_slots[slot].pending;
     g_vtc_io_slots[slot].pending = NULL;
     if (out_w) *out_w = g_vtc_io_slots[slot].hd_w;
@@ -1554,8 +1505,11 @@ void vita_vtc_invalidate_for_scene_change(void) {
 
     for (int si = 0; si < VTC_IO_SLOTS; si++) {
         int state = g_vtc_io_slots[si].state;
-        if (state == VTC_SLOT_READY || state == VTC_SLOT_QUEUED) {
+        if (state == VTC_SLOT_READY) {
             vita_vtc_release_slot(si);
+        } else if (state == VTC_SLOT_QUEUED) {
+            // the I/O thread may be claiming it this instant; only a won swap frees it
+            __sync_bool_compare_and_swap(&g_vtc_io_slots[si].state, VTC_SLOT_QUEUED, VTC_SLOT_FREE);
         }
     }
 }

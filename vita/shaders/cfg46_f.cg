@@ -14,6 +14,7 @@ void main(
     uniform sampler2D u_texture0 : TEXUNIT0,
     uniform sampler2D u_texture1 : TEXUNIT1,
     uniform half u_use_texture0,
+    uniform half u_use_texture1,
     uniform half u_tev0_tc_src,
     uniform half u_tev1_tc_src,
 
@@ -56,7 +57,7 @@ void main(
 
     // S1 texture
     float2 tc1 = lerp(v_texcoord0, v_texcoord1, step(0.5, (float)u_tev1_tc_src));
-    half4 tex1 = (half4)tex2D(u_texture1, tc1);
+    half4 tex1 = (half4)lerp(half4(1,1,1,1), (half4)tex2D(u_texture1, tc1), step(0.5h, u_use_texture1));
 
     // S0: color = A2(grayscale) * TEXC, alpha = A0 * TEXA
     half3 prev_c = u_tev0_cc * tex0.rgb;
