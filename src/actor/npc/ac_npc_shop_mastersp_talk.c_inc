@@ -142,16 +142,78 @@ static int to_atari(NPC_SHOP_MASTERSP_ACTOR* shop_mastersp) {
 
     mIN_copy_name_str(name_str, item_p[shop_mastersp->result]);
     mMsg_SET_ITEM_STR_ART(mMsg_FREE_STR0, name_str, mIN_ITEM_NAME_LEN, item_p[shop_mastersp->result]);
+#ifdef VITA_MP
+    mp_world_inv_mark();
+#endif
     mPr_SetFreePossessionItem(Now_Private, item_p[shop_mastersp->result], mPr_ITEM_COND_PRESENT);
+#ifdef VITA_MP
+    mp_world_inv_follow();
+    mp_raffle_won(shop_mastersp->result, item_p[shop_mastersp->result]);
+#endif
     aSHM_set_start_avoid_pos(shop_mastersp, shop_mastersp->result * 3);
     shop_mastersp->move_think_idx = aSHM_THINK_HIROU;
     return TRUE;
 }
 
+#ifdef VITA_MP
+// the draw is rolled once before the drum turns; a prize it wins waits on the host's word that it's still there for
+// this player (another player's win in between, or no word at all, makes it a miss)
+static int aSHM_mp_roll; // the draw + 1, 0 for none rolled
+
+static int aSHM_mp_prize(int result) {
+    mActor_name_t item = result < mSP_LOTTERY_ITEM_COUNT ? Save_Get(shop).lottery_items[result] : EMPTY_NO;
+
+    return item != EMPTY_NO && item != RSV_SHOP_SOLD_FTR ? item : EMPTY_NO;
+}
+
+static int aSHM_mp_draw_ready(void) {
+    int result;
+
+    if (!mp_active()) {
+        aSHM_mp_roll = 0;
+        return TRUE;
+    }
+    if (aSHM_mp_roll == 0) {
+        int rng = RANDOM(100);
+
+        if (rng < aSHM_FIRST_PLACE_PERCENT) {
+            result = aSHM_WON_FIRST_PLACE;
+        } else if (rng < aSHM_SECOND_PLACE_PERCENT) {
+            result = aSHM_WON_SECOND_PLACE;
+        } else if (rng < aSHM_THIRD_PLACE_PERCENT) {
+            result = aSHM_WON_THIRD_PLACE;
+        } else {
+            result = aSHM_DIDNT_WIN;
+        }
+        aSHM_mp_roll = result + 1;
+        if (aSHM_mp_prize(result) != EMPTY_NO) {
+            mp_shop_claim(aSHM_mp_prize(result));
+        }
+    }
+    result = aSHM_mp_roll - 1;
+    if (aSHM_mp_prize(result) != EMPTY_NO) {
+        switch (mp_shop_claim_state(aSHM_mp_prize(result))) {
+            case 0:
+                return FALSE;
+            case 2:
+                aSHM_mp_roll = aSHM_DIDNT_WIN + 1;
+                break;
+        }
+    }
+    return TRUE;
+}
+#endif
+
 static void fukubiki_before_process(NPC_SHOP_MASTERSP_ACTOR* shop_mastersp) {
     int rng = RANDOM(100);
 
+#ifdef VITA_MP
+    mp_world_inv_mark();
+#endif
     uketori_lottery_ticket(shop_mastersp->month);
+#ifdef VITA_MP
+    mp_world_inv_follow();
+#endif
     aSHM_change_talk_proc(shop_mastersp, aSHM_TALK_STOP_PLAYER);
     shop_mastersp->next_think_idx = aSHM_THINK_MOVE_PLAYER;
 
@@ -164,6 +226,12 @@ static void fukubiki_before_process(NPC_SHOP_MASTERSP_ACTOR* shop_mastersp) {
     } else {
         shop_mastersp->result = aSHM_DIDNT_WIN;
     }
+#ifdef VITA_MP
+    if (aSHM_mp_roll != 0 && mp_active()) {
+        shop_mastersp->result = aSHM_mp_roll - 1;
+    }
+    aSHM_mp_roll = 0;
+#endif
 
     // If the prize was already won then we change to didn't win
     if (shop_mastersp->result != aSHM_DIDNT_WIN && !to_atari(shop_mastersp)) {
@@ -178,6 +246,11 @@ static void aSHM_talk_try(NPC_SHOP_MASTERSP_ACTOR* shop_mastersp, GAME_PLAY* pla
         switch (shop_mastersp->result) {
             case mChoice_CHOICE0:
                 if (check_lottery_ticket(shop_mastersp->month)) {
+#ifdef VITA_MP
+                    if (!aSHM_mp_draw_ready()) {
+                        break;
+                    }
+#endif
                     mMsg_SET_CONTINUE_MSG_NUM(0x10D4);
                     fukubiki_before_process(shop_mastersp);
                 } else {
@@ -211,6 +284,11 @@ static void aSHM_talk_retry(NPC_SHOP_MASTERSP_ACTOR* shop_mastersp, GAME_PLAY* p
     int order = mDemo_Get_OrderValue(mDemo_ORDER_NPC0, 9);
 
     if (order == 2) {
+#ifdef VITA_MP
+        if (mChoice_GET_CHOSENUM() == mChoice_CHOICE0 && !aSHM_mp_draw_ready()) {
+            return;
+        }
+#endif
         if (CLIP(garagara_clip) != NULL) {
             CLIP(garagara_clip)->delete_ball_proc();
         }

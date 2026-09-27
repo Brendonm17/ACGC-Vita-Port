@@ -30,6 +30,11 @@
 #include "m_vibctl.h"
 #include "types.h"
 #include "ac_train_door.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+static u8 aNM2_mp_quiet; // a network trip: announcements only; latched since the trip ends mid-ride
+#endif
 static void aNM2_actor_ct(ACTOR* actorx, GAME* game);
 static void aNM2_actor_save(ACTOR* actorx, GAME* game);
 static void aNM2_actor_dt(ACTOR* actorx, GAME* game);
@@ -149,6 +154,15 @@ static void aNM2_actor_ct(ACTOR* actorx, GAME* game) {
 
     process_idx = aNM2_MOVE_ANNOUNCE_START_WAIT;
     npc_info_mask = mask_cat2_actor->npc_class.npc_info.mask;
+#ifdef VITA_MP
+    // network trips skip the cat's visit; it waits out of sight like Blanca does
+    aNM2_mp_quiet = mp_travel_net_trip();
+    if (aNM2_mp_quiet) {
+        mask_cat2_actor->npc_class.actor_class.shape_info.draw_shadow = FALSE;
+        mask_cat2_actor->npc_class.actor_class.world.position.x = 100.0f;
+        mask_cat2_actor->npc_class.actor_class.world.position.z = 48.0f;
+    } else
+#endif
     if ((npc_info_mask == 0) || npc_info_mask->npc_id == SP_NPC_GUIDE) {
         process_idx = aNM2_MOVE_ANNOUNCE_START_WAIT_DUPE_1;
         mask_cat2_actor->npc_class.actor_class.shape_info.rotation.y = -0x8000;

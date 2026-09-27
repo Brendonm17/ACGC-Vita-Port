@@ -10,6 +10,28 @@
 #include "m_needlework_ovl.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
+
+#ifdef VITA_MP
+static u8 aSIGN_mp_vis[aSIGN_SINGLE_NUM]; // a sign another player put up or pulled out: shown, never written
+
+static void aSIGN_mp_send(int grow, const xyz_t* pos, mActor_name_t item) {
+    u8 body[16];
+    const u8* src = (const u8*)pos;
+    int i;
+
+    body[0] = MP_VFX_SIGN;
+    body[1] = (u8)grow;
+    for (i = 0; i < 12; i++) {
+        body[2 + i] = src[i];
+    }
+    body[14] = (u8)item;
+    body[15] = (u8)(item >> 8);
+    mp_vfx_send(body, sizeof(body));
+}
+#endif
 
 enum {
     aSIGN_ACTION_WAIT,
@@ -440,6 +462,9 @@ extern int aSIGN_set_white_sign(GAME* game, xyz_t* pos_p) {
     sign->sign_birth_pos = *pos_p;
     sAdo_OngenTrgStart(NA_SE_ITEM_HORIDASHI, &sign->sign_birth_pos);
     aSIGN_setup_action(sign, aSIGN_ACTION_SINGLE_BIRTH);
+#ifdef VITA_MP
+    aSIGN_mp_send(TRUE, pos_p, SIGNBOARD);
+#endif
     return TRUE;
 }
 
@@ -450,6 +475,15 @@ extern int aSIGN_erase_white_sign(GAME* game, xyz_t* pos_p) {
     if (sign == NULL) {
         return FALSE;
     }
+#ifdef VITA_MP
+    {
+        mActor_name_t* fg_p = mFI_GetUnitFG(*pos_p);
+
+        if (fg_p != NULL) {
+            aSIGN_mp_send(FALSE, pos_p, *fg_p);
+        }
+    }
+#endif
 
     for (i = 0; i < aSIGN_SINGLE_NUM; i++) {
         aSIGN_single_c* single = &sign->single[i];
@@ -712,6 +746,11 @@ static void aSIGN_single_all_check(SIGN_ACTOR* sign) {
 
                 mFI_BkandUtNum2CenterWpos(&center_pos, sign->single[i].block.x, sign->single[i].block.z,
                                           sign->single[i].unit.x, sign->single[i].unit.z);
+#ifdef VITA_MP
+                if (aSIGN_mp_vis[i]) {
+                    aSIGN_mp_vis[i] = FALSE;
+                } else
+#endif
                 mFI_SetFG_common(SIGNBOARD_END, center_pos, TRUE);
                 sign->single[i].exist_flag = 0;
             }
@@ -723,6 +762,9 @@ static void aSIGN_single_all_check(SIGN_ACTOR* sign) {
                                           sign->single[i].unit.x, sign->single[i].unit.z);
                 center_pos.y = mCoBG_GetBgY_OnlyCenter_FromWpos2(center_pos, 0.0f); // unused??
                 sign->single[i].exist_flag = 0;
+#ifdef VITA_MP
+                aSIGN_mp_vis[i] = FALSE;
+#endif
             }
         }
     }
@@ -730,6 +772,49 @@ static void aSIGN_single_all_check(SIGN_ACTOR* sign) {
 
 static void aSIGN_random_set(void);
 static void aSIGN_all_clear(void);
+
+#ifdef VITA_MP
+void aSIGN_mp_replay(const u8* body, int len) {
+    SIGN_ACTOR* sign = Common_Get(clip).sign_control_actor;
+    xyz_t pos;
+    u8* dst = (u8*)&pos;
+    int i;
+
+    if (sign == NULL || len < 16) {
+        return;
+    }
+    for (i = 0; i < 12; i++) {
+        dst[i] = body[2 + i];
+    }
+    for (i = 0; i < aSIGN_SINGLE_NUM; i++) {
+        aSIGN_single_c* single = &sign->single[i];
+
+        if (single->exist_flag != 0 && aSIGN_single_anime_check(single, pos)) {
+            return;
+        }
+    }
+    for (i = 0; i < aSIGN_SINGLE_NUM; i++) {
+        aSIGN_single_c* single = &sign->single[i];
+
+        if (single->exist_flag == 0) {
+            mFI_Wpos2BkandUtNuminBlock(&single->block.x, &single->block.z, &single->unit.x, &single->unit.z, pos);
+            single->item = (mActor_name_t)(body[14] | (body[15] << 8));
+            if (body[1]) {
+                single->scale.x = single->scale.y = single->scale.z = 0.0001f;
+                single->exist_flag = 1;
+                single->_24 = 0;
+                single->_20 = 0.005f;
+                single->_26 = 6000;
+            } else {
+                single->scale.x = single->scale.y = single->scale.z = 0.0099f;
+                single->exist_flag = 2;
+            }
+            aSIGN_mp_vis[i] = TRUE;
+            return;
+        }
+    }
+}
+#endif
 
 static void aSIGN_actor_move(ACTOR* actorx, GAME* game) {
     SIGN_ACTOR* sign = (SIGN_ACTOR*)actorx;

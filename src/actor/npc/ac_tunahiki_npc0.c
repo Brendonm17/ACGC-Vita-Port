@@ -7,6 +7,9 @@
 #include "m_msg.h"
 #include "m_soncho.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // TODO: coordinate enum types with ac_tunahiki_control
 
@@ -117,6 +120,9 @@ static void aTNN0_actor_ct(ACTOR* actorx, GAME* game) {
         actorx->position_speed.y = 0.0f;
         actorx->gravity = 0.0f;
         actorx->max_velocity_y = 0.0f;
+#ifdef VITA_MP
+        pc_mp_ev_begun(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR);
+#endif
     }
 }
 
@@ -124,10 +130,28 @@ static void aTNN0_actor_save(ACTOR* actorx, GAME* game) {
     mNpc_RenewalSetNpc(actorx);
 }
 
+#ifdef VITA_MP
+// the tug of war's own end of its record (the host's, once nobody has it out)
+void aTNN0_mp_torn(void) {
+    aEv_tunahiki_c* tunahiki = (aEv_tunahiki_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR, 9);
+
+    if (tunahiki != NULL) {
+        tunahiki->flag = 0;
+        tunahiki->npc_state = aTNC_NPC_STATE2;
+    }
+}
+#endif
+
 static void aTNN0_actor_dt(ACTOR* actorx, GAME* game) {
     aEv_tunahiki_c* tunahiki = (aEv_tunahiki_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR, 9);
     TUNAHIKI_NPC0_ACTOR* actor = (TUNAHIKI_NPC0_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    // the others' tug of war goes on: only this screen's pullers go
+    if (pc_mp_ev_npc0_gone(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR)) {
+        tunahiki = NULL;
+    }
+#endif
     if (tunahiki != NULL) {
         tunahiki->flag = 0;
         tunahiki->npc_state = aTNC_NPC_STATE2;
@@ -180,6 +204,19 @@ static void aTNN0_make_hata(ACTOR* actorx, GAME* game) {
 static void aTNN0_actor_move(ACTOR* actorx, GAME* game) {
     NPC_CLIP->move_proc(actorx, game);
     aTNN0_make_hata(actorx, game);
+#ifdef VITA_MP
+    // following another screen's tug of war: the rope shows here too, where the starter set it out
+    {
+        TUNAHIKI_NPC0_ACTOR* actor = (TUNAHIKI_NPC0_ACTOR*)actorx;
+
+        if (actor->rope_p == NULL && mp_npc_is_puppet(actorx)) {
+            actor->rope_p = Actor_info_make_actor(&((GAME_PLAY*)game)->actor_info, game, mAc_PROFILE_ROPE,
+                                                  actorx->home.position.x + 20.0f, actorx->home.position.y,
+                                                  actorx->home.position.z + 45.0f, 0, 0, 0, -1, -1, -1, EMPTY_NO, -1,
+                                                  -1, -1);
+        }
+    }
+#endif
 }
 
 #include "../src/actor/npc/ac_tunahiki_npc0_talk.c_inc"

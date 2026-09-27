@@ -191,6 +191,12 @@ extern int mFont_CodeSize_idx_get(u8* str, int idx) {
 }
 
 extern int mFont_cont_attr_get(int cont_code) {
+#ifdef BUGFIXES
+  // (a code past the table has none)
+  if (cont_code < 0 || cont_code >= mFont_CONT_CODE_NUM) {
+    return mFont_CONT_ATTRIBUTE_0;
+  }
+#endif
   return mFont_cont_info_tbl[cont_code].attribute;
 }
 
@@ -1062,12 +1068,22 @@ static void mFontSentence_gppDraw_main(mFontSentence* this, GAME* game, Gfx** gf
     int next = *(char_p + 1);
     int type = mFont_cont_attr_get(next);
 
+#ifdef BUGFIXES
+    // (a code with no handler is stepped over, not called)
+    if (type == mFont_CONT_ATTRIBUTE_SENTENCE && mFontSentence_cont_proc_get(next) != NULL) {
+      (mFontSentence_cont_proc_get(next))(this, gfx_pp);
+    }
+    else if (type == mFont_CONT_ATTRIBUTE_CHARACTER && mFontChar_cont_proc_get(next) != NULL) {
+      (mFontChar_cont_proc_get(next))(&this->character, gfx_pp);
+    }
+#else
     if (type == mFont_CONT_ATTRIBUTE_SENTENCE) {
       (mFontSentence_cont_proc_get(next))(this, gfx_pp);
     }
     else if (type == mFont_CONT_ATTRIBUTE_CHARACTER) {
       (mFontChar_cont_proc_get(next))(&this->character, gfx_pp);
     }
+#endif
   }
   else {
     if (!((this->flags & mFont_SENTENCE_SKIP_DRAW_NEW_LINE) && c == CHAR_NEW_LINE)) {

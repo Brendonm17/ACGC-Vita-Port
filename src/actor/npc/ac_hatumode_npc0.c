@@ -2,6 +2,9 @@
 
 #include "m_common_data.h"
 #include "m_player_lib.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aHN0_actor_ct(ACTOR* actorx, GAME* game);
 static void aHN0_actor_dt(ACTOR* actorx, GAME* game);
@@ -68,6 +71,11 @@ static void aHN0_actor_ct(ACTOR* actorx, GAME* game) {
         h_npc->base_msg = base_msg_table[mNpc_GetNpcLooks(actorx)];
 
         if (actorx->npc_id == SP_NPC_EV_HATUMODE_0) {
+#ifdef VITA_MP
+            pc_mp_ev_begun(1);
+            // another screen's line goes on as it is
+            if (!pc_mp_ev_follows(1))
+#endif
             aEv_init_hatumode_save_area();
             actorx->cull_radius = 800.0f;
         }
@@ -85,10 +93,28 @@ static void aHN0_actor_save(ACTOR* actorx, GAME* game) {
     mNpc_RenewalSetNpc(actorx);
 }
 
+#ifdef VITA_MP
+// the shrine line's own end of its record (the host's, once nobody has it out)
+void aHN0_mp_torn(void) {
+    aEv_hatumode_save_c* hatumode_p = (aEv_hatumode_save_c*)mEv_get_save_area(1, 7);
+
+    if (hatumode_p != NULL) {
+        hatumode_p->flags0 = 0x01;
+        hatumode_p->state = 2;
+    }
+}
+#endif
+
 static void aHN0_actor_dt(ACTOR* actorx, GAME* game) {
     aEv_hatumode_save_c* hatumode_p = (aEv_hatumode_save_c*)mEv_get_save_area(1, 7);
 
     CLIP(npc_clip)->dt_proc(actorx, game);
+#ifdef VITA_MP
+    // the others' line goes on: only this screen's visitors go
+    if (actorx->npc_id == SP_NPC_EV_HATUMODE_0 && pc_mp_ev_npc0_gone(1)) {
+        return;
+    }
+#endif
     if (actorx->npc_id == SP_NPC_EV_HATUMODE_0) {
         hatumode_p->flags0 = 0x01;
         hatumode_p->state = 2;
@@ -104,6 +130,15 @@ static void aHN0_actor_move(ACTOR* actorx, GAME* game) {
 
     CLIP(npc_clip)->move_proc(actorx, game);
     ((NPC_ACTOR*)actorx)->collision.pipe.attribute.pipe.radius = 20;
+#ifdef VITA_MP
+    // in a shared town this screen's visitors go with its own first one, not the record
+    if (pc_mp_ev_torn(1) >= 0) {
+        if (actorx->npc_id != SP_NPC_EV_HATUMODE_0 && pc_mp_ev_torn(1)) {
+            Actor_delete(actorx);
+        }
+        return;
+    }
+#endif
     if (hatumode_p != NULL && actorx->npc_id != SP_NPC_EV_HATUMODE_0 && hatumode_p->state == 2 &&
         (hatumode_p->flags0 & (1 << (actorx->npc_id - SP_NPC_EV_HATUMODE_0))) == 0) {
         hatumode_p->flags0 |= (1 << (actorx->npc_id - SP_NPC_EV_HATUMODE_0));

@@ -60,6 +60,11 @@ static int mMsg_check_sound_special(mMsg_Window_c* msg_p) {
 static int mMsg_check_sound_shasho(mMsg_Window_c* msg_p) {
   int msg_no = msg_p->msg_data->msg_no;
 
+#ifdef VITA_MP
+  if (pc_mp_text_is_pa(msg_no)) {
+    return TRUE;
+  }
+#endif
   return (msg_no >= 0x35AF && msg_no <= 0x35BE);
 }
 

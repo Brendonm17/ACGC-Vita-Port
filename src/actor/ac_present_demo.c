@@ -4,6 +4,9 @@
 #include "m_common_data.h"
 #include "m_soncho.h"
 #include "m_player_lib.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aPRD_actor_ct(ACTOR* actorx, GAME* game);
 static void aPRD_actor_dt(ACTOR* actorx, GAME* game);

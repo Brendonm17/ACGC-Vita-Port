@@ -6,6 +6,9 @@
 #include "m_malloc.h"
 #include "libultra/libultra.h"
 #include "jsyswrap.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static Island_c l_keepIsland;
 static u16 l_keepIslandComb[mISL_FG_BLOCK_X_NUM * mISL_FG_BLOCK_Z_NUM];
@@ -110,6 +113,9 @@ extern void mISL_ClearNowPlayerAction() {
 
         if (check_p != NULL) {
             check_p[0] = 0;
+#ifdef VITA_MP
+            mp_island_check(&priv->player_ID, 0);
+#endif
         }
 
         bzero(l_misl_count_table, sizeof(l_misl_count_table));
@@ -121,6 +127,9 @@ extern void mISL_SetPlayerAction(PersonalID_c* pid, u32 action) {
         u32* check_p = mISL_GetCheckP(pid);
 
         if (check_p != NULL) {
+#ifdef VITA_MP
+            u32 was = check_p[0];
+#endif
             int i;
 
             for (i = 0; i < ARRAY_COUNT(l_misl_count_table); i++) {
@@ -133,6 +142,11 @@ extern void mISL_SetPlayerAction(PersonalID_c* pid, u32 action) {
                     l_misl_count_table[i] = l_misl_count_max_table[i];
                 }
             }
+#ifdef VITA_MP
+            if (check_p[0] != was) {
+                mp_island_check(pid, check_p[0]);
+            }
+#endif
         }
     }
 }

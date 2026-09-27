@@ -6,6 +6,7 @@
 #include "jsyswrap.h"
 #include "libultra/libultra.h"
 #include "m_lib.h"
+#include "m_font.h"
 
 /**
  * @brief Initializes all designs' palette indexes for a player.
@@ -301,6 +302,9 @@ extern u16* mNW_PaletteIdx2Palette(int palette_idx) {
  **/
 extern void mNW_CopyOriginalTextureClass(mNW_original_design_c* dst, mNW_original_design_c* src) {
     bcopy(src, dst, sizeof(mNW_original_design_c));
+#ifdef BUGFIXES
+    mFont_clean_save_text(dst->name, mNW_ORIGINAL_DESIGN_NAME_LEN);
+#endif
     DCStoreRangeNoSync(dst->design.data, mNW_DESIGN_TEX_SIZE);
 }
 
@@ -353,6 +357,9 @@ extern void mNW_OverWriteOriginalTexture(mNW_original_design_c* dst, u8* src) {
 extern void mNW_OverWriteOriginalName(mNW_original_design_c* dst, u8* src) {
     if (src != NULL) {
         bcopy(src, dst->name, mNW_ORIGINAL_DESIGN_NAME_LEN);
+#ifdef BUGFIXES
+        mFont_clean_save_text(dst->name, mNW_ORIGINAL_DESIGN_NAME_LEN);
+#endif
     }
 }
 

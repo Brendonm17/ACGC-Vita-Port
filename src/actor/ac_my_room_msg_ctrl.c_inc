@@ -684,6 +684,9 @@ static void aMR_DeleteDirectedMD(ACTOR* actorx) {
 
                     ftr_actor->switch_changed_flag = TRUE;
                     ftr_actor->switch_bit = FALSE;
+#ifdef VITA_MP
+                    aMR_mp_send_record(ftr_actor, aMR_MP_REC_GONE);
+#endif
                 }
             }
         }
@@ -706,6 +709,9 @@ static void aMR_MsgControlMusicBoxMDPutIn(ACTOR* actorx, GAME* game) {
             aMR_OneMDSwitchOn_TheOtherSwitchOff(ftr_actor);
             aMR_ReserveBgm(actorx, BGM_MD0 + (ftr_actor->items[0] - ITM_MINIDISK_START), ftr_actor, 0);
             aMR_ChangeMDBgm(actorx, ftr_actor);
+#ifdef VITA_MP
+            aMR_mp_send_record(ftr_actor, aMR_MP_REC_PUT);
+#endif
         } else {
             aMR_DeleteDirectedMD(actorx);
         }
@@ -753,6 +759,9 @@ static void aMR_MsgControlMDPutIn(ACTOR* actorx, GAME* game) {
             aMR_OneMDSwitchOn_TheOtherSwitchOff(ftr_actor);
             aMR_ReserveBgm(actorx, BGM_MD0 + (ftr_actor->items[0] - ITM_MINIDISK_START), ftr_actor, 0);
             aMR_ChangeMDBgm(actorx, ftr_actor);
+#ifdef VITA_MP
+            aMR_mp_send_record(ftr_actor, aMR_MP_REC_PUT);
+#endif
         }
 
         aMR_ChangeDemoFtrStatus(actorx, 5);
@@ -776,6 +785,9 @@ static void aMR_MsgControlMDExchangeSubmenu(ACTOR* actorx, GAME* game) {
             aMR_OneMDSwitchOn_TheOtherSwitchOff(ftr_actor);
             aMR_ReserveBgm(actorx, BGM_MD0 + (ftr_actor->items[0] - ITM_MINIDISK_START), ftr_actor, 0);
             aMR_ChangeMDBgm(actorx, ftr_actor);
+#ifdef VITA_MP
+            aMR_mp_send_record(ftr_actor, aMR_MP_REC_PUT);
+#endif
         }
 
         aMR_ChangeDemoFtrStatus(actorx, 5);

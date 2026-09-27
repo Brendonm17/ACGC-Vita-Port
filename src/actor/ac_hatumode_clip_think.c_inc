@@ -218,3 +218,44 @@ static int aHTMD_clip_think_init(ACTOR* actorx, GAME_PLAY* play) {
 
     return data_p->talk_req;
 }
+
+#ifdef VITA_MP
+// a line visitor's step settings without what the step starts: another screen runs the line
+int aHTMD_mp_think_fields(ACTOR* actorx) {
+    HATUMODE_NPC0_ACTOR* hatumode_npc = (HATUMODE_NPC0_ACTOR*)actorx;
+    aHN0_think_data_c* data_p = &dt_tbl[hatumode_npc->think_idx];
+
+    hatumode_npc->think_proc_idx = data_p->think_proc_idx;
+    hatumode_npc->talk_idx = data_p->talk_idx;
+    hatumode_npc->next_think_idx = data_p->next_think_idx;
+    hatumode_npc->npc_class.head.lock_flag = data_p->talk_req == aHN0_TALK_REQ_NONE;
+    return data_p->talk_req;
+}
+
+// what the step has the body do on taking the line over; where it goes next, its greeting flags and the bell
+// were the runner's
+void aHTMD_mp_think_take(ACTOR* actorx, GAME_PLAY* play) {
+    HATUMODE_NPC0_ACTOR* hatumode_npc = (HATUMODE_NPC0_ACTOR*)actorx;
+
+    switch (dt_tbl[hatumode_npc->think_idx].think_init) {
+        case aHN0_THINK_INIT_NEXT_POS:
+            aHN0_normal_wait_init(hatumode_npc, play);
+            break;
+        case aHN0_THINK_INIT_AISATU:
+        case aHN0_THINK_INIT_AISATU2:
+            aHN0_aisatu_local(hatumode_npc);
+            break;
+        case aHN0_THINK_INIT_SAISEN:
+            if (hatumode_npc->think_idx == 5) {
+                CLIP(npc_clip)->animation_init_proc(actorx, aNPC_ANIM_OMAIRI1, FALSE);
+                hatumode_npc->npc_class.draw.main_animation.keyframe.frame_control.mode = cKF_FRAMECONTROL_STOP;
+                break;
+            }
+            aHN0_saisen_init(hatumode_npc, play);
+            break;
+        default:
+            (*init_table[dt_tbl[hatumode_npc->think_idx].think_init])(hatumode_npc, play);
+            break;
+    }
+}
+#endif

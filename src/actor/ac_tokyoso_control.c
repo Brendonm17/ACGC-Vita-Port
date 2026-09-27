@@ -7,6 +7,9 @@
 #include "m_name_table.h"
 #include "ac_tokyoso_npc1.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aTKC_ACT_WAIT,
@@ -85,9 +88,37 @@ static void aTKC_actor_dt(ACTOR* actorx, GAME* game) {
     mEv_actor_dying_message(mEv_EVENT_SPORTS_FAIR_FOOT_RACE, actorx);
 }
 
+#ifdef VITA_MP
+// the race's pace as the screen running it keeps it
+void aTKC_mp_step(void* actorx, mp_evstep_t* st, int mode) {
+    TOKYOSO_CONTROL_ACTOR* actor = (TOKYOSO_CONTROL_ACTOR*)actorx;
+
+    if (mode == MP_EVS_GET) {
+        st->think = (u8)actor->action;
+        st->timer = actor->timer;
+    } else if (st->think < aTKC_ACT_NUM) {
+        aTKC_setupAction(actor, st->think);
+        actor->timer = st->timer;
+    }
+}
+#endif
+
 static void aTKC_actor_move(ACTOR* actorx, GAME* game) {
     TOKYOSO_CONTROL_ACTOR* actor = (TOKYOSO_CONTROL_ACTOR*)actorx;
-    aEv_tokyoso_c* tokyoso = (aEv_tokyoso_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_FOOT_RACE, 8);
+    aEv_tokyoso_c* tokyoso;
+#ifdef VITA_MP
+    mp_evstep_t step;
+
+    switch (pc_mp_ev_ctl(mEv_EVENT_SPORTS_FAIR_FOOT_RACE, &step)) {
+        case MP_EVC_FOLLOW:
+            // another screen runs the race and keeps its record
+            return;
+        case MP_EVC_TAKE:
+            aTKC_mp_step(actor, &step, MP_EVS_TAKE);
+            break;
+    }
+#endif
+    tokyoso = (aEv_tokyoso_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_FOOT_RACE, 8);
 
     if (tokyoso->_00 == 3 && actor->action != aTKC_ACT_WAIT2) {
         aTKC_setupAction(actor, aTKC_ACT_WAIT2);

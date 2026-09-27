@@ -203,10 +203,22 @@ static void aPOFF_wait(STRUCTURE_ACTOR* office, GAME_PLAY* play) {
     ACTOR* actor;
     int request_type;
     int check_open;
+#ifdef VITA_MP
+    int out;
+#endif
 
     actor = (ACTOR*)office;
     request_type = office->request_type;
 
+#ifdef VITA_MP
+    // another player through this door: it opens and shuts behind them
+    if (request_type == 0 && mDemo_Check(mDemo_TYPE_DOOR, actor) == FALSE && mp_door_take(office, &out)) {
+        office->request_type = out ? 2 : 1;
+        aPOFF_setup_animation(office, 0.5f);
+        aPOFF_setup_action(office, aPOFF_ACTION_OPEN_DOOR);
+        return;
+    }
+#endif
     if (mDemo_Check(mDemo_TYPE_DOOR, actor) != FALSE) {
         if (request_type == 4) {
             aPOFF_setup_animation(office, 0.5f);

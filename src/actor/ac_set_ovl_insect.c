@@ -10,6 +10,9 @@
 #include "m_event.h"
 #include "m_field_assessment.h"
 #include "m_kankyo.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 typedef struct insect_birth_sum_s {
   u8 min_birth_count;
@@ -1338,7 +1341,13 @@ static int aSOI_ins_renew_check_range_table(SET_MANAGER* set_manager, aSOI_insec
   }
   else {
     mEv_gst_common_c* ghost_common = (mEv_gst_common_c*)mEv_get_common_area(mEv_EVENT_GHOST, 0x37); // TODO: definitions for event type, event id
-    if (ghost_common != NULL && (ghost_common->flags & mEv_GHOST_FLAG_ACTIVE) != 0 &&
+    if (ghost_common != NULL &&
+#ifdef VITA_MP
+        // spirits come out in the shared town while any player in it has met Wisp tonight
+        ((ghost_common->flags & mEv_GHOST_FLAG_ACTIVE) != 0 || mp_rights_wisp_hunters() > 0) &&
+#else
+        (ghost_common->flags & mEv_GHOST_FLAG_ACTIVE) != 0 &&
+#endif
         aSOI_check_hitodama_set_block(set_manager, &ghost_common->hitodama_block_data) == TRUE
     ) {
       spawn_type = aSOI_SPAWN_TYPE_SPIRIT;
@@ -2072,8 +2081,18 @@ static int aSOI_ins_make_sub(aSOI_set_data_c* set_data, aSetMgr_player_pos_c* pl
     insect_init.extra_data = set_data->extra_data;
     insect_init.game = game;
 
+#ifdef VITA_MP
+    if (mp_cr_remote_roll()) {
+      // another player's step: only the others hear of it
+      pc_mp_cr_remote_spawn(MP_CR_INSECT, insect_init.insect_type, &insect_init.position, insect_init.extra_data);
+      res = TRUE;
+    } else
+#endif
     if (insect_init.insect_type == aINS_INSECT_TYPE_ANT) {
       (*Common_Get(clip).insect_clip->make_ant_proc)(&insect_init, player_pos->next_bx, player_pos->next_bz);
+#ifdef VITA_MP
+      pc_mp_cr_made(MP_CR_INSECT, insect_init.insect_type, &insect_init.position, insect_init.extra_data, NULL);
+#endif
       res = TRUE;
     }
     else {
@@ -2117,6 +2136,13 @@ extern int aSOI_insect_set(SET_MANAGER* set_manager, GAME_PLAY* play) {
   aSOI_insect_keep_c* keep = &set_manager->keep.insect_keep;
   int res = FALSE;
 
+#ifdef VITA_MP
+  // a visitor's steps are rolled by the host; an acre already out comes from its list
+  if (mp_cr_guest_step(set_manager->player_pos.next_bx, set_manager->player_pos.next_bz, MP_CR_INSECT) ||
+      mp_cr_host_step(play, set_manager->player_pos.next_bx, set_manager->player_pos.next_bz, MP_CR_INSECT)) {
+    return FALSE;
+  }
+#endif
   if (aSOI_ins_block_check(set_manager, play) == FALSE) {
     aSOI_ins_clear_set_data(&set_data);
     aSOI_ins_make_range_data(set_manager);

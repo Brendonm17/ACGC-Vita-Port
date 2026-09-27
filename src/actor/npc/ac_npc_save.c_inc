@@ -73,6 +73,12 @@ static void aNPC_actor_save(ACTOR* actorx, GAME* game) {
     NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
 
     if (mEv_IsNotTitleDemo()) {
+#ifdef VITA_MP
+        // a villager another game moves keeps what that game decided for it; its shirt slot is let go
+        if (mp_npc_is_puppet(actorx) && ITEM_NAME_GET_TYPE(actorx->npc_id) == NAME_TYPE_NPC) {
+            aNPC_cancel_cloth_data(nactorx);
+        } else
+#endif
         if (ITEM_NAME_GET_TYPE(actorx->npc_id) == NAME_TYPE_NPC) {
             aNPC_actor_save_for_normal(actorx);
         } else {

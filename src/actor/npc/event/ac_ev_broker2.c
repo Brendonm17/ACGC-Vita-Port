@@ -1,4 +1,9 @@
 #include "ac_ev_broker2.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+static int aEBR2_mp_sold(mActor_name_t item);
+#endif
 
 #ifdef VITA_TROPHIES
 #include "vita_trophy.h"

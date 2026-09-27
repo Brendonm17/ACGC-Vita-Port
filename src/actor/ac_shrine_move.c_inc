@@ -177,7 +177,12 @@ static void aSHR_talk(SHRINE_ACTOR* shrine, GAME_PLAY* play) {
                 if (field_rank == mFAs_FIELDRANK_SIX &&               /* Current field rank is 'perfect' */
                     good_field &&                                     /* Perfect town status achieved for long enough */
                     mSC_trophy_get(mSC_TROPHY_GOLDEN_AXE) == FALSE && /* Haven't already obtained the golden axe */
+#ifdef VITA_MP
+                    // a visitor too, when the host lets visitors do what residents do
+                    (mLd_PlayerManKindCheck() == FALSE || mp_visitor_rights()) &&
+#else
                     mLd_PlayerManKindCheck() == FALSE &&              /* Must be from this town */
+#endif
                     mPr_GetPossessionItemIdx(Common_Get(now_private), EMPTY_NO) >=
                         0 &&                              /* Must have a free inventory slot */
                     mEv_CheckFirstJob() == FALSE &&       /* Can't be doing the part-time job */
@@ -326,6 +331,14 @@ static void aSHR_make_hem(SHRINE_ACTOR* shrine, GAME_PLAY* play) {
 
                     hem_actor->parent_actor = (ACTOR*)shrine;
                     aSHR_GET_CLIP()->hem_flag = TRUE;
+#ifdef VITA_MP
+                    {
+                        // the other screens see her rise from the well too
+                        u8 body[4] = { MP_VFX_HEM, 0, 0, 0 };
+
+                        mp_vfx_send(body, sizeof(body));
+                    }
+#endif
                     Common_Set(hem_visible, FALSE);
                     pos.z += mFI_UT_WORLDSIZE_Z_F;
                     (*Common_Get(clip).effect_clip->effect_make_proc)(eEC_EFFECT_MAKE_HEM, pos, 2, 0, (GAME*)play,

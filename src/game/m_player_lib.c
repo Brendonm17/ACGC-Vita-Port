@@ -11,6 +11,9 @@
 #ifdef TARGET_PC
 #include "pc_bswap.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 extern cKF_Animation_R_c cKF_ba_r_ply_1_wait1;
 extern cKF_Animation_R_c cKF_ba_r_ply_1_walk1;
@@ -993,6 +996,58 @@ static u32 mPlib_Get_UseFaceTexRom_p(void) {
                                             Common_Get(player_decoy_flag));
 }
 
+#ifdef VITA_MP
+// a creature gone from this screen can't still be caught from the requests it left last frame
+extern void mPlib_mp_forget_catch(unsigned int label) {
+    PLAYER_ACTOR* player;
+    int n;
+    int i;
+    int k;
+
+    if (gamePT == NULL || label == 0 || (player = GET_PLAYER_ACTOR_NOW()) == NULL) {
+        return;
+    }
+    n = player->item_net_catch_request_use_count;
+    if (n > mPlayer_NET_CATCH_TABLE_COUNT) {
+        n = mPlayer_NET_CATCH_TABLE_COUNT;
+    }
+    for (i = k = 0; i < n; i++) {
+        if (player->item_net_catch_label_request_table[i] == label) {
+            continue;
+        }
+        if (k != i) {
+            player->item_net_catch_label_request_table[k] = player->item_net_catch_label_request_table[i];
+            player->item_net_catch_type_request_table[k] = player->item_net_catch_type_request_table[i];
+            player->item_net_catch_pos_request_table[k] = player->item_net_catch_pos_request_table[i];
+            player->item_net_catch_radius_request_table[k] = player->item_net_catch_radius_request_table[i];
+        }
+        k++;
+    }
+    player->item_net_catch_request_use_count = k;
+    if (player->item_net_catch_label_request_force == label) {
+        player->item_net_catch_label_request_force = 0;
+    }
+}
+
+extern int mPlib_mp_net_catch_type(void) {
+    return GET_PLAYER_ACTOR_NOW()->item_net_catch_type;
+}
+
+// face texture and palette ROM for any player's look, not just Now_Private (multiplayer)
+extern void mPlib_Get_FaceRom_forLook(int sex, int face_type, int swell, int decoy, int sunburn_rank, u32* tex_rom,
+                                      u32* pal_rom) {
+    *tex_rom = mPlib_Get_UseFaceTexRom_p_common(sex, face_type, swell, decoy);
+    if (sunburn_rank > 0 && decoy == FALSE) {
+        u32 idx = mPlib_Get_UseFaceRom_index(sex, face_type, swell, FALSE, mPlayer_USE_FACE_ROM_TYPE_PAL);
+
+        *pal_rom = mPlib_Get_UseFaceTexRom_p_common(mPr_SEX_FEMALE, mPr_FACE_TYPE7, TRUE, TRUE) + 0xE00 +
+                   (sunburn_rank + idx) * 0x20;
+    } else {
+        *pal_rom = *tex_rom + 0xE00;
+    }
+}
+#endif
+
 static u32 mPlib_Get_UseFacePalletRom_p(void) {
     int sunburn_rank = Now_Private->sunburn.rank;
     int decoy_flag = Common_Get(player_decoy_flag);
@@ -1229,6 +1284,9 @@ extern void mPlib_change_player_cloth(GAME* game, u16 cloth_idx) {
     int idx = cloth_idx;
     int in_aram = mPlib_Check_PlayerClothInAram(idx);
     Change_Player_bank_ID_Index();
+#ifdef VITA_MP
+    pc_mp_shown_cloth(cloth_idx);
+#endif
 
     {
         u8* player_tex_p = mPlib_get_player_tex_p(game);
@@ -3225,6 +3283,22 @@ extern int mPlib_Check_scoop_after(GAME* game, xyz_t* pos_p, mActor_name_t* item
                             mActor_name_t hit_item;
 
                             dig_status = mFI_GetDigStatus(&hit_item, *pos_p, gold_scoop);
+#ifdef VITA_MP
+                            // the host's switches: a visitor's shovel bounces off what it keeps. Digging up what's
+                            // buried is taking an item; a hole in bare ground, or where a plant, stump or weed is dug
+                            // out, is digging (a golden shovel's lucky find in bare ground is both, or just a hole)
+                            if (dig_status == mFI_DIGSTATUS_GET_ITEM && scoop_fg == EMPTY_NO &&
+                                !mp_visitor_may(MP_RULE_ITEMS)) {
+                                dig_status = mFI_DIGSTATUS_DIG;
+                                hit_item = EMPTY_NO;
+                            }
+                            if ((dig_status == mFI_DIGSTATUS_GET_ITEM && !mp_visitor_may(MP_RULE_ITEMS)) ||
+                                ((dig_status == mFI_DIGSTATUS_DIG || dig_status == mFI_DIGSTATUS_PUT_ITEM ||
+                                  (dig_status == mFI_DIGSTATUS_GET_ITEM && scoop_fg == EMPTY_NO)) &&
+                                 !mp_visitor_may(MP_RULE_DIG))) {
+                                dig_status = mFI_DIGSTATUS_CANCEL;
+                            }
+#endif
 
                             /* Don't let the player hit NPCs with the shovel */
                             hit_actor_p = mPlib_Search_exist_npc_inCircle_forScoop(game, pos_p, SQ(39.0f));

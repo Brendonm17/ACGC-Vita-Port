@@ -420,6 +420,17 @@ static void aPMAN_walk_init(NPC_POST_MAN* actor, GAME_PLAY* play) {
 
 static void aPMAN_delivery_init(NPC_POST_MAN* actor, GAME_PLAY* play) {
     aPMAN_clear_xz_spd(actor);
+#ifdef VITA_MP
+    // the host's post office leaves the same for a visitor's Pete, and the lid opens on the other screens
+    pc_mp_mail_told(MP_MAIL_HOUSE, actor->delivery_idx);
+    {
+        u8 body[2];
+
+        body[0] = MP_VFX_MAILBOX;
+        body[1] = (u8)actor->delivery_idx;
+        mp_vfx_send(body, sizeof(body));
+    }
+#endif
     mPO_delivery_one_address(actor->delivery_idx);
     aPMAN_order_open_mailbox(actor, play);
     if (actor->delivery_idx < 3) {
@@ -524,10 +535,23 @@ static void aPMAN_actor_move(ACTOR* actorx, GAME* game) {
     NPC_POST_MAN* actor = (NPC_POST_MAN*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
+#ifdef VITA_MP
+    // another player's game brought him by: this copy follows him there
+    if (aNPC_mp_puppet_frame(actorx, game)) {
+        return;
+    }
+#endif
     NPC_CLIP->move_before_proc(actorx, game);
     aPMAN_BGcheck(actorx);
     aPMAN_talk_check(actor, play);
+#ifdef VITA_MP
+    // his landing and wingbeats sound where the others follow him
+    pc_mp_npc_fx(actorx);
+#endif
     actor->act_proc(actor, play);
+#ifdef VITA_MP
+    pc_mp_npc_fx(NULL);
+#endif
     NPC_CLIP->move_after_proc(actorx, game);
     aPMAN_talk_request(actor);
     aPMAN_check_culling(actor, play);

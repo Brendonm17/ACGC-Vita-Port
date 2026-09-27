@@ -10,6 +10,9 @@
 #include "m_card.h"
 #include "m_submenu.h"
 #include "m_scene_ftr.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void mSc_set_bank_status_after(Object_Bank_c* bank) {
     bank->bank_id = ABS(bank->bank_id);
@@ -357,6 +360,12 @@ extern void Scene_ct(GAME_PLAY* play, Scene_Word_u* scene_data) {
     if (Save_Get(scene_no) == SCENE_START_DEMO3) {
         int rover_shown = FALSE;
 
+#ifdef VITA_MP
+        // network trips have no cat visit, so no Blanca roll writing into the town being visited
+        if (mp_travel_net_trip()) {
+            rover_shown = TRUE;
+        } else
+#endif
         if (mLd_CheckCmpLand(Common_Get(now_private)->player_ID.land_name, Common_Get(now_private)->player_ID.land_id,
                              Common_Get(travel_persistent_data).land.name,
                              Common_Get(travel_persistent_data).land.id) == TRUE) {

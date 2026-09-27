@@ -5,6 +5,9 @@
 #include "m_house.h"
 #include "m_handbill.h"
 #include "m_string.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void Shop_Level_Actor_ct(ACTOR* actorx, GAME* game);
 static void Shop_Level_Actor_dt(ACTOR* actorx, GAME* game);
@@ -220,6 +223,13 @@ static int aSL_RewriteShopFg(ACTOR* actorx, GAME* game, s16 level, s16 next_leve
 static void aSL_RenewShop(ACTOR* actorx, GAME* game) {
     int last_scene = Common_Get(last_scene_no);
 
+#ifdef VITA_MP
+    // restocks and upgrades happen in the host's town and reach visitors as its save
+    if (!mp_town_writer_allowed()) {
+        return;
+    }
+#endif
+
     if (last_scene == SCENE_SHOP0 || last_scene == SCENE_CONVENI || last_scene == SCENE_SUPER ||
         last_scene == SCENE_DEPART || last_scene == SCENE_DEPART_2) {
         return;
@@ -260,6 +270,9 @@ static void Shop_Level_Actor_ct(ACTOR* actorx, GAME* game) {
     /* Try to move shop level actor to where the player currently is */
     actorx->world.position = *pos_p;
     shop_block_flag = mFI_BlockKind2BkNum(&shop_level->bx, &shop_level->bz, mRF_BLOCKKIND_SHOP);
+#ifdef VITA_MP
+    if (mp_town_writer_allowed())
+#endif
     if (Save_Get(scene_no) == SCENE_FG) {
         mSP_SetShopRareFurnitureChirashi(Common_Get(player_no), Save_Get(shop).items, mSP_GOODS_COUNT, NULL);
         Save_Get(shop).shop_info.not_loaded_before = FALSE;

@@ -5,6 +5,9 @@
 #include "m_rcp.h"
 #include "m_player_lib.h"
 #include "m_debug.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static eEC_PROFILE_c* profile_tbl[] = {
     &iam_ef_shock,
@@ -242,11 +245,36 @@ static void eEC_InitEffectControlWork(void) {
 static eEC_Effect_c* eEC_MakeEffect(s16 effect_id, xyz_t pos, xyz_t* ofs, GAME* game, void* ct_arg, u16 item_name,
                                     int prio, s16 arg0, s16 arg1);
 
+#ifdef VITA_MP
+// the local player's effects replay at its puppets; what an effect makes of its own comes along with it
+static void eEC_mp_EffectMake(int effect_id, xyz_t pos, int prio, s16 angle, GAME* game, u16 item_name, s16 arg0,
+                              s16 arg1) {
+    pc_mp_fx_effect(effect_id, &pos, prio, angle, item_name, arg0, arg1);
+    // behind the host's menu the town shows nothing here; the visitors still see it
+    if (pc_mp_menu_running()) {
+        return;
+    }
+    pc_mp_fx_hush(TRUE);
+    eEC_Name2EffectMake(effect_id, pos, prio, angle, game, item_name, arg0, arg1);
+    pc_mp_fx_hush(FALSE);
+}
+
+static void eEC_mp_EffectKill(int effect_id, u16 item_name) {
+    pc_mp_fx_kill(effect_id, item_name);
+    eEC_Name2EffectKill(effect_id, item_name);
+}
+#endif
+
 static void eEC_EffectLib2Clip(ACTOR* actorx) {
     EFFECT_CONTROL_ACTOR* effect_ctrl = (EFFECT_CONTROL_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    effect_ctrl->clip.effect_make_proc = &eEC_mp_EffectMake;
+    effect_ctrl->clip.effect_kill_proc = &eEC_mp_EffectKill;
+#else
     effect_ctrl->clip.effect_make_proc = &eEC_Name2EffectMake;
     effect_ctrl->clip.effect_kill_proc = &eEC_Name2EffectKill;
+#endif
     effect_ctrl->clip.effect_kill_all_proc = &eEC_Name2EffectKillAll;
     effect_ctrl->clip.vector_rotate_y_proc = &eEL_VectorRoteteY;
     effect_ctrl->clip.random_first_speed_proc = &eEL_RandomFirstSpeed;

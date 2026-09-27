@@ -263,9 +263,60 @@ static int mEnv_GetWindPowerPercent(lbRTC_time_c* time, mEnv_wind_power_range_c*
   return FALSE;
 }
 
+static void mEnv_SetWindPowerRange(int selected);
+
+#ifdef VITA_MP
+// a shared town's wind blows by its clock: the day's strength and a direction wandering every ten minutes, alike on
+// every screen (the gusts in between are each screen's own)
+#define mEnv_MP_WIND_MS    (10u * 60u * 1000u)
+#define mEnv_MP_WIND_DAY   144u
+#define mEnv_MP_WIND_SPAN  48u // ten-minute steps between the set directions
+#define mEnv_MP_WIND_SEED  0x57494E44u
+
+static f32 mEnv_mp_wind_angle(unsigned int epoch) {
+  unsigned int i = epoch / mEnv_MP_WIND_SPAN;
+  f32 a = (f32)(mp_shared_hash(i, mEnv_MP_WIND_SEED, 1) & 0xFFFF);
+  f32 b = (f32)(mp_shared_hash(i + 1, mEnv_MP_WIND_SEED, 1) & 0xFFFF);
+  f32 t = (f32)(epoch % mEnv_MP_WIND_SPAN) / (f32)mEnv_MP_WIND_SPAN;
+
+  t = (1.0f - cos_s((s16)(t * 32768.0f))) * 0.5f;
+  return a + (b - a) * t;
+}
+
+// that direction the short way round from where the wind points now
+static f32 mEnv_mp_wind_near(f32 target) {
+  f32 d = target - mEnv_wind_info.wind_angle;
+
+  d -= 65536.0f * (f32)(int)((d + (d >= 0.0f ? 32768.0f : -32768.0f)) / 65536.0f);
+  return mEnv_wind_info.wind_angle + d;
+}
+
+static f32 mEnv_mp_wind_power(unsigned int epoch) {
+  f32 t = (f32)(mp_shared_hash(epoch, mEnv_MP_WIND_SEED, 3) & 0xFFFF) / 65536.0f;
+
+  return mEnv_wind_info.wind_power_range_min + t * (mEnv_wind_info.wind_power_range_max - mEnv_wind_info.wind_power_range_min);
+}
+
+// the epoch now (and the frames left of it), the day's strength set by it
+static int mEnv_mp_wind_now(unsigned int* epoch, int* frames_left) {
+  unsigned int ms;
+
+  if (!mp_shared_clock_ms(&ms)) {
+    return FALSE;
+  }
+  *epoch = ms / mEnv_MP_WIND_MS;
+  *frames_left = (int)((mEnv_MP_WIND_MS - ms % mEnv_MP_WIND_MS) * 60u / 1000u);
+  mEnv_SetWindPowerRange((int)(mp_shared_hash(*epoch / mEnv_MP_WIND_DAY, mEnv_MP_WIND_SEED, 0) % 100u));
+  return TRUE;
+}
+#endif
+
 extern void mEnv_DecideTodayWindPowerRange() {
+  mEnv_SetWindPowerRange(RANDOM(100));
+}
+
+static void mEnv_SetWindPowerRange(int selected) {
   mEnv_wind_power_range_c power_range_percents;
-  int selected = RANDOM(100);
   
   mEnv_GetWindPowerPercent(Common_GetPointer(time.rtc_time), &power_range_percents);
 
@@ -284,6 +335,11 @@ extern void mEnv_DecideTodayWindPowerRange() {
 }
 
 extern void mEnv_ChangeWind() {
+#ifdef VITA_MP
+  unsigned int epoch;
+  int frames_left;
+#endif
+
   if (mEv_check_schedule(mEv_EVENT_KOINOBORI)) {
     mEnv_wind_info.target_wind_angle = DEG2SHORT_ANGLE(135.0f); /* 0x6000 */
     mEnv_wind_info.wind_angle = DEG2SHORT_ANGLE(135.0f);
@@ -292,6 +348,19 @@ extern void mEnv_ChangeWind() {
     mEnv_wind_info.wind_angle_step = 0.0f;
     mEnv_wind_info.wind_power_step = 0.0f;
   }
+#ifdef VITA_MP
+  // (turning toward the ten minutes now starting)
+  else if (mEnv_mp_wind_now(&epoch, &frames_left)) {
+    if (frames_left > (int)(mEnv_WIND_CHANGE_RATE / 2.0f)) {
+      epoch--;
+    }
+    epoch++;
+    mEnv_wind_info.target_wind_angle = mEnv_mp_wind_near(mEnv_mp_wind_angle(epoch));
+    mEnv_wind_info.wind_angle_step = (mEnv_wind_info.target_wind_angle - mEnv_wind_info.wind_angle) / mEnv_WIND_CHANGE_RATE;
+    mEnv_wind_info.target_wind_power = mEnv_mp_wind_power(epoch);
+    mEnv_wind_info.wind_power_step = (mEnv_wind_info.target_wind_power - mEnv_wind_info.wind_power) / mEnv_WIND_CHANGE_RATE;
+  }
+#endif
   else {
     f32 wind_angle_adjust = RANDOM_F(DEG2SHORT_ANGLE(30.0f)) - (f32)DEG2SHORT_ANGLE(30.0f) / 2.0f;
     f32 w = fqrand();
@@ -306,10 +375,22 @@ extern void mEnv_ChangeWind() {
 }
 
 static void mEnv_InitWind() {
+#ifdef VITA_MP
+  unsigned int epoch;
+  int frames_left = 0;
+  int shared = FALSE;
+#endif
+
   if (mEv_check_schedule(mEv_EVENT_KOINOBORI)) {
     mEnv_wind_info.target_wind_angle = DEG2SHORT_ANGLE(135.0f); /* 0x6000 */
     mEnv_wind_info.target_wind_power = 1.0f;
   }
+#ifdef VITA_MP
+  else if ((shared = mEnv_mp_wind_now(&epoch, &frames_left)) != FALSE) {
+    mEnv_wind_info.target_wind_angle = mEnv_mp_wind_angle(epoch);
+    mEnv_wind_info.target_wind_power = mEnv_mp_wind_power(epoch);
+  }
+#endif
   else {
     f32 angle = RANDOM_F(65536);
     f32 t = fqrand();
@@ -322,6 +403,12 @@ static void mEnv_InitWind() {
 
   mEnv_wind_info.wind_state = mEnv_WIND_STATE_STEADY;
   mEnv_wind_info.wind_change_timer = mEnv_WIND_CHANGE_RATE;
+#ifdef VITA_MP
+  // (the next turn comes as the ten minutes do, on every screen)
+  if (shared) {
+    mEnv_wind_info.wind_change_timer = frames_left;
+  }
+#endif
   mEnv_wind_info.wind_angle = mEnv_wind_info.target_wind_angle;
   mEnv_wind_info.wind_angle_step = 0.0f;
   mEnv_wind_info.wind_power = mEnv_wind_info.target_wind_power;

@@ -15,6 +15,10 @@
 #include "sys_matrix.h"
 #include "m_rcp.h"
 #include "m_lib.h"
+#ifdef VITA_MP
+#include "m_ledit_ovl.h"
+#include "pc_mp.h"
+#endif
 
 static u8 mED_ornament_table[] = {
     // clang-format off
@@ -1162,6 +1166,19 @@ static void mED_edit_func_single_line(Submenu* submenu, mSM_MenuInfo_c* menu_inf
             mED_move_cursol_right(submenu, editor_ovl, mED_LINETYPE_SINGLE);
             break;
         case mED_COMMAND_END_EDIT:
+#ifdef VITA_MP
+            // chat: nothing typed just closes the keyboard; a listed word in any case is refused as names are
+            if (menu_info->data0 == mED_TYPE_LEDIT &&
+                submenu->overlay->menu_info[mSM_OVL_LEDIT].data0 == mLE_TYPE_MP_CHAT) {
+                if (mp_chat_ng_word(editor_ovl->input_str, editor_ovl->input_length)) {
+                    mED_clear_input_data(editor_ovl);
+                    sAdo_SysTrgStart(0x1003);
+                } else {
+                    mED_end_edit_func(submenu, menu_info);
+                }
+                break;
+            }
+#endif
             if (mED_all_space_check(submenu, editor_ovl, menu_info) != FALSE) {
                 sAdo_SysTrgStart(0x1003);
             } else if (mED_ng_word_check(editor_ovl, menu_info) != FALSE) {
@@ -1773,6 +1790,14 @@ static void mED_move_Play(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
                 mED_set_command(editor_ovl);
 #if defined(TARGET_PC) && defined(KEYBOARD_TYPING)
             }
+        }
+#endif
+#ifdef VITA_MP
+        // chat: the balloon button closes the keyboard with nothing typed kept
+        if (menu_info->data0 == mED_TYPE_LEDIT &&
+            submenu->overlay->menu_info[mSM_OVL_LEDIT].data0 == mLE_TYPE_MP_CHAT && pc_mp_chat_cancel_take()) {
+            mED_clear_input_data(editor_ovl);
+            editor_ovl->command = mED_COMMAND_END_EDIT;
         }
 #endif
         (*mED_edit_func[menu_info->data0])(submenu, menu_info);

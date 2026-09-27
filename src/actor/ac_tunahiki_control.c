@@ -4,6 +4,9 @@
 #include "m_event.h"
 #include "m_name_table.h"
 #include "m_play.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aTNC_ACT_WAIT,
@@ -59,6 +62,31 @@ static void aTNC_actor_move(ACTOR* actorx, GAME* game) {
     TUNAHIKI_CONTROL_ACTOR* actor = (TUNAHIKI_CONTROL_ACTOR*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
+#ifdef VITA_MP
+    // another screen runs the tug of war and keeps its record; the rope here strains as it's pulled there
+    if (pc_mp_ev_follows(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR)) {
+        aEv_tunahiki_c* tunahiki = (aEv_tunahiki_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR, 9);
+
+        if (tunahiki != NULL) {
+            tunahiki->rope = tunahiki->rope_base;
+            if (tunahiki->flag & aTNC_FLAG_SHAKE) {
+                tunahiki->rope += (play->game_frame & 1) ? 0.3f : -0.3f;
+            }
+        }
+        return;
+    }
+    // a puller another player is talking to holds the rope still here too, as this player's own talks do
+    {
+        static u16 mp_talk; // the talk bits this screen set for the others
+        aEv_tunahiki_c* tunahiki = (aEv_tunahiki_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR, 9);
+        u16 now = (u16)((pc_mp_ev_talk_bits(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR) & 0x1E) * aTNC_FLAG_NPC_TALK0);
+
+        if (tunahiki != NULL) {
+            tunahiki->flag = (u16)((tunahiki->flag & ~(mp_talk & ~now)) | now);
+            mp_talk = now;
+        }
+    }
+#endif
     actor->act_proc(actor, play);
 }
 

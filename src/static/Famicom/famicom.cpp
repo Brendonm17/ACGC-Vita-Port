@@ -1219,6 +1219,13 @@ exit:
     return result;
 }
 
+#ifdef BUGFIXES
+// nesromp as famicom_init allocates it: a card's image never decodes past it
+#define FAMICOM_NESROM_MAX (KS_NES_NESFILE_HEADER_SIZE + KS_NES_PRGROM_SIZE + KS_NES_CHRROM_SIZE)
+#else
+#define FAMICOM_NESROM_MAX CHR_TO_I8_BUF_SIZE
+#endif
+
 static s32 memcard_game_load(
     u8* nesromp,
     int rom_idx,
@@ -1315,11 +1322,26 @@ static s32 memcard_game_load(
                                 }
     
                                 u8* datap = &data_bufp[cardStatus.offsetData];
+#ifdef BUGFIXES
+                                // (every part the file lists has to lie inside it)
+                                u8* data_endp = data_bufp + cardStatus.length;
+
+                                if ((u32)cardStatus.offsetData + sizeof(MemcardGameHeader_t) > (u32)cardStatus.length) {
+                                    result = CARD_RESULT_FATAL_ERROR;
+                                    goto exit;
+                                }
+#endif
                                 memcpy(game_header, datap, sizeof(MemcardGameHeader_t));
                                 datap += sizeof(MemcardGameHeader_t);
     
                                 /* Copy nesinfo tags */
                                 size_t tags_size = game_header->nestags_size;
+#ifdef BUGFIXES
+                                if (datap + ALIGN_NEXT(tags_size, 16) > data_endp) {
+                                    result = CARD_RESULT_FATAL_ERROR;
+                                    goto exit;
+                                }
+#endif
                                 if (tags_size != 0) {
                                     if (tags_pp != nullptr) {
                                         *tags_pp = (u8*)my_malloc(tags_size, 1);
@@ -1337,11 +1359,17 @@ static s32 memcard_game_load(
     
                                 size_t comment_img_size;
                                 if (game_header->flags0.has_comment_img && (comment_img_size = game_header->comment_img_size, comment_img_size != 0)) {
+#ifdef BUGFIXES
+                                    if (datap + ALIGN_NEXT(comment_img_size, 16) > data_endp) {
+                                        result = CARD_RESULT_FATAL_ERROR;
+                                        goto exit;
+                                    }
+#endif
                                     if (JC_JKRDecomp_checkCompressed(datap) == JKRCOMPRESSION_NONE) {
                                         SetupExternCommentImage(datap, memcard_save_comment, data_bufp);
                                     }
                                     else {
-                                        JC_JKRDecomp_decode(datap, nesromp, CHR_TO_I8_BUF_SIZE, 0);
+                                        JC_JKRDecomp_decode(datap, nesromp, FAMICOM_NESROM_MAX, 0);
                                         SetupExternCommentImage(nesromp, memcard_save_comment, data_bufp);
                                     }
     
@@ -1355,12 +1383,23 @@ static s32 memcard_game_load(
                                     u32 real_size = game_header->nesrom_size << 4;
     
                                     if (JC_JKRDecomp_checkCompressed(datap) == JKRCOMPRESSION_NONE) {
+#ifdef BUGFIXES
+                                        if (real_size > FAMICOM_NESROM_MAX || datap + real_size > data_endp) {
+                                            result = CARD_RESULT_FATAL_ERROR;
+                                            goto exit;
+                                        }
+#endif
                                         memcpy(nesromp, datap, real_size);
                                         nesinfo_data_size = real_size;
                                     }
                                     else {
-                                        JC_JKRDecomp_decode(datap, nesromp, CHR_TO_I8_BUF_SIZE, 0);
+                                        JC_JKRDecomp_decode(datap, nesromp, FAMICOM_NESROM_MAX, 0);
                                         nesinfo_data_size = (u32)((datap[4] << 24) | (datap[5] << 16) | (datap[6]<< 8) | datap[7]);
+#ifdef BUGFIXES
+                                        if (nesinfo_data_size > FAMICOM_NESROM_MAX) {
+                                            nesinfo_data_size = FAMICOM_NESROM_MAX;
+                                        }
+#endif
                                     }
                                 }
     
@@ -2165,6 +2204,14 @@ static int famicom_rom_load() {
         return -1;
     }
 
+#ifdef BUGFIXES
+    // (a card game whose saves wouldn't fit the buffer they're kept in isn't played)
+    if (famicomCommon.nesrom_memcard && famicomCommon.save_pl_no >= 0 &&
+        (max_ofs > NINTENDO_HI_0_SIZE ||
+         sizeof(FamicomSaveDataHeader) + (max_ofs + 0xB) * PLAYER_NUM > NINTENDO_HI_0_SIZE)) {
+        return -1;
+    }
+#endif
     if (famicomCommon.nesrom_memcard && famicomCommon.save_pl_no >= 0) {
         famicomCommon.save_data_name = (u8*)"GAFEFSE\x1A";
         famicomCommon.save_data_single_size = max_ofs + 0xB;

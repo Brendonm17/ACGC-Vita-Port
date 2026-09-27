@@ -268,16 +268,34 @@ static void aNPC_actor_move_show(ACTOR* actorx, GAME* game) {
 
     aNPC_set_over_friendship(nactorx);
     aNPC_actor_move_show_before(actorx, game);
+#ifdef VITA_MP
+    // effects and sounds from what it decides show where other games follow it
+    pc_mp_npc_fx(actorx);
+#endif
     aNPC_schedule_proc(nactorx, play);
     aNPC_action_proc(nactorx, play);
+#ifdef VITA_MP
+    pc_mp_npc_fx(NULL);
+#endif
     aNPC_talk_request_check(actorx, game);
     aNPC_angle_calc(nactorx);
     aNPC_calc_fatigue(nactorx);
     aNPC_actor_move_show_after(actorx, game);
 }
 
+#ifdef VITA_MP
+#include "../src/actor/npc/ac_npc_puppet.c_inc"
+#endif
+
 static void aNPC_actor_move(ACTOR* actorx, GAME* game) {
     NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
+
+#ifdef VITA_MP
+    // another player's game is moving this villager (in its house, or the igloo's guest)
+    if (aNPC_mp_puppet(actorx, game)) {
+        return;
+    }
+#endif
 
     if (nactorx->condition_info.hide_flg != nactorx->condition_info.hide_request) {
         u8 hide_req = nactorx->condition_info.hide_request;

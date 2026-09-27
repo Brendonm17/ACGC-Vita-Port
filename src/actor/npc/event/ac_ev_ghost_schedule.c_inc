@@ -19,6 +19,10 @@ static int aEGH_bitset_func(u16 bit) {
     mEv_gst_common_c* ghost_common = (mEv_gst_common_c*)mEv_get_common_area(mEv_EVENT_GHOST, 55);
 
     if (player_no == mPr_FOREIGNER) {
+#ifdef VITA_MP
+        // a visitor's meeting holds for the night in its passport, a return trip included
+        mp_mark_set(MP_MARK_WISP, bit);
+#endif
         if (ghost_common != NULL) {
             ghost_common->flags |= bit;
             return TRUE;
@@ -37,6 +41,9 @@ static int aEGH_bitclr_func(u16 bit) {
     mEv_gst_common_c* ghost_common = (mEv_gst_common_c*)mEv_get_common_area(mEv_EVENT_GHOST, 55);
 
     if (player_no == mPr_FOREIGNER) {
+#ifdef VITA_MP
+        mp_mark_clr(MP_MARK_WISP, bit);
+#endif
         if (ghost_common != NULL) {
             ghost_common->flags &= ~bit;
             return TRUE;
@@ -55,6 +62,11 @@ static u16 aEGH_bitcheck_func(u16 bit) {
     mEv_gst_common_c* ghost_common = (mEv_gst_common_c*)mEv_get_common_area(mEv_EVENT_GHOST, 55);
 
     if (player_no == mPr_FOREIGNER) {
+#ifdef VITA_MP
+        if (mp_mark_get(MP_MARK_WISP) & bit) {
+            return bit;
+        }
+#endif
         if (ghost_common != NULL) {
             return ghost_common->flags & bit;
         }
@@ -182,6 +194,9 @@ static void aEGH_think_init_proc(NPC_ACTOR* actorx, GAME_PLAY* play) {
         actorx->actor_class.status_data.weight = 255;
         actorx->condition_info.hide_request = FALSE;
         aEGH_setup_think_proc(ghost, play, think_act);
+#ifdef VITA_MP
+        ghost->_9A5 = TRUE;
+#endif
         actorx->condition_info.demo_flg = aNPC_COND_DEMO_SKIP_FOOTSTEPS_VFX | aNPC_COND_DEMO_SKIP_FEEL_CHECK |
                                           aNPC_COND_DEMO_SKIP_FOOTSTEPS | aNPC_COND_DEMO_SKIP_ENTRANCE_CHECK |
                                           aNPC_COND_DEMO_SKIP_HEAD_LOOKAT;

@@ -8,6 +8,20 @@
 #include "m_player_lib.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+// K.K.'s show here: the others near the stage get its song, lights and weather
+static void aMKBC_mp_tell(int what, int arg, int arg2) {
+    u8 body[4];
+
+    body[0] = MP_VFX_KK;
+    body[1] = (u8)what;
+    body[2] = (u8)arg;
+    body[3] = (u8)arg2;
+    mp_vfx_send(body, sizeof(body));
+}
+#endif
 
 #define aMIK_STRING_NUM 10
 #define aMIK_STRING_LEN 25

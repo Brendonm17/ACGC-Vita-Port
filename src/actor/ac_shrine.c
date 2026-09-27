@@ -1,4 +1,7 @@
 #include "ac_shrine.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #include "m_msg.h"
 #include "m_play.h"

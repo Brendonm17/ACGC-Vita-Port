@@ -1,6 +1,9 @@
 #ifdef VITA_TROPHIES
 #include "vita_trophy.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum aNSC_action {
     aNSC_ACTION_EMPTY,
@@ -1181,6 +1184,9 @@ static void aNSC_message_ctrl_talk_request_normal_day(NPC_SHOP_COMMON_ACTOR* sho
         if (fg_item != EMPTY_NO && fg_item != RSV_NO) {
             mDemo_REQUEST_PROC req_proc = (mDemo_REQUEST_PROC)none_proc1;
 
+#ifdef VITA_MP
+            mp_shop_claim(fg_item);
+#endif
             shop_common->sell_item = fg_item;
             shop_common->ut_x = ux;
             shop_common->ut_z = uz;
@@ -1398,6 +1404,9 @@ static int aNSC_message_ctrl(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY* play
                         item = CLIP(shop_design_clip)->unitNum2ItemNo_proc(ut_x, ut_z);
                         if (item != EMPTY_NO && item != RSV_NO) {
                             void* sell_proc = none_proc1;
+#ifdef VITA_MP
+                            mp_shop_claim(item);
+#endif
                             shop_common->sell_item = item;
                             shop_common->ut_x = ut_x;
                             shop_common->ut_z = ut_z;
@@ -2078,7 +2087,12 @@ static void aNSC_request_Q_answer_wait2(NPC_SHOP_COMMON_ACTOR* shop_common, GAME
                     }
                     break;
                 case mChoice_CHOICE2:
+#ifdef VITA_MP
+                    // a visitor too, when the host lets visitors do what residents do (the code is for their own name)
+                    if (mLd_PlayerManKindCheck() == FALSE || mp_visitor_rights()) {
+#else
                     if (mLd_PlayerManKindCheck() == FALSE) {
+#endif
                         if (Common_Get(unk_nook_present_count) >= 3) {
                             next = 0x4;
                         } else if (mPr_GetPossessionItemIdx(Now_Private, EMPTY_NO) != -1) {
@@ -2363,7 +2377,13 @@ static void aNSC_order_check(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY* play
                     } else {
                         msg_no = aNSC_MSG_ORDER_CONFIRM;
                         aNSC_set_ftr_order(shop_common);
+#ifdef VITA_MP
+                        mp_world_inv_mark();
+#endif
                         aNSC_get_sell_price(price);
+#ifdef VITA_MP
+                        mp_world_inv_follow();
+#endif
                         mSP_PlusSales(price);
                     }
                     break;
@@ -2393,6 +2413,20 @@ static void aNSC_sell_check(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY* play)
         switch (mChoice_Get_ChoseNum(mChoice_Get_base_window_p())) {
             case mChoice_CHOICE0:
                 action = aNSC_ACTION_SELL_ANSWER0;
+#ifdef VITA_MP
+                // another player is buying it or bought it: it goes as if turned down (the host's word first)
+                switch (mp_shop_claim_state(shop_common->sell_item)) {
+                    case 0:
+                        action = -1;
+                        break;
+                    case 2:
+                        action = aNSC_ACTION_21_REQUEST_Q_END_WAIT;
+                        aNSC_Set_continue_msg_num(mMsg_Get_base_window_p(), shop_common,
+                                                  aNSC_get_msg_no(aNSC_MSG_BUY_CANCEL));
+                        mMsg_Set_ForceNext(mMsg_Get_base_window_p());
+                        break;
+                }
+#endif
                 break;
             case mChoice_CHOICE1:
                 action = aNSC_ACTION_21_REQUEST_Q_END_WAIT;
@@ -2439,7 +2473,14 @@ static void aNSC_sell_answer0(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY* pla
                     if (idx == -1) {
                         next = 0x4;
                     } else {
+#ifdef VITA_MP
+                        mp_world_inv_mark();
+#endif
                         mPr_SetPossessionItem(Now_Private, idx, item, mPr_ITEM_COND_NORMAL);
+#ifdef VITA_MP
+                        mp_world_inv_follow();
+                        mp_shop_claim_done(item);
+#endif
                         if (aNSC_check_item_with_ticket(item) == TRUE) {
                             mActor_name_t ticket = (Common_Get(time).rtc_time.month - 1) * 8 + ITM_TICKET_START;
                             if (aNSC_check_same_month_ticket(ticket) == TRUE) {
@@ -3066,7 +3107,20 @@ static void aNSC_sell_answer1_init(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY
 }
 
 static void aNSC_sell_item_init(NPC_SHOP_COMMON_ACTOR* shop_common, GAME_PLAY* play) {
+#ifdef VITA_MP
+    // (a purchase's payment is the shop's dealing with the host; paint's goes with the talk, as the house does)
+    int shop = shop_common->sell_item < ITM_RED_PAINT || shop_common->sell_item > ITM_BROWN_PAINT;
+
+    if (shop) {
+        mp_world_inv_mark();
+    }
     aNSC_get_sell_price(shop_common->value);
+    if (shop) {
+        mp_world_inv_follow();
+    }
+#else
+    aNSC_get_sell_price(shop_common->value);
+#endif
     if (CLIP(shop_design_clip) != NULL) {
         CLIP(shop_design_clip)->reportGoodsSale_proc(shop_common->ut_x, shop_common->ut_z);
     }

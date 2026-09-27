@@ -265,3 +265,62 @@ static void aES2_schedule_proc(NPC_ACTOR* npc, GAME_PLAY* play, int type) {
             break;
     }
 }
+
+#ifdef VITA_MP
+// Tortimer as the screen running him has him: the event he's at, the step he's on and where his laps go
+void aES2_mp_step(void* actorx, void* play, mp_evstep_t* st, int mode) {
+    static aNPC_TALK_REQUEST_PROC talk_request_table[3] = {
+        (aNPC_TALK_REQUEST_PROC)mActor_NONE_PROC1,
+        aES2_norm_talk_request,
+        (aNPC_TALK_REQUEST_PROC)mActor_NONE_PROC1,
+    };
+    NPC_SONCHO2* soncho = (NPC_SONCHO2*)actorx;
+    u8* data;
+    int req;
+
+    if (mode == MP_EVS_GET) {
+        st->think = soncho->think_idx;
+        st->a = soncho->event;
+        st->timer = soncho->timer;
+        st->p0 = soncho->center_x;
+        st->p1 = soncho->center_z;
+        return;
+    }
+    if (st->think >= ARRAY_COUNT(dt_tbl)) {
+        return;
+    }
+    data = dt_tbl[st->think];
+    // the prize for this player and the countdown's date are worked out here, as his wait would
+    if (st->think != aES2_THINK_0 && (soncho->event != st->a || soncho->item == EMPTY_NO)) {
+        soncho->event = st->a;
+        soncho->item = mSC_trophy_item(st->a);
+        if (st->a == mSC_EVENT_NEW_YEARS_EVE_COUNTDOWN && soncho->day != 31) {
+            soncho->year -= 1;
+            soncho->month = lbRTC_DECEMBER;
+            soncho->day = 31;
+        }
+    }
+    soncho->think_idx = st->think;
+    soncho->_994 = proc_table[data[0]];
+    soncho->talk = data[3];
+    soncho->think = data[4];
+    soncho->center_x = st->p0;
+    soncho->center_z = st->p1;
+    aES2_set_move_pos(soncho);
+    req = data[2];
+    // (the lighthouse quest is for the town's own players)
+    if (Common_Get(player_no) == mPr_FOREIGNER && st->think == aES2_THINK_3) {
+        req = 0;
+    }
+    soncho->npc_class.talk_info.talk_request_proc = talk_request_table[req];
+    if (mode == MP_EVS_TAKE) {
+        if (st->think != aES2_THINK_0) {
+            soncho->npc_class.think.interrupt_flags = FALSE;
+            soncho->npc_class.condition_info.demo_flg = aNPC_COND_DEMO_SKIP_FORWARD_CHECK;
+        }
+        init_table[data[1]](soncho, (GAME_PLAY*)play);
+        soncho->_9ac = TRUE;
+    }
+    soncho->timer = st->timer;
+}
+#endif

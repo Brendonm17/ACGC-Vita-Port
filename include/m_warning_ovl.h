@@ -51,6 +51,10 @@ enum {
   mWR_WARNING_WORD_OVER,
   mWR_WARNING_PW_CHK,
   mWR_WARNING_PR_FORK,
+#ifdef VITA_MP
+  mWR_WARNING_MP_LEAVE, // the host keeps visitors from leaving things in its town
+  mWR_WARNING_MP_POST,  // ...or posting on its board
+#endif
 
   mWR_WARNING_NUM
 };

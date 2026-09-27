@@ -7,6 +7,9 @@
 #include "m_npc_schedule.h"
 #include "m_player_lib.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define mEnv_TIME_TO_SECS(hour, min, sec) ((hour) * mTM_SECONDS_IN_HOUR + (min) * mTM_SECONDS_IN_MINUTE + (sec))
 
@@ -1294,14 +1297,24 @@ static void mEnv_RoomTypeLightSet(GAME* game, Kankyo* kankyo) {
     mEnv_RoomTypediffuseLightSet(game, kankyo);
 }
 
+#ifdef VITA_MP
+// (a visitor sees the host's rainbow the day it's due, whether or not the host's screen has shown it yet)
+#define mEnv_RAINBOW_DUE() (Save_Get(rainbow_reserved) || mp_rainbow_due())
+#else
+#define mEnv_RAINBOW_DUE() Save_Get(rainbow_reserved)
+#endif
+
 static void mEnv_rainbow_check_set() {
     if (mFI_CheckFieldData() != FALSE && mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_FG && mEv_IsNotTitleDemo()) {
-        if (Save_Get(rainbow_reserved)) {
+        if (mEnv_RAINBOW_DUE()) {
             if (Common_Get(time).rtc_time.month == Save_Get(rainbow_month) &&
                 Common_Get(time).rtc_time.day == Save_Get(rainbow_day)) {
                 int now_sec = Common_Get(time).now_sec;
                 if (now_sec >= mEnv_RAINBOW_TIME_START && now_sec < mEnv_RAINBOW_TIME_END) {
                     Save_Set(rainbow_reserved, FALSE);
+#ifdef VITA_MP
+                    mp_rainbow_shown();
+#endif
 
                     if (Common_Get(time).season == mTM_SEASON_SUMMER) {
                         Common_Set(rainbow_opacity, 1.0f);
@@ -2077,6 +2090,9 @@ extern void mEnv_ManagePointLight(GAME_PLAY* play, Kankyo* kankyo, Global_light*
 
             if (chkTrigger(BUTTON_Z) && mRmTp_PleaseDrawLightSwitch()) {
                 mEnv_RequestChangeLightOFF(play, mEnv_LIGHT_TYPE_PLAYER, 0.0f);
+#ifdef VITA_MP
+                mp_light_switched(mRmTp_GetNowSceneLightSwitchIndex(), FALSE);
+#endif
             }
         }
     } else {
@@ -2097,6 +2113,9 @@ extern void mEnv_ManagePointLight(GAME_PLAY* play, Kankyo* kankyo, Global_light*
 
         if (chkTrigger(BUTTON_Z) && mRmTp_PleaseDrawLightSwitch()) {
             mEnv_RequestChangeLightON(play, mEnv_LIGHT_TYPE_PLAYER, TRUE);
+#ifdef VITA_MP
+            mp_light_switched(mRmTp_GetNowSceneLightSwitchIndex(), TRUE);
+#endif
         } else if (mFI_GET_TYPE(field_id) == mFI_FIELD_NPCROOM0 && Common_Get(last_scene_no) == SCENE_FG) {
             mEnv_CheckNpcRoomPointLightNiceStatus();
         }
@@ -2159,12 +2178,15 @@ static void mEnv_JudgeSwitchStatus() {
 }
 
 static void mEnv_rainbow_power_calc() {
-    if (Save_Get(rainbow_reserved) && mFI_CheckFieldData() && mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_FG &&
+    if (mEnv_RAINBOW_DUE() && mFI_CheckFieldData() && mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_FG &&
         mEv_IsNotTitleDemo() && Common_Get(time.rtc_time).month == Save_Get(rainbow_month) &&
         Common_Get(time.rtc_time).day == Save_Get(rainbow_day) && Common_Get(time).now_sec >= mEnv_RAINBOW_TIME_START &&
         Common_Get(time).now_sec < mEnv_RAINBOW_TIME_END && Common_Get(time).season == mTM_SEASON_SUMMER) {
         if (chase_f(Common_GetPointer(rainbow_opacity), 1.0f, (1.0f / 1800.0f)) != FALSE) {
             Save_Set(rainbow_reserved, FALSE); // rainbow has been shown
+#ifdef VITA_MP
+            mp_rainbow_shown();
+#endif
         }
     } else {
         chase_f(Common_GetPointer(rainbow_opacity), 0.0f, (1.0f / 108000.0f)); // slowly fade out rainbow

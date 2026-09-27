@@ -230,3 +230,30 @@ static void aTNN1_schedule_proc(NPC_ACTOR* nactorx, GAME_PLAY* play, int type) {
             break;
     }
 }
+
+#ifdef VITA_MP
+// a puller's step as the screen running the tug of war has it
+void aTNN1_mp_step(void* actorx, void* play, mp_evstep_t* st, int mode) {
+    static aNPC_TALK_REQUEST_PROC talk_request_table[] = { (aNPC_TALK_REQUEST_PROC)none_proc1, aTNN1_norm_talk_request, (aNPC_TALK_REQUEST_PROC)none_proc1 };
+    TUNAHIKI_NPC1_ACTOR* actor = (TUNAHIKI_NPC1_ACTOR*)actorx;
+    aTNN1_think_data_c* dt;
+
+    if (mode == MP_EVS_GET) {
+        st->think = actor->think_idx;
+        return;
+    }
+    if (st->think >= ARRAY_COUNT(dt_tbl)) {
+        return;
+    }
+    if (mode == MP_EVS_TAKE) {
+        aTNN1_setup_think_proc(actor, (GAME_PLAY*)play, st->think);
+        return;
+    }
+    dt = &dt_tbl[st->think];
+    actor->think_idx = st->think;
+    actor->think_proc = proc_table[dt->think_proc_idx];
+    actor->npc_class.talk_info.talk_request_proc = talk_request_table[dt->talk_request_idx];
+    actor->talk_idx = dt->talk_idx;
+    actor->next_think_idx = dt->think_idx_after_talk;
+}
+#endif

@@ -9,6 +9,10 @@
 #include "m_malloc.h"
 #include "m_eappli.h"
 #include "GBA2/gba2.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "pc_mp_text_data.h"
+#endif
 
 enum {
     aMSC_ACT_MENU_OPEN_WAIT,
@@ -24,6 +28,9 @@ enum {
     aMSC_ACT_SELECT_READ_DATA_OR_NOT,
     aMSC_ACT_FORCE_MENU_OPEN_WAIT,
     aMSC_ACT_TALK_END_WAIT,
+#ifdef VITA_MP
+    aMSC_ACT_MP_KEEP_TALK,
+#endif
 
     aMSC_ACT_NUM
 };
@@ -72,6 +79,14 @@ static void aMSC_menu_open_wait(MSCORE_CONTROL_ACTOR* mscore_ctrl, GAME_PLAY* pl
                 if (!(item < (MUSIC_BOARD1 + 1) && item >= MUSIC_BOARD0)) {
                     return;
                 }
+#ifdef VITA_MP
+                // the host keeps its town tune as it is
+                if (!mp_visitor_may(MP_RULE_TUNE)) {
+                    player->a_btn_pressed = FALSE;
+                    aMSC_setupAction(mscore_ctrl, aMSC_ACT_MP_KEEP_TALK);
+                    return;
+                }
+#endif
 
                 mMld_GetMelody(mscore_ctrl->melody);
                 mSM_open_submenu_new2(submenu, mSM_OVL_MSCORE, 0, 0, mscore_ctrl, (int)mscore_ctrl->melody);
@@ -285,6 +300,34 @@ static void aMSC_talk_end_wait(MSCORE_CONTROL_ACTOR* mscore_ctrl, GAME_PLAY* pla
     }
 }
 
+#ifdef VITA_MP
+static void aMSC_set_mp_keep_talk_info(ACTOR* actorx) {
+    rgba_t color;
+
+    mDemo_Set_msg_num(MP_MSG_V_TUNE_KEEP);
+    mDemo_Set_talk_turn(FALSE);
+    mDemo_Set_camera(CAMERA2_PROCESS_STOP);
+    mDemo_Set_talk_display_name(FALSE);
+    color.r = 255;
+    color.g = 255;
+    color.b = 20;
+    color.a = 255;
+    mDemo_Set_talk_window_color(&color);
+}
+
+// the player's own thought in place of the score
+static void aMSC_mp_keep_talk(MSCORE_CONTROL_ACTOR* mscore_ctrl, GAME_PLAY* play) {
+    if (mDemo_Check(mDemo_TYPE_SPEAK, (ACTOR*)mscore_ctrl) == TRUE) {
+        if (!mDemo_Check_ListenAble()) {
+            mDemo_Set_ListenAble();
+        }
+        aMSC_setupAction(mscore_ctrl, aMSC_ACT_TALK_END_WAIT);
+    } else {
+        mDemo_Request(mDemo_TYPE_SPEAK, (ACTOR*)mscore_ctrl, &aMSC_set_mp_keep_talk_info);
+    }
+}
+#endif
+
 static void aMSC_setupAction(MSCORE_CONTROL_ACTOR* mscore_ctrl, int act_idx) {
     // clang-format off
     static aMSC_ACTION_PROC process[] = {
@@ -301,6 +344,9 @@ static void aMSC_setupAction(MSCORE_CONTROL_ACTOR* mscore_ctrl, int act_idx) {
         &aMSC_select_read_data_or_not,
         &aMSC_force_menu_open_wait,
         &aMSC_talk_end_wait,
+#ifdef VITA_MP
+        &aMSC_mp_keep_talk,
+#endif
     };
     // clang-format on
 

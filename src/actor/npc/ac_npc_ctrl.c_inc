@@ -929,6 +929,11 @@ static int aNPC_check_cond_to_greeting(NPC_ACTOR* nactorx) {
     if (nactorx->actor_class.ct_proc != NULL || nactorx->palActor != NULL || nactorx->palActorIgnoreTimer != 0 ||
         nactorx->condition_info.hide_flg == TRUE) {
         ret = FALSE;
+#ifdef VITA_MP
+    } else if (mp_npc_is_puppet((ACTOR*)nactorx)) {
+        // two villagers only greet when the same game moves them both
+        ret = FALSE;
+#endif
     } else {
         switch (aNPC_get_feel_info(nactorx)) {
             case mNpc_FEEL_ANGRY:

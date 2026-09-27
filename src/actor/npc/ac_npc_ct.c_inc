@@ -415,6 +415,12 @@ static void aNPC_actor_ct(ACTOR* actorx, GAME* game, aNPC_ct_data_c* ct_data) {
         {
             mActor_name_t* fg_p = mFI_GetUnitFG(actorx->world.position);
 
+#ifdef VITA_MP
+            // a visitor's villagers stand where they spawn; the host's fill the holes
+            if (!mp_town_writer_allowed()) {
+                fg_p = NULL;
+            }
+#endif
             if (fg_p != NULL && (ITEM_IS_HOLE(*fg_p) || *fg_p == HOLE_SHINE)) {
                 mFI_SetFG_common(EMPTY_NO, actorx->world.position, TRUE);
             }

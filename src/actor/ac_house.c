@@ -7,6 +7,10 @@
 #include "m_rcp.h"
 #include "m_debug.h"
 
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
+
 enum {
     aHUS_ACTION_WAIT,
     aHUS_ACTION_OPEN_DOOR_WAIT,

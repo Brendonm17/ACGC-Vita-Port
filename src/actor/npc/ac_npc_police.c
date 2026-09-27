@@ -5,6 +5,9 @@
 #include "m_msg.h"
 #include "m_font.h"
 #include "m_string.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aPOL_ACT_TAISOU,
@@ -75,8 +78,14 @@ static void aPOL_actor_ct(ACTOR* actorx, GAME* game) {
         actorx->status_data.weight = MASSTYPE_HEAVY;
         actor->setup_action_proc = aPOL_setupAction;
         actor->exit_greeting = FALSE;
-        mPB_keep_item(*mFI_GetUnitFG(actorx->home.position));
-        mFI_SetFG_common(RSV_NO, actorx->home.position, TRUE);
+#ifdef VITA_MP
+        // only the host moves what's underfoot into its lost & found
+        if (mp_town_writer_allowed())
+#endif
+        {
+            mPB_keep_item(*mFI_GetUnitFG(actorx->home.position));
+            mFI_SetFG_common(RSV_NO, actorx->home.position, TRUE);
+        }
     }
 }
 

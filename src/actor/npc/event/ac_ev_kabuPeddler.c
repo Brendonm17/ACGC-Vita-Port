@@ -5,6 +5,9 @@
 #include "m_msg.h"
 #include "m_player_lib.h"
 #include "m_play.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aEKPD_ACTION_TALK_END_WAIT,

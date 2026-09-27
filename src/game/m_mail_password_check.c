@@ -885,12 +885,39 @@ extern int mMpswd_restore_code(u8* body, u8* password) {
     return res;
 }
 
+#ifdef BUGFIXES
+static int mMpswd_check_strings(u8* str, int len) {
+    int ret = TRUE;
+    int i;
+
+    for (i = 0; i != len; i++) {
+        // Don't allow control codes or msg tags
+        if (*str == CHAR_CONTROL_CODE || *str == CHAR_MESSAGE_TAG) {
+            ret = FALSE;
+            break;
+        }
+        str++;
+    }
+
+    return ret;
+}
+#endif
+
 extern void mMpswd_password(u8* password_data, mMpswd_password_c* password) {
     u32 b0 = password_data[0];
 
     password->checksum = (b0 >> 3) & 3;
     memcpy(password->str0, password_data + 2, PLAYER_NAME_LEN);
     memcpy(password->str1, password_data + 10, PLAYER_NAME_LEN);
+#ifdef BUGFIXES
+    // (1.1 JP) names with codes in them make it no password: its checksum can't match, and it shows as spaces
+    if (!mMpswd_check_strings(password->str0, PLAYER_NAME_LEN) ||
+        !mMpswd_check_strings(password->str1, PLAYER_NAME_LEN)) {
+        password->checksum = 0xFF;
+        mFont_clean_save_text(password->str0, PLAYER_NAME_LEN);
+        mFont_clean_save_text(password->str1, PLAYER_NAME_LEN);
+    }
+#endif
     password->item = (password_data[18] << 8) + password_data[19];
     password->type = (b0 >> 5) & 7;
 

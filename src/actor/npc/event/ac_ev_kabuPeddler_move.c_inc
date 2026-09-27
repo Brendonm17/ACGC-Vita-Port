@@ -6,6 +6,12 @@ static int aEKPD_check_look() {
                                &Common_Get(now_private)->player_ID) == TRUE) {
         res = TRUE;
     }
+#ifdef VITA_MP
+    // the one foreigner slot holds whichever visitor greeted her last; each visitor keeps its own in its passport
+    if (Common_Get(player_no) == mPr_FOREIGNER && mp_mark_get(MP_MARK_KABU) != 0) {
+        res = TRUE;
+    }
+#endif
 
     return res;
 }
@@ -193,6 +199,11 @@ static int aEKPD_talk_init(ACTOR* actorx, GAME* game) {
 
         mPr_CopyPersonalID(&kabu_data->spoken_pids[Common_Get(player_no)], &Common_Get(now_private)->player_ID);
     }
+#ifdef VITA_MP
+    if (Common_Get(player_no) == mPr_FOREIGNER) {
+        mp_mark_set(MP_MARK_KABU, 1);
+    }
+#endif
 
     (*kabuPeddler->setup_talk_proc)(kabuPeddler, play, aEKPD_ACTION_SELL_CHECK);
     mDemo_Set_ListenAble();

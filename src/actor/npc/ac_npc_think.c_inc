@@ -395,6 +395,27 @@ static int aNPC_check_clap(NPC_ACTOR* nactorx, GAME_PLAY* play) {
                 }
             }
         }
+#ifdef VITA_MP
+        // another player's catch close by earns the same applause
+        if (!ret && mp_active()) {
+            void* puppets[MP_MAX_PEERS];
+            int n = mp_puppets(puppets, MP_MAX_PEERS);
+            int i;
+
+            for (i = 0; i < n && !ret; i++) {
+                ACTOR* p = (ACTOR*)puppets[i];
+
+                if (mp_puppet_catching(p) &&
+                    search_position_distanceXZ(&nactorx->actor_class.world.position, &p->world.position) <
+                        (3 * mFI_UNIT_BASE_SIZE_F)) {
+                    s16 d_angle = nactorx->actor_class.shape_info.rotation.y -
+                                  search_position_angleY(&nactorx->actor_class.world.position, &p->world.position);
+
+                    ret = ABS(d_angle) < DEG2SHORT_ANGLE2(67.5f);
+                }
+            }
+        }
+#endif
     }
 
     return ret;

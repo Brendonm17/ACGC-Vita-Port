@@ -10,6 +10,9 @@
 #include "gfxalloc.h"
 #include "m_rcp.h"
 #include "m_event_map_npc.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define GOLD_TREE_SAPLING_EFFECT_X 13.0f
 #define GOLD_TREE_SAPLING_EFFECT_Y 33.0f
@@ -287,3 +290,11 @@ static void bIT_actor_dt(ACTOR* actorx, GAME* game) {
 
 #include "../src/bg_item/bg_item_move.c_inc"
 #include "../src/bg_item/bg_item_draw.c_inc"
+
+#ifdef VITA_MP
+void bIT_mp_menu_move(void) {
+    if (bIT_CLIP != NULL && bIT_CLIP->mp_menu_move_proc != NULL) {
+        bIT_CLIP->mp_menu_move_proc();
+    }
+}
+#endif

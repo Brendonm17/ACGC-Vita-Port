@@ -89,6 +89,13 @@ static u8 wr_with_secret_codes[18] = "with secret codes!";
 
 static u8 wr_this_item[10] = "this item!";
 
+#ifdef VITA_MP
+static u8 wr_You_cant_leave_things[22] = "You can't leave things";
+static u8 wr_in_this_village[16] = "in this village!";
+static u8 wr_You_cant_post_on[17] = "You can't post on";
+static u8 wr_this_villages_board[21] = "this village's board!";
+#endif
+
 /* Line definitions */
 #define mWR_LINE(str, pos_x, pos_y) { (pos_x), (pos_y), str, ARRAY_COUNT(str) }
 
@@ -213,6 +220,18 @@ static mWR_line_c wr_pr_fork_line[] = {
   mWR_LINE(wr_this_item,     80.0f, 24.0f)
 };
 
+#ifdef VITA_MP
+static mWR_line_c wr_mp_leave_line[] = {
+  mWR_LINE(wr_You_cant_leave_things, 49.0f, 40.0f),
+  mWR_LINE(wr_in_this_village,       70.0f, 24.0f)
+};
+
+static mWR_line_c wr_mp_post_line[] = {
+  mWR_LINE(wr_You_cant_post_on,    64.0f, 40.0f),
+  mWR_LINE(wr_this_villages_board, 54.0f, 24.0f)
+};
+#endif
+
 #define mWR_DATA(line, scale_x, scale_y) { line, ARRAY_COUNT(line), (scale_x), (scale_y) }
 #define mWR_NULL { NULL, 0, 1.0f, 1.0f }
 
@@ -244,7 +263,11 @@ static mWR_data_c wr_win_data[] = {
   mWR_DATA(wr_put_fami_line, 1.0f, 1.0f),
   mWR_DATA(wr_word_over_line, 1.0f, 1.0f),
   mWR_DATA(wr_pw_chk_line, 1.0f, 1.2f),
-  mWR_DATA(wr_pr_fork_line, 0.9f, 1.0f)
+  mWR_DATA(wr_pr_fork_line, 0.9f, 1.0f),
+#ifdef VITA_MP
+  mWR_DATA(wr_mp_leave_line, 1.0f, 1.0f),
+  mWR_DATA(wr_mp_post_line, 1.0f, 1.0f),
+#endif
 };
 
 static void mWR_move_Move(Submenu* submenu, mSM_MenuInfo_c* menu_info) {

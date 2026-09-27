@@ -143,6 +143,12 @@ extern void aTRC_clip_random_topsize(void) {
     lbRTC_hour_t hour = now_time.hour;
     int size;
 
+#ifdef VITA_MP
+    // the villagers fish against the host's record; a visitor's copy of Chip only reads it
+    if (!mp_town_writer_allowed()) {
+        return;
+    }
+#endif
     if (fish_p != NULL) {
         size = mFR_make_NpcRecord(hour);
 

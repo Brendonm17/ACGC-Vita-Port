@@ -52,7 +52,7 @@ static void aNNW_day_day(void) {
     lbRTC_time_c* time_p = Common_GetPointer(time.rtc_time);
     mPr_day_day_c* day_day = &Now_Private->nw_visitor;
 
-    if (Common_Get(player_no) != mPr_FOREIGNER && (time_p->year != day_day->last_date.year || time_p->month != day_day->last_date.month || time_p->day != day_day->last_date.day)) {
+    if (!aNNW_STRANGER() && (time_p->year != day_day->last_date.year || time_p->month != day_day->last_date.month || time_p->day != day_day->last_date.day)) {
         day_day->last_date.year = time_p->year;
         day_day->last_date.month = time_p->month;
         day_day->last_date.day = time_p->day;
@@ -76,7 +76,7 @@ static void aNNW_get_make_sister_message(void) {
     }
 
     days = day_day->days + add_day;
-    if (Common_Get(player_no) == mPr_FOREIGNER) {
+    if (aNNW_STRANGER()) {
         days = 0;
     }
 
@@ -205,6 +205,17 @@ static void aNNW_trend_delete_umbrella(int umbrella_idx) {
         }
     }
 }
+
+#ifdef VITA_MP
+// host: another player's trade at a stand: villagers wearing the design it replaced change back, as on their game
+void aNNW_mp_trend_delete(int slot) {
+    if (slot < mNW_CLOTH_DESIGN_NUM) {
+        aNNW_trend_delete_cloth(slot);
+    } else {
+        aNNW_trend_delete_umbrella(slot - mNW_CLOTH_DESIGN_NUM);
+    }
+}
+#endif
 
 static int aNNW_first_talk_check(u8 flag) {
     return Common_Get(needlework_first_talk_flags) & flag;
@@ -606,6 +617,13 @@ static void aNNW_talk_design_close3(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLAY* play
     }
 }
 
+#ifdef VITA_MP
+static void aNNW_mp_stands_kept(NPC_NEEDLEWORK_ACTOR* actor, mMsg_Window_c* msg_p) {
+    aNNW_change_talk_proc(actor, aNNW_TALK_WHAT_HAPPEN);
+    mMsg_Set_continue_msg_num(msg_p, 0x2FEE);
+}
+#endif
+
 static void aNNW_talk_trade_check(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLAY* play) {
     int order = mDemo_Get_OrderValue(mDemo_ORDER_NPC0, 9);
     mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
@@ -615,12 +633,24 @@ static void aNNW_talk_trade_check(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLAY* play) 
 
         switch (mChoice_GET_CHOSENUM()) {
             case mChoice_CHOICE0:
+#ifdef VITA_MP
+                if (aNNW_STANDS_KEPT()) {
+                    aNNW_mp_stands_kept(actor, msg_p);
+                    break;
+                }
+#endif
                 aNNW_change_talk_proc(actor, aNNW_TALK_GIVE_ADMISSION);
                 break;
             case mChoice_CHOICE1:
                 aNNW_change_talk_proc(actor, aNNW_TALK_GIVE_ADMISSION2);
                 break;
             case mChoice_CHOICE2:
+#ifdef VITA_MP
+                if (aNNW_STANDS_KEPT()) {
+                    aNNW_mp_stands_kept(actor, msg_p);
+                    break;
+                }
+#endif
                 aNNW_change_talk_proc(actor, aNNW_TALK_TRADE_WHICH);
                 break;
             case mChoice_CHOICE3:
@@ -678,6 +708,9 @@ static void aNNW_talk_trade_close(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLAY* play) 
                 case aNNW_TALK_TRADE_CLOSE3:
                     mMsg_ChangeMsgData(msg_p, 0x2FF9);
                     bcopy(&Save_Get(needlework).original_design[actor->buy_ut_idx & 7], &Now_Private->my_org[actor->_9AE & 7], sizeof(mNW_original_design_c));
+#ifdef BUGFIXES
+                    mFont_clean_save_text(Now_Private->my_org[actor->_9AE & 7].name, mNW_ORIGINAL_DESIGN_NAME_LEN);
+#endif
                     break;
             }
 
@@ -706,6 +739,12 @@ static void aNNW_talk_give_admission(NPC_NEEDLEWORK_ACTOR* actor, GAME_PLAY* pla
                 aNNW_change_talk_proc(actor, actor->talk_idx + 1);
                 break;
             case mChoice_CHOICE1:
+#ifdef VITA_MP
+                if (aNNW_STANDS_KEPT()) {
+                    aNNW_mp_stands_kept(actor, msg_p);
+                    break;
+                }
+#endif
                 aNNW_change_talk_proc(actor, aNNW_TALK_TRADE_WHICH);
                 break;
             case mChoice_CHOICE2:
@@ -1488,7 +1527,7 @@ static int aNNW_talk_init(ACTOR* actorx, GAME* game) {
             }
 
             aNNW_day_day();
-            if (Now_Private->nw_visitor.days >= 5 && Common_Get(player_no) != mPr_FOREIGNER && actor->talk_idx != aNNW_TALK_ANE_3) {
+            if (Now_Private->nw_visitor.days >= 5 && !aNNW_STRANGER() && actor->talk_idx != aNNW_TALK_ANE_3) {
                 aNNW_turn_player(actorx);
             }
 

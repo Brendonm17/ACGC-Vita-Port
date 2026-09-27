@@ -35,6 +35,17 @@
 #include "pc_settings.h"
 #include "m_cockroach.h"
 #include "game.h"
+#include "pc_mp.h"
+#ifdef VITA_MP
+#include "pc_mp_text_data.h"
+#include "m_submenu_ovl.h"
+#include "m_hand_ovl.h"
+#endif
+#ifdef TARGET_VITA
+#include "ac_npc.h"
+#include "m_field_info.h"
+#include "m_play.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,6 +175,9 @@ extern void lbRTC_GetTime(lbRTC_time_c* time);
 // defined further down; called from pc_save_read_gci
 void pc_time_sync_on_save_load(void);
 static void pc_save_snapshot_capture(void);
+#ifdef TARGET_VITA
+static int pc_save_write_settled(u8* file_data, const char* gci_path, const char* tmp_path);
+#endif
 
 /* --- ARAM data blocks (mail/diary/original designs) --- */
 
@@ -331,12 +345,39 @@ static void pc_ensure_save_dirs(void) {
 
 // periodic autosave only: one rolling backup, no whole-device sync
 static int s_pc_save_light = 0;
+// a save taken mid-play: write the town as the scene's end would leave it
+static int s_pc_save_settle = 0;
+
+// town saves by the snapshot they write: which finished, and which reached the disk for good
+static u32 s_pc_save_serial;
+static volatile u32 s_pc_save_done;
+static volatile u32 s_pc_save_landed;
+
+// light: 0 full (3 backups, synced), 1 periodic (1 backup, no sync), 2 commit (1 backup, synced)
+static u32 pc_save_note_capture(int light) {
+    ++s_pc_save_serial;
+#ifdef VITA_MP
+    if (light != 1) {
+        mp_world_on_save_capture(s_pc_save_serial);
+    }
+#endif
+    return s_pc_save_serial;
+}
+
+static void pc_save_note_done(u32 serial, int ok, int light) {
+    if (ok && light != 1 && (s32)(serial - s_pc_save_landed) > 0) {
+        s_pc_save_landed = serial;
+    }
+    if ((s32)(serial - s_pc_save_done) > 0) {
+        __atomic_store_n(&s_pc_save_done, serial, __ATOMIC_RELEASE);
+    }
+}
 
 static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path);
 
 static int pc_save_write_gci(void) {
     int result = pc_save_write_gci_to(PC_GCI_PATH, PC_GCI_TMP_PATH);
-    if (result) {
+    if (result && !s_pc_save_settle) {
         // keep the reload snapshot aligned with on-disk state
         pc_save_snapshot_capture();
     }
@@ -357,12 +398,12 @@ static int pc_save_write_image_file(const char* path, const void* hdr, u32 hdr_l
 #ifdef TARGET_VITA
     SceUID fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
     if (fd < 0) {
-        OSReport("[PC] GCI save: sceIoOpen('%s') failed (0x%08X)\n", path, (unsigned)fd);
+        pc_log_error("[PC] GCI save: sceIoOpen('%s') failed (0x%08X)\n", path, (unsigned)fd);
         return FALSE;
     }
     if (sceIoWrite(fd, hdr, hdr_len) != (SceSSize)hdr_len ||
         sceIoWrite(fd, body, body_len) != (SceSSize)body_len) {
-        OSReport("[PC] GCI save: sceIoWrite failed (disk full?)\n");
+        pc_log_error("[PC] GCI save: sceIoWrite failed (disk full?)\n");
         sceIoClose(fd);
         remove(path);
         return FALSE;
@@ -373,11 +414,11 @@ static int pc_save_write_image_file(const char* path, const void* hdr, u32 hdr_l
 #else
     FILE* fp = fopen(path, "wb");
     if (fp == NULL) {
-        OSReport("[PC] GCI save: failed to open temp file '%s'\n", path);
+        pc_log_error("[PC] GCI save: failed to open temp file '%s'\n", path);
         return FALSE;
     }
     if (fwrite(hdr, hdr_len, 1, fp) != 1 || fwrite(body, body_len, 1, fp) != 1) {
-        OSReport("[PC] GCI save: fwrite failed (disk full?)\n");
+        pc_log_error("[PC] GCI save: fwrite failed (disk full?)\n");
         fclose(fp);
         remove(path);
         return FALSE;
@@ -509,8 +550,8 @@ static int pc_save_commit_image(const u8* file_data, const CARDDir* dir_hdr,
     }
 
     if (rename(tmp_path, gci_path) != 0) {
-        OSReport("[PC] GCI save: rename '%s' -> '%s' failed, recovering...\n",
-                 tmp_path, gci_path);
+        pc_log_error("[PC] GCI save: rename '%s' -> '%s' failed, recovering...\n",
+                     tmp_path, gci_path);
         {
             char bak1[400];
             snprintf(bak1, sizeof(bak1), "%s.bak1", gci_path);
@@ -520,8 +561,9 @@ static int pc_save_commit_image(const u8* file_data, const CARDDir* dir_hdr,
         return FALSE;
     }
 
-    if (!light) pc_save_fs_sync();
-    OSReport("[PC] GCI save: written to %s (%s)\n", gci_path, light ? "light" : "full + sync");
+    if (light != 1) pc_save_fs_sync();
+    OSReport("[PC] GCI save: written to %s (%s)\n", gci_path,
+             light == 1 ? "light" : (light == 2 ? "rolling + sync" : "full + sync"));
     pc_save_loaded = 1;
     return TRUE;
 }
@@ -540,12 +582,24 @@ static int pc_save_write_gci_to(const char* gci_path, const char* tmp_path) {
 
     file_data = pc_save_image_buf();  // reused 456 KB buffer, zeroed each save
     if (!file_data) {
-        OSReport("[PC] GCI save: image buffer alloc failed (out of memory)\n");
+        pc_log_error("[PC] GCI save: image buffer alloc failed (out of memory)\n");
         return FALSE;
     }
 
-    pc_save_build_image(file_data, &dir_hdr, &common_data.save.save, (u8* const*)l_aram_block_p_table);
-    return pc_save_commit_image(file_data, &dir_hdr, gci_path, tmp_path, s_pc_save_light);
+#ifdef TARGET_VITA
+    if (s_pc_save_settle) {
+        return pc_save_write_settled(file_data, gci_path, tmp_path);
+    }
+#endif
+    {
+        u32 serial = pc_save_note_capture(s_pc_save_light);
+        int ok;
+
+        pc_save_build_image(file_data, &dir_hdr, &common_data.save.save, (u8* const*)l_aram_block_p_table);
+        ok = pc_save_commit_image(file_data, &dir_hdr, gci_path, tmp_path, s_pc_save_light);
+        pc_save_note_done(serial, ok, s_pc_save_light);
+        return ok;
+    }
 }
 
 /* Read a GCI file into common_data (for home town / Card A) */
@@ -559,7 +613,7 @@ static int pc_save_read_gci(const char* path) {
 
     fp = fopen(path, "rb");
     if (!fp) {
-        OSReport("[PC] GCI: fopen('%s') failed\n", path);
+        pc_log_error("[PC] GCI: fopen('%s') failed\n", path);
         return FALSE;
     }
 
@@ -572,7 +626,7 @@ static int pc_save_read_gci(const char* path) {
              (unsigned long)(GCI_HEADER_SIZE + GCI_FILE_DATA_SIZE));
 
     if (fread(&dir_hdr, GCI_HEADER_SIZE, 1, fp) != 1) {
-        OSReport("[PC] GCI: failed to read %u-byte header\n", (unsigned)GCI_HEADER_SIZE);
+        pc_log_error("[PC] GCI: failed to read %u-byte header\n", (unsigned)GCI_HEADER_SIZE);
         fclose(fp);
         return FALSE;
     }
@@ -583,22 +637,22 @@ static int pc_save_read_gci(const char* path) {
              dir_hdr.company[0], dir_hdr.company[1],
              dir_hdr.fileName);
     if (memcmp(dir_hdr.gameName, "GAF", 3) != 0) {
-        OSReport("[PC] GCI: not an Animal Crossing save (expected GAFx, got '%.4s')\n",
-                 dir_hdr.gameName);
+        pc_log_error("[PC] GCI: not an Animal Crossing save (expected GAFx, got '%.4s')\n",
+                     dir_hdr.gameName);
         fclose(fp);
         return FALSE;
     }
 
     file_data = (u8*)malloc(GCI_FILE_DATA_SIZE);
     if (!file_data) {
-        OSReport("[PC] GCI: malloc(%u) failed\n", (unsigned)GCI_FILE_DATA_SIZE);
+        pc_log_error("[PC] GCI: malloc(%u) failed\n", (unsigned)GCI_FILE_DATA_SIZE);
         fclose(fp);
         return FALSE;
     }
 
     if (fread(file_data, GCI_FILE_DATA_SIZE, 1, fp) != 1) {
-        OSReport("[PC] GCI: failed to read %u bytes of file data (file may be too small)\n",
-                 (unsigned)GCI_FILE_DATA_SIZE);
+        pc_log_error("[PC] GCI: failed to read %u bytes of file data (file may be too small)\n",
+                     (unsigned)GCI_FILE_DATA_SIZE);
         fclose(fp);
         free(file_data);
         return FALSE;
@@ -701,12 +755,12 @@ static int pc_save_read_gci_to_keep(const char* path) {
 
     /* Validate — if main is corrupt, try backup */
     if (!mLd_CheckId(l_keepSave.save.land_info.id)) {
-        OSReport("[PC] Card B: main save invalid, trying backup\n");
+        pc_log_error("[PC] Card B: main save invalid, trying backup\n");
         save_src = (Save_t*)(file_data + GCI_SAVE_BACK_OFFSET);
         memcpy(&l_keepSave.save, save_src, sizeof(Save_t));
         pc_save_bswap(&l_keepSave.save, PC_BSWAP_FROM_BE);
         if (!mLd_CheckId(l_keepSave.save.land_info.id)) {
-            OSReport("[PC] Card B: backup save also invalid\n");
+            pc_log_error("[PC] Card B: backup save also invalid\n");
             free(file_data);
             return FALSE;
         }
@@ -856,6 +910,226 @@ static int pc_save_snapshot_restore(void) {
     return TRUE;
 }
 
+#ifdef TARGET_VITA
+// ---- mid-play saves
+// the gyroid runs every actor's save proc because its scene ends right after. a save
+// taken while the town keeps running applies the same end-of-scene result to its copy:
+// running those procs live stripped event tents, re-stamped structures and reset NPCs.
+
+extern void play_main(GAME* game);
+extern int mFI_RemoveFGStructure_copy(Save_t* save, mActor_name_t structure_name, int bx, int bz, int ut_x, int ut_z);
+
+static GAME_PLAY* pc_save_live_play(void) {
+    GAME* game = gamePT;
+
+    return (game != NULL && game->exec == play_main) ? (GAME_PLAY*)game : NULL;
+}
+
+// cells whose items live in actors right now, as restore_fgdata would write them back
+void pc_save_actor_cells(GAME_PLAY* play, void (*cb)(unsigned int save_off, unsigned short name, void* arg), void* arg) {
+    const u8* base = (const u8*)&common_data.save.save;
+    int part;
+
+    if (play == NULL) {
+        return;
+    }
+    for (part = 0; part < ACTOR_PART_NUM; part++) {
+        ACTOR* actor;
+
+        for (actor = play->actor_info.list[part].actor; actor != NULL; actor = actor->next_actor) {
+            mActor_name_t* cell;
+            int bx;
+            int bz;
+            int ut_x;
+            int ut_z;
+
+            if (part != ACTOR_PART_FG && part != ACTOR_PART_ITEM && actor->restore_fg != TRUE) {
+                continue;
+            }
+            if (actor->npc_id == EMPTY_NO || actor->move_actor_list_idx != -1 || actor->block_x < 0 ||
+                actor->block_z < 0) {
+                continue;
+            }
+            if (!mFI_Wpos2BkandUtNuminBlock(&bx, &bz, &ut_x, &ut_z, actor->home.position)) {
+                continue;
+            }
+            cell = mFI_BkNumtoUtFGTop(bx, bz);
+            if (cell == NULL) {
+                continue;
+            }
+            cell += ut_x + ut_z * UT_X_NUM;
+            if ((const u8*)cell >= base && (const u8*)cell < base + sizeof(Save_t)) {
+                cb((u32)((const u8*)cell - base), actor->npc_id, arg);
+            }
+        }
+    }
+}
+
+static void pc_save_fix_cell(unsigned int off, unsigned short name, void* arg) {
+    mActor_name_t* out = (mActor_name_t*)((u8*)arg + off);
+
+    if (off > sizeof(Save_t) - sizeof(mActor_name_t)) {
+        return;
+    }
+    if (ITEM_NAME_GET_TYPE(name) == NAME_TYPE_ITEM2 && *out != EMPTY_NO) {
+        return;
+    }
+    *out = name;
+}
+
+// the fg cell under a world position, in a save copy
+static mActor_name_t* pc_save_cell_at(Save_t* dst, xyz_t pos) {
+    const u8* base = (const u8*)&common_data.save.save;
+    mActor_name_t* cell;
+    int bx;
+    int bz;
+    int ut_x;
+    int ut_z;
+
+    if (!mFI_Wpos2BkandUtNuminBlock(&bx, &bz, &ut_x, &ut_z, pos) || (cell = mFI_BkNumtoUtFGTop(bx, bz)) == NULL) {
+        return NULL;
+    }
+    cell += ut_x + ut_z * UT_X_NUM;
+    if ((const u8*)cell < base || (const u8*)cell >= base + sizeof(Save_t)) {
+        return NULL;
+    }
+    return (mActor_name_t*)((u8*)dst + ((const u8*)cell - base));
+}
+
+// what aNPC_actor_save_for_normal keeps: the shirt being worn and the mood
+static void pc_save_npc_state(GAME_PLAY* play, Save_t* dst) {
+    Animal_c* animals = Save_Get(animals);
+    ACTOR* actor;
+
+    for (actor = play->actor_info.list[ACTOR_PART_NPC].actor; actor != NULL; actor = actor->next_actor) {
+        NPC_ACTOR* npc = (NPC_ACTOR*)actor;
+        Animal_c* live = npc->npc_info.animal;
+        Animal_c* out;
+
+        if (ITEM_NAME_GET_TYPE(actor->npc_id) != NAME_TYPE_NPC || live == NULL) {
+            continue;
+        }
+        if (live >= animals && live < animals + ANIMAL_NUM_MAX) {
+            out = &dst->animals[live - animals];
+        } else if (live == Save_GetPointer(island.animal)) {
+            out = &dst->island.animal;
+        } else {
+            continue;
+        }
+        out->cloth = npc->draw.next_cloth_no;
+        out->cloth_original_id = npc->draw.next_org_idx;
+        if (npc->condition_info.feel_tim == 0) {
+            out->mood = mNpc_FEEL_NORMAL;
+            out->mood_time = 0;
+            continue;
+        }
+        switch (live->mood) {
+            case mNpc_FEEL_PITFALL:
+                if (mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_FG) {
+                    mActor_name_t* hole = pc_save_cell_at(dst, actor->world.position);
+
+                    if (hole != NULL) {
+                        *hole = EMPTY_NO;
+                    }
+                }
+                // fallthrough
+            case mNpc_FEEL_SLEEPY:
+            case mNpc_FEEL_UZAI_0:
+            case mNpc_FEEL_UZAI_1:
+                out->mood = mNpc_FEEL_NORMAL;
+                out->mood_time = 0;
+                break;
+            default:
+                out->mood_time = npc->condition_info.feel_tim / FRAMES_PER_MINUTE;
+                break;
+        }
+    }
+}
+
+// what aEvMgr_save erases: event structures placed for today (tents, stands, cars)
+static void pc_save_strip_event_structs(Save_t* dst) {
+    mEv_common_data_c* ev = Common_GetPointer(event_common);
+    int i;
+
+    for (i = 0; i < mEv_PLACE_NUM; i++) {
+        mEv_place_data_c* place = &ev->place[i].data;
+        int fg_bx = place->block.x - 1;
+        int fg_bz = place->block.z - 1;
+        int found = FALSE;
+        int dx;
+        int dz;
+
+        if (((ev->place_use_bitfield >> i) & 1) == 0 || ITEM_NAME_GET_TYPE(place->actor_name) != NAME_TYPE_STRUCT ||
+            fg_bx < 0 || fg_bx >= FG_BLOCK_X_NUM || fg_bz < 0 || fg_bz >= FG_BLOCK_Z_NUM) {
+            continue;
+        }
+        // only what still stands; a scene exit already lifted it otherwise
+        for (dz = -1; dz <= 1 && !found; dz++) {
+            for (dx = -1; dx <= 1 && !found; dx++) {
+                int ux = place->unit.x + dx;
+                int uz = place->unit.z + dz;
+
+                found = ux >= 0 && ux < UT_X_NUM && uz >= 0 && uz < UT_Z_NUM &&
+                        dst->fg[fg_bz][fg_bx].items[uz][ux] == place->actor_name;
+            }
+        }
+        if (found) {
+            mFI_RemoveFGStructure_copy(dst, place->actor_name, place->block.x, place->block.z, place->unit.x,
+                                       place->unit.z);
+        }
+    }
+}
+
+extern void aMR_pc_stored_cells(void (*cb)(unsigned int save_off, unsigned short name, void* arg), void* arg);
+extern void aMR_pc_switch_tables(void (*cb)(unsigned int save_off, unsigned long long bits, void* arg), void* arg);
+
+static void pc_save_put_cell(unsigned int off, unsigned short name, void* arg) {
+    if (off <= sizeof(Save_t) - sizeof(mActor_name_t)) {
+        *(mActor_name_t*)((u8*)arg + off) = name;
+    }
+}
+
+static void pc_save_put_switches(unsigned int off, unsigned long long bits, void* arg) {
+    if (off <= sizeof(Save_t) - sizeof(bits)) {
+        memcpy((u8*)arg + off, &bits, sizeof(bits));
+    }
+}
+
+// the save copy as the scene's end would leave it; game thread only (it walks the actors)
+static void pc_save_settle(Save_t* dst) {
+    GAME_PLAY* play = pc_save_live_play();
+
+    if (play == NULL) {
+        return;
+    }
+    pc_save_actor_cells(play, pc_save_fix_cell, dst);
+    // a room's furniture holds what's stored in it, and whether it's on, while the room is up; a save from inside
+    // keeps both
+    aMR_pc_stored_cells(pc_save_put_cell, dst);
+    aMR_pc_switch_tables(pc_save_put_switches, dst);
+    pc_save_npc_state(play, dst);
+    pc_save_strip_event_structs(dst);
+}
+
+// a synchronous mid-play save: settle a copy and write that, never the live town
+static int pc_save_write_settled(u8* file_data, const char* gci_path, const char* tmp_path) {
+    CARDDir dir_hdr;
+    u32 serial;
+    int ok;
+
+    pc_save_snapshot_capture();
+    if (!l_save_snapshot_valid) {
+        return FALSE;
+    }
+    serial = pc_save_note_capture(s_pc_save_light);
+    pc_save_settle(&l_save_snapshot);
+    pc_save_build_image(file_data, &dir_hdr, &l_save_snapshot, l_aram_snapshot);
+    ok = pc_save_commit_image(file_data, &dir_hdr, gci_path, tmp_path, s_pc_save_light);
+    pc_save_note_done(serial, ok, s_pc_save_light);
+    return ok;
+}
+#endif
+
 int pc_save_reload(void) {
     struct stat st;
     if (!pc_save_loaded) return 0;
@@ -886,7 +1160,7 @@ int pc_save_check_and_load(void) {
             OSReport("[PC] GCI save loaded successfully\n");
             return TRUE;
         }
-        OSReport("[PC] GCI save load FAILED\n");
+        pc_log_error("[PC] GCI save load FAILED\n");
     } else {
         OSReport("[PC] No GCI save at %s\n", PC_GCI_PATH);
     }
@@ -901,7 +1175,7 @@ int pc_save_check_and_load(void) {
     if (stat(PC_GCI_TMP_PATH, &st) == 0) {
         OSReport("[PC] Found orphaned temp save '%s', recovering...\n", PC_GCI_TMP_PATH);
         if (rename(PC_GCI_TMP_PATH, PC_GCI_PATH) == 0 && pc_save_read_gci(PC_GCI_PATH)) {
-            OSReport("[PC] Recovered save from temp file\n");
+            pc_log_error("[PC] Recovered save from temp file\n");
             return TRUE;
         }
     }
@@ -913,7 +1187,7 @@ int pc_save_check_and_load(void) {
             if (stat(bak_path, &st) == 0) {
                 OSReport("[PC] Found backup save '%s', recovering...\n", bak_path);
                 if (pc_save_read_gci(bak_path)) {
-                    OSReport("[PC] Recovered save from backup %d\n", b);
+                    pc_log_error("[PC] Recovered save from backup %d\n", b);
                     return TRUE;
                 }
             }
@@ -990,6 +1264,8 @@ void mCD_InitAll(void) {
     l_card_b_gci_path[0] = '\0';
 }
 
+static void pc_save_travel_arrival(void);
+
 int mCD_InitGameStart_bg(int player_no, int card_private_idx, int start_cond, s32* mounted_chan) {
     static int init_done = 0;
 
@@ -1012,9 +1288,45 @@ int mCD_InitGameStart_bg(int player_no, int card_private_idx, int start_cond, s3
             if (start_cond >= 0 && start_cond < 5) {
                 mode = init_mode_table[start_cond];
             }
+
+#ifdef VITA_MP
+            // a network trip that never made it home is finished here instead of punished
+            int mp_recovered = (start_cond == mCD_START_COND_1) && mp_passport_recover(player_no);
+            int mp_arrival = (start_cond == mCD_START_COND_OUTGOING_FOREIGNER) &&
+                             mp_travel_state() == MP_TRAVEL_DEPARTED;
+
+            if (mp_arrival) {
+                mp_travel_arrival_begin();
+            }
+#endif
+            // train arrival (both directions): merge the passport and its carried
+            // villager BEFORE init like GC (m_card.c:4780), so now_home and mail see the real player
+            if (start_cond == mCD_START_COND_OUTGOING_FOREIGNER) {
+                Private_c* foreigner = mPr_GetForeignerP();
+                mPr_CopyPrivateInfo(foreigner, &l_mcd_foreigner_file.file.priv);
+                memcpy(mNpc_GetInAnimalP(), &l_mcd_foreigner_file.file.remove_animal, sizeof(Animal_c));
+                mPr_LoadPak_and_SetPrivateInfo2(foreigner, (u8)player_no);
+                OSReport("[PC] InitGameStart: train arrival, landed player_no=%d\n",
+                         Common_Get(player_no));
+            }
+
             mSDI_StartDataInit(gamePT, player_no, mode);
             l_mcd_keep_startCond = start_cond;
             pc_save_ready = 1;
+#ifdef VITA_MP
+            if (mp_arrival) {
+                mp_travel_arrival_end();
+            }
+            if (mp_recovered) {
+                if (pc_save_write_gci()) {
+                    mp_passport_delete();
+                }
+                // (an empty-handed trip has nothing to announce)
+                if (mp_passport_restored_any()) {
+                    mp_notice_push(MP_MSG_N_RESTORED, NULL, NULL);
+                }
+            }
+#endif
 
             /* Reset detection (Resetti): check if previous session ended without saving */
             if (Now_Private != NULL && start_cond != mCD_START_COND_INCOMING_FOREIGNER
@@ -1043,15 +1355,7 @@ int mCD_InitGameStart_bg(int player_no, int card_private_idx, int start_cond, s3
                 Common_Set(player_no, mPr_FOREIGNER);
                 OSReport("[PC] InitGameStart: INCOMING_FOREIGNER — player is visiting\n");
             } else if (start_cond == mCD_START_COND_OUTGOING_FOREIGNER) {
-                /* Returning home. Matches m_card.c:4780 (GC case 4): merge
-                 * the session passport back into the matching home save slot
-                 * — this restores player_no/now_private and carries visit
-                 * inventory changes into the home save. */
-                Private_c* foreigner = mPr_GetForeignerP();
-                mPr_CopyPrivateInfo(foreigner, &l_mcd_foreigner_file.file.priv);
-                mPr_LoadPak_and_SetPrivateInfo2(foreigner, (u8)player_no);
-                OSReport("[PC] InitGameStart: OUTGOING_FOREIGNER — landed player_no=%d\n",
-                         Common_Get(player_no));
+                pc_save_travel_arrival();
             }
         } else if (start_cond == mCD_START_COND_0 || start_cond == mCD_START_COND_2) {
             mSDI_StartDataInit(gamePT, player_no, mSDI_INIT_MODE_NEW);
@@ -1135,6 +1439,51 @@ static void pc_save_rearm_reset_code(void) {
     }
 }
 
+// GC saves the town you just arrived in (m_card.c make_data case 4 -> write_main).
+// on the return trip this is what clears the home save's "away" flag.
+static void pc_save_travel_arrival(void) {
+    int ok = TRUE;
+
+#ifdef VITA_MP
+    // a network visitor never writes the host's town; the passport file stands in
+    if (mp_travel_state() == MP_TRAVEL_VISITING) {
+        return;
+    }
+#endif
+    pc_save_lock();
+    pc_save_prep_incremental();
+    Save_Set(travel_hard_time, lbRTC_HardTime());
+    {
+        u16 cp = pc_land_copy_protect();
+        Common_Set(copy_protect, cp);
+        Save_Set(copy_protect, cp);
+    }
+
+    if (mLd_PlayerManKindCheck()) {
+        // visitor: the visited town lives on card B
+        if (l_card_b_gci_path[0] != '\0') {
+            char tmp_path[320];
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
+            ok = pc_save_write_gci_to(l_card_b_gci_path, tmp_path);
+        }
+    } else {
+        ok = pc_save_write_gci();
+    }
+
+    if (ok) {
+        pc_save_rearm_reset_code();
+    } else {
+        pc_log_error("[PC] travel arrival save failed\n");
+    }
+#ifdef VITA_MP
+    // home from a network trip; if the save failed the passport covers them until one lands
+    if (mp_travel_state() == MP_TRAVEL_RETURNING && !mLd_PlayerManKindCheck()) {
+        mp_travel_home(ok);
+    }
+#endif
+    pc_save_unlock();
+}
+
 // set by auto-save before calling mCD_SaveHome_bg so the function runs
 // only the incremental prep (skips Wisp clear, money-rock harden, etc).
 // the game's own save paths (gyroid, porter) leave this 0 and get the
@@ -1159,6 +1508,11 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
     if (slot == mCD_SLOT_B) {
         // visiting another town; save back to Card B
         if (chan) *chan = mCD_SLOT_B;
+#ifdef VITA_MP
+        if (mp_travel_net_trip()) {
+            result = mp_passport_write();
+        } else
+#endif
         if (l_card_b_gci_path[0] != '\0') {
             char tmp_path[320];
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
@@ -1178,7 +1532,7 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
         pc_save_rearm_reset_code();
         ret = mCD_TRANS_ERR_NONE;
     } else {
-        OSReport("[PC] mCD_SaveHome_bg: save failed!\n");
+        pc_log_error("[PC] mCD_SaveHome_bg: save failed!\n");
         ret = mCD_TRANS_ERR_IOERROR;
     }
 
@@ -1200,16 +1554,16 @@ int mCD_SaveHome_bg(int param_1, int* chan) {
 
 static time_t s_pc_auto_save_last = 0;
 
-// mirror the gyroid's pre-save prep. buildings / items / FG actors track
-// their state in actor structs while the game runs; Actor_info_save_actor
-// walks the actor list and calls each sv_proc to flush that state back
-// into Save_t. skipping this writes a stale combi_table + fg array, which
-// looks like vanished buildings on reload. mNtc_set_auto_nwrite_data
-// flushes the noticeboard auto-write buffer same as the gyroid talk.
+// mirror the gyroid's pre-save prep. mNtc_set_auto_nwrite_data flushes the
+// noticeboard auto-write buffer same as the gyroid talk. on vita the actors'
+// state goes into the save copy instead (pc_save_settle); the gyroid's
+// Actor_info_save_actor is only safe right before a scene ends.
 static void pc_auto_save_flush_world_state(void) {
     GAME_PLAY* play = (GAME_PLAY*)gamePT;
     if (play == NULL) return;
+#ifndef TARGET_VITA
     Actor_info_save_actor(play);
+#endif
     mNtc_set_auto_nwrite_data();
 }
 
@@ -1220,8 +1574,8 @@ static void pc_auto_save_flush_world_state(void) {
 // any of those can stall porter's state machine (the bug that hung the
 // "saving town data" dialogue) or write a torn Save_t.
 static int pc_auto_save_player_busy(void) {
-    GAME_PLAY* play = (GAME_PLAY*)gamePT;
-    if (play == NULL) return 1; // no play context, don't risk it
+    GAME_PLAY* play = pc_save_live_play();
+    if (play == NULL) return 1; // no play context (another game, an NES one say), don't risk it
     int idx = mPlib_get_player_actor_main_index((GAME*)play);
     switch (idx) {
         case mPlayer_INDEX_WAIT:
@@ -1235,6 +1589,42 @@ static int pc_auto_save_player_busy(void) {
     }
 }
 
+// multiplayer safe point: player is idle / walking / running
+int pc_player_free_control(void) {
+    return !pc_auto_save_player_busy();
+}
+
+#ifdef VITA_MP
+// passport writes can come from the power callback thread too
+void pc_mc_lock(void) {
+    pc_save_lock();
+}
+
+void pc_mc_unlock(void) {
+    pc_save_unlock();
+}
+
+// the Save that rides the train; the host packs its snapshots here while no trip is set
+void* pc_mc_travel_save(void) {
+    return &l_keepSave;
+}
+
+const char* pc_mc_home_dir(void) {
+    return l_active_card_a;
+}
+
+// the passport of the current trip, refreshed from the traveller as they are right now
+void* pc_mc_passport(void) {
+    if (Now_Private != NULL && Now_Private != &l_mcd_foreigner_file.file.priv) {
+        mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, Now_Private);
+        l_mcd_foreigner_file.file.checksum = 0;
+        l_mcd_foreigner_file.file.checksum = mFRm_GetFlatCheckSum(
+            (u16*)&l_mcd_foreigner_file.file, sizeof(mCD_foreigner_c), l_mcd_foreigner_file.file.checksum);
+    }
+    return &l_mcd_foreigner_file.file;
+}
+#endif
+
 #ifdef TARGET_VITA
 // background save writer: the periodic autosave stages here and signals, this
 // thread does the file write so the game thread never blocks on it. gyroid /
@@ -1244,8 +1634,12 @@ extern int mCD_GetThisLandSlotNo(void);
 static SceUID s_writer_thread = -1;
 static SceUID s_writer_req = -1;
 static volatile int s_writer_run = 1;
+static volatile int s_writer_done;  // jobs the writer has finished
+static int s_writer_issued;         // jobs handed to it
 static char s_stage_gci[320];
 static char s_stage_tmp[324];
+static u32 s_stage_serial;
+static int s_stage_light;
 
 static int pc_save_writer_loop(SceSize args, void* argp) {
     (void)args; (void)argp;
@@ -1257,9 +1651,15 @@ static int pc_save_writer_loop(SceSize args, void* argp) {
             // build straight from the snapshot the stager captured
             CARDDir hdr;
             u8* buf = pc_save_image_buf();
+            int ok;
+
             pc_save_build_image(buf, &hdr, &l_save_snapshot, l_aram_snapshot);
-            pc_save_commit_image(buf, &hdr, s_stage_gci, s_stage_tmp, 1 /* light */);
+            ok = pc_save_commit_image(buf, &hdr, s_stage_gci, s_stage_tmp, s_stage_light);
+            pc_save_note_done(s_stage_serial, ok, s_stage_light);
+        } else {
+            pc_save_note_done(s_stage_serial, FALSE, s_stage_light);
         }
+        s_writer_done++;
         sceKernelUnlockMutex(s_save_mutex, 1);
     }
     return 0;
@@ -1303,17 +1703,111 @@ static int pc_save_submit_async(void) {
 
     // snapshot doubles as the writer's source, so no extra staging copy
     pc_save_snapshot_capture();
+    s_stage_serial = pc_save_note_capture(1);
+    s_stage_light = 1;
+    pc_save_settle(&l_save_snapshot);
     pc_save_rearm_reset_code();
 
+    s_writer_issued++;
     sceKernelUnlockMutex(s_save_mutex, 1);
     sceKernelSignalSema(s_writer_req, 1);
     return 1;
 }
+
+#ifdef VITA_MP
+// the pockets as they are behind the pockets' menu or the map with nothing in the hand
+static int pc_mc_menu_settled(GAME_PLAY* play) {
+    Submenu* sm = &play->submenu;
+
+    if (!sm->open_flag) {
+        return TRUE;
+    }
+    if (sm->menu_type == mSM_OVL_MAP) {
+        return TRUE;
+    }
+    return sm->menu_type == mSM_OVL_INVENTORY && sm->process_status == mSM_PROCESS_PLAY && sm->overlay != NULL &&
+           sm->overlay->hand_ovl != NULL && sm->overlay->hand_ovl->info.item == EMPTY_NO;
+}
+
+// multiplayer host: save the town as it logically stands (items held by actors included)
+// on the writer thread, synced; a visitor's pickups are only final once this lands
+int pc_mc_commit_save_begin(void) {
+    GAME_PLAY* play = pc_save_live_play();
+    int away = play == NULL && mp_emu_active(); // an NES game: the save is as its room left it
+    int ticket;
+
+    if (s_writer_thread < 0 || s_writer_req < 0 || !pc_save_ready || (play == NULL && !away)) return -1;
+    // same hands-off moments as the autosave: talks and pickups keep Save_t in flux (a menu only with something in hand)
+    if (!away && (pc_auto_save_player_busy() || mEv_CheckFirstIntro() || !pc_mc_menu_settled(play))) return -1;
+    if (sceKernelTryLockMutex(s_save_mutex, 1) != 0) return -1;
+    if (s_writer_done != s_writer_issued) {
+        sceKernelUnlockMutex(s_save_mutex, 1);
+        return -1;
+    }
+
+    pc_save_prep_incremental();
+    Save_Get(save_exist) = TRUE;
+    Save_Get(save_check).version = mFRm_VERSION;
+    mFRm_SetSaveCheckData(Save_GetPointer(save_check));
+    snprintf(s_stage_gci, sizeof(s_stage_gci), "%s", PC_GCI_PATH);
+    snprintf(s_stage_tmp, sizeof(s_stage_tmp), "%s.tmp", s_stage_gci);
+    pc_save_snapshot_capture();
+    s_stage_serial = pc_save_note_capture(2);
+    s_stage_light = 2; // a commit every few seconds would churn through every backup
+    pc_save_settle(&l_save_snapshot);
+    pc_save_rearm_reset_code();
+
+    ticket = ++s_writer_issued;
+    sceKernelUnlockMutex(s_save_mutex, 1);
+    sceKernelSignalSema(s_writer_req, 1);
+    return ticket;
+}
+
+unsigned int pc_mc_save_landed(void) {
+    return s_pc_save_landed;
+}
+
+unsigned int pc_mc_save_done(void) {
+    return __atomic_load_n(&s_pc_save_done, __ATOMIC_ACQUIRE);
+}
+#endif
 #endif // TARGET_VITA
+
+#ifdef TARGET_VITA
+// the actors belong to the game thread: the power callback asks it to save and waits
+static SceUID s_pc_game_thread = -1;
+static volatile int s_pc_force_req;
+static volatile int s_pc_force_result;
+#endif
+
+int pc_auto_save_force(void);
 
 void pc_auto_save_tick(void) {
     time_t now;
 
+#ifdef TARGET_VITA
+    if (s_pc_game_thread < 0) {
+        s_pc_game_thread = sceKernelGetThreadId();
+    }
+    if (s_pc_force_req) {
+        s_pc_force_result = pc_auto_save_force();
+        s_pc_force_req = 0;
+    }
+#endif
+#ifdef VITA_MP
+    // network visitors checkpoint their passport, the trip's safety net whatever the setting;
+    // the town is the host's to save
+    if (mp_travel_net_trip()) {
+        now = time(NULL);
+        if (pc_save_loaded && pc_save_ready && Now_Private != NULL && mp_travel_state() == MP_TRAVEL_VISITING &&
+            !pc_auto_save_player_busy() && now - s_pc_auto_save_last >= PC_AUTO_SAVE_INTERVAL_SEC) {
+            s_pc_auto_save_last = now;
+            mFR_mp_visitor_prize();
+            mp_passport_write_async();
+        }
+        return;
+    }
+#endif
     if (!g_pc_settings.auto_save) {
         // feature off, reset timer so a later toggle-on starts fresh
         s_pc_auto_save_last = 0;
@@ -1348,7 +1842,9 @@ void pc_auto_save_tick(void) {
         pc_auto_save_flush_world_state();
         s_pc_save_is_incremental = 1;
         s_pc_save_light = 1;
+        s_pc_save_settle = 1;
         result = mCD_SaveHome_bg(0, &chan);
+        s_pc_save_settle = 0;
         s_pc_save_light = 0;
         s_pc_save_is_incremental = 0;
         pc_save_unlock();
@@ -1356,8 +1852,8 @@ void pc_auto_save_tick(void) {
             OSReport("[PC] Auto-save complete (chan=%d)\n", chan);
             s_pc_auto_save_last = now;
         } else {
-            OSReport("[PC] Auto-save failed: %d (retry in %ds)\n",
-                     result, PC_AUTO_SAVE_RETRY_SEC);
+            pc_log_error("[PC] Auto-save failed: %d (retry in %ds)\n",
+                         result, PC_AUTO_SAVE_RETRY_SEC);
             s_pc_auto_save_last = now - PC_AUTO_SAVE_INTERVAL_SEC + PC_AUTO_SAVE_RETRY_SEC;
         }
     }
@@ -1370,9 +1866,32 @@ int pc_auto_save_force(void) {
     int chan = 0;
     int result;
 
+#ifdef VITA_MP
+    if (!g_pc_settings.auto_save && !mp_travel_net_trip()) return 0;
+#else
     if (!g_pc_settings.auto_save) return 0;
+#endif
     if (!pc_save_loaded || !pc_save_ready) return 0;
     if (Now_Private == NULL) return 0;
+#ifdef TARGET_VITA
+    if (s_pc_game_thread >= 0 && sceKernelGetThreadId() != s_pc_game_thread) {
+        int waited_ms;
+
+        s_pc_force_result = 0;
+        s_pc_force_req = 1;
+        // a frame or two; if the game thread is already parked it saves on resume
+        for (waited_ms = 0; s_pc_force_req && waited_ms < 1000; waited_ms += 5) {
+            sceKernelDelayThread(5 * 1000);
+        }
+        return s_pc_force_req ? 0 : s_pc_force_result;
+    }
+#endif
+#ifdef VITA_MP
+    // on the game thread, between frames: pockets and pickup records agree
+    if (mp_travel_net_trip()) {
+        return mp_passport_write();
+    }
+#endif
     if (Save_Get(scene_no) != SCENE_FG) {
         OSReport("[PC] Forced save skipped: not in town overworld (scene=%d)\n",
                  (int)Save_Get(scene_no));
@@ -1392,7 +1911,9 @@ int pc_auto_save_force(void) {
     pc_save_lock();
     pc_auto_save_flush_world_state();
     s_pc_save_is_incremental = 1;
+    s_pc_save_settle = 1;
     result = mCD_SaveHome_bg(0, &chan);
+    s_pc_save_settle = 0;
     s_pc_save_is_incremental = 0;
     pc_save_unlock();
     if (result == mCD_TRANS_ERR_NONE) {
@@ -1400,7 +1921,7 @@ int pc_auto_save_force(void) {
         s_pc_auto_save_last = time(NULL);
         return 1;
     }
-    OSReport("[PC] Forced save failed: %d\n", result);
+    pc_log_error("[PC] Forced save failed: %d\n", result);
     return 0;
 }
 
@@ -1518,19 +2039,27 @@ static void pc_save_record_departure(void) {
 
 // build the foreigner file (passport) from Now_Private plus the pending
 // moveout animal (if any). matches GC mCD_SetForeignerFile semantics.
-static void pc_build_foreigner_file(void) {
+static void pc_build_foreigner_file_ex(int carry_villager) {
+    static Private_c s_priv_tmp;
+    Animal_c* in_animal = mNpc_GetInAnimalP();
+
+    // resident: pull a moving-out villager along; visitor: move the carried
+    // villager into this town (GC m_card.c:6339). must run before the copy.
+    if (carry_villager) {
+        mNpc_GetRemoveAnimal(in_animal, TRUE);
+    } else {
+        mNpc_ClearAnimalInfo(in_animal);
+    }
+
+    // Now_Private may alias the passport itself, so stage it before the wipe
+    if (Now_Private != NULL) {
+        mPr_CopyPrivateInfo(&s_priv_tmp, Now_Private);
+    }
     memset(&l_mcd_foreigner_file, 0, sizeof(l_mcd_foreigner_file));
     if (Now_Private != NULL) {
-        mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, Now_Private);
+        mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, &s_priv_tmp);
     }
-    // mNpc_GetRemoveAnimal moves a pending-moveout villager (if any) into
-    // the passed Animal_c so the visit carries them along. it's a no-op
-    // when no villager is scheduled to leave.
-    {
-        Animal_c* in_animal = mNpc_GetInAnimalP();
-        mNpc_GetRemoveAnimal(in_animal, TRUE);
-        memcpy(&l_mcd_foreigner_file.file.remove_animal, in_animal, sizeof(Animal_c));
-    }
+    memcpy(&l_mcd_foreigner_file.file.remove_animal, in_animal, sizeof(Animal_c));
     l_mcd_foreigner_file.file.copy_protect = (u16)Common_Get(copy_protect);
     l_mcd_foreigner_file.file.checksum = 0;
     l_mcd_foreigner_file.file.checksum =
@@ -1538,6 +2067,99 @@ static void pc_build_foreigner_file(void) {
                              sizeof(mCD_foreigner_c),
                              l_mcd_foreigner_file.file.checksum);
 }
+
+static void pc_build_foreigner_file(void) {
+    pc_build_foreigner_file_ex(TRUE);
+}
+
+#ifdef VITA_MP
+static void pc_keep_blocks_fresh(void) {
+    memset(&l_keepMail, 0, sizeof(l_keepMail));
+    pc_init_mail_entries(&l_keepMail);
+    memset(&l_keepOriginal, 0, sizeof(l_keepOriginal));
+    memset(&l_keepDiary, 0, sizeof(l_keepDiary));
+    pc_init_diary_entries(&l_keepDiary);
+}
+
+// network departure: the host's town is already verified in l_keepSave. passport file
+// first, so a crash after the home save marks the player away can still bring them back
+static int pc_mc_net_depart(s32* chan) {
+    if (chan) *chan = mCD_SLOT_A;
+    pc_save_prep_explicit();
+    pc_save_record_departure();
+    mHm_KeepHouseSize(Common_Get(player_no));
+    mp_rights_departing();
+    pc_build_foreigner_file_ex(FALSE); // villagers don't move between live towns
+
+    mp_passport_begin(Common_Get(player_no));
+    if (!mp_passport_write()) {
+        return mCD_TRANS_ERR_IOERROR;
+    }
+    if (Now_Private != NULL && mLd_PlayerManKindCheckNo(Common_Get(player_no)) == FALSE) {
+        Now_Private->exists = FALSE;
+    }
+    if (!pc_save_write_gci()) {
+        if (Now_Private != NULL) Now_Private->exists = TRUE;
+        mp_passport_delete();
+        return mCD_TRANS_ERR_IOERROR;
+    }
+
+    pc_keep_blocks_fresh();
+    l_keepSave.save.time_delta = (OSTime)mp_travel_time_delta();
+    l_keepSave_set = TRUE;
+    l_card_b_gci_path[0] = '\0';
+    l_mcd_keep_startCond = mCD_START_COND_INCOMING_FOREIGNER;
+    mp_travel_departed();
+    if (chan) *chan = mCD_SLOT_B;
+    return mCD_TRANS_ERR_NONE;
+}
+
+// network visitor heading home (Porter or a dropped line): nothing is written to the
+// host's town; the passport file carries the traveller until the home save lands
+static int pc_mc_net_return_locked(void) {
+    // home must be readable before anything about the trip changes
+    if (!pc_save_read_gci_to_keep(PC_GCI_PATH)) {
+        return mCD_TRANS_ERR_CORRUPT;
+    }
+    pc_save_prep_explicit();
+    pc_save_record_departure();
+    // drops the host never heard about come home; pickups it never saved stay in its town (one used up here takes the
+    // traveller home as the passport last stood); a talk whose result never went gives back what it handed over
+    {
+        static Private_c s_last;
+        int from_pp;
+
+        mp_passport_settle(); // (one on its way lands first: the card has what's read below)
+        from_pp = (mp_world_passport_hold() || mp_world_hold_told()) && mp_passport_last_priv(&s_last);
+        mp_world_recall_held(from_pp);
+        mp_world_flush_out();
+        mp_npc_drain_all();
+        if (from_pp) {
+            mp_npc_undo(&s_last, mp_passport_good_seq());
+            memcpy(Now_Private, &s_last, sizeof(s_last));
+        } else {
+            mp_npc_undo(Now_Private, 0);
+            mp_world_passport_filter(Now_Private);
+        }
+        mp_world_flush_all(); // (what that sent to the lost & found)
+    }
+    pc_build_foreigner_file_ex(FALSE);
+    l_card_b_gci_path[0] = '\0';
+    l_mcd_keep_startCond = mCD_START_COND_OUTGOING_FOREIGNER;
+    mp_travel_returning();
+    mp_passport_write(); // after the world is gone: Now_Private is already filtered
+    return mCD_TRANS_ERR_NONE;
+}
+
+int pc_mc_net_return(void) {
+    int r;
+
+    pc_save_lock();
+    r = pc_mc_net_return_locked();
+    pc_save_unlock();
+    return r;
+}
+#endif
 
 // persist current town and swap in the other town via l_keepSave.
 //  - resident: save card A (home) with player flagged "away", load card B
@@ -1557,6 +2179,49 @@ static int mCD_SaveStation_NextLand_bg_locked(s32* chan) {
     int is_foreigner = mLd_PlayerManKindCheck();
     OSReport("[PC] SaveStation_NextLand_bg: enter (is_foreigner=%d)\n", is_foreigner);
 
+#ifdef VITA_MP
+    if (is_foreigner && mp_travel_net_trip()) {
+        static u32 s_settle_start;
+        static u32 s_settle_held; // the last moment a pickup used up here was still unsaved
+
+        if (chan) *chan = mCD_SLOT_A;
+        // "saving..." waits a little for the host to save this visit's last pickups, and to hear which of its saves
+        // the passport has (for one used up here, longer: past that the traveller goes home as the passport last
+        // stood, and the host gives back what it lacks)
+        if ((!mp_world_settled() || mp_npc_result_pending() || mp_world_hold_told()) && mp_lobby_host_conn() >= 0 &&
+            !mp_lobby_conn_quiet(mp_lobby_host_conn())) {
+            u32 now = pc_mp_now_ms();
+            int held = mp_world_passport_hold();
+
+            if (s_settle_start == 0) {
+                s_settle_start = now;
+                s_settle_held = now;
+                mp_world_hurry();
+            }
+            if (held) {
+                s_settle_held = now;
+            }
+            // (once the host has saved it, the passport after it gets a while of its own)
+            if (held ? now - s_settle_start < 60000u : (now - s_settle_start < 15000u || now - s_settle_held < 15000u)) {
+                return mCD_TRANS_ERR_BUSY;
+            }
+        }
+        s_settle_start = 0;
+        return pc_mc_net_return_locked();
+    }
+    if (!is_foreigner && (mp_travel_state() == MP_TRAVEL_FETCHING || mp_travel_state() == MP_TRAVEL_READY ||
+                          mp_travel_state() == MP_TRAVEL_FAILED)) {
+        // Porter keeps "saving..." up while the town streams in; a cut line writes nothing
+        int res = mp_travel_guest_poll();
+
+        if (chan) *chan = mCD_SLOT_A;
+        if (res == MP_UI_BUSY) {
+            return mCD_TRANS_ERR_BUSY;
+        }
+        return res == MP_UI_DONE ? pc_mc_net_depart(chan) : mCD_TRANS_ERR_NO_TOWN_DATA;
+    }
+#endif
+
     if (is_foreigner) {
         // returning visitor -> refresh passport from current state so
         // inventory / item changes during the visit carry home, then save
@@ -1564,31 +2229,26 @@ static int mCD_SaveStation_NextLand_bg_locked(s32* chan) {
         pc_save_prep_explicit();
         pc_save_record_departure();
 
-        if (Now_Private != NULL) {
-            mPr_CopyPrivateInfo(&l_mcd_foreigner_file.file.priv, Now_Private);
-            l_mcd_foreigner_file.file.checksum = 0;
-            l_mcd_foreigner_file.file.checksum =
-                mFRm_GetFlatCheckSum((u16*)&l_mcd_foreigner_file.file,
-                                     sizeof(mCD_foreigner_c),
-                                     l_mcd_foreigner_file.file.checksum);
-            OSReport("[PC] SaveStation_NextLand(return): refreshed passport for '%.*s'\n",
-                     PLAYER_NAME_LEN, l_mcd_foreigner_file.file.priv.player_ID.player_name);
-        }
+        // refresh the passport; also lands a carried villager in this town
+        // before it's saved, as GC does
+        pc_build_foreigner_file();
+        OSReport("[PC] SaveStation_NextLand(return): refreshed passport for '%.*s'\n",
+                 PLAYER_NAME_LEN, l_mcd_foreigner_file.file.priv.player_ID.player_name);
 
         if (l_card_b_gci_path[0] != '\0') {
             char tmp_path[320];
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", l_card_b_gci_path);
             if (!pc_save_write_gci_to(l_card_b_gci_path, tmp_path)) {
-                OSReport("[PC] SaveStation_NextLand(return): failed to save visited town\n");
+                pc_log_error("[PC] SaveStation_NextLand(return): failed to save visited town\n");
                 if (chan) *chan = mCD_SLOT_B;
                 return mCD_TRANS_ERR_IOERROR;
             }
         } else {
-            OSReport("[PC] SaveStation_NextLand(return): no Card B path cached\n");
+            pc_log_error("[PC] SaveStation_NextLand(return): no Card B path cached\n");
         }
 
         if (!pc_save_read_gci_to_keep(PC_GCI_PATH)) {
-            OSReport("[PC] SaveStation_NextLand(return): failed to load home town\n");
+            pc_log_error("[PC] SaveStation_NextLand(return): failed to load home town\n");
             if (chan) *chan = mCD_SLOT_A;
             return mCD_TRANS_ERR_CORRUPT;
         }
@@ -1602,7 +2262,7 @@ static int mCD_SaveStation_NextLand_bg_locked(s32* chan) {
     // resident departing to visit another town
     if (chan) *chan = mCD_SLOT_A;
     if (l_card_b_gci_path[0] == '\0') {
-        OSReport("[PC] SaveStation_NextLand: no Card B path\n");
+        pc_log_error("[PC] SaveStation_NextLand: no Card B path\n");
         return mCD_TRANS_ERR_NO_TOWN_DATA;
     }
 
@@ -1632,12 +2292,12 @@ static int mCD_SaveStation_NextLand_bg_locked(s32* chan) {
 
     if (!pc_save_write_gci()) {
         if (Now_Private != NULL) Now_Private->exists = TRUE;
-        OSReport("[PC] SaveStation_NextLand: failed to save home town\n");
+        pc_log_error("[PC] SaveStation_NextLand: failed to save home town\n");
         return mCD_TRANS_ERR_IOERROR;
     }
 
     if (!pc_save_read_gci_to_keep(l_card_b_gci_path)) {
-        OSReport("[PC] SaveStation_NextLand: failed to load Card B town\n");
+        pc_log_error("[PC] SaveStation_NextLand: failed to load Card B town\n");
         return mCD_TRANS_ERR_CORRUPT;
     }
 
@@ -1681,7 +2341,7 @@ static int mCD_SaveStation_Passport_bg_locked(s32* chan) {
     // Wisps, money stones, cockroach timer, etc. all get updated.
     pc_save_prep_explicit();
     if (!pc_save_write_gci()) {
-        OSReport("[PC] SaveStation_Passport: home save failed\n");
+        pc_log_error("[PC] SaveStation_Passport: home save failed\n");
         return mCD_TRANS_ERR_IOERROR;
     }
     pc_save_rearm_reset_code();
@@ -1720,7 +2380,7 @@ static void mCD_toNextLand_locked(void) {
 
     land_info = &save->land_info;
     if (!mLd_CheckId(land_info->id)) {
-        OSReport("[PC] toNextLand: invalid land_info in l_keepSave\n");
+        pc_log_error("[PC] toNextLand: invalid land_info in l_keepSave\n");
         return;
     }
 
@@ -1782,7 +2442,14 @@ static void mCD_toNextLand_locked(void) {
     Common_Set(submenu_disabled, TRUE);
 
     /* Clear keepSave now that it's been applied */
+#ifdef VITA_MP
+    // (a network visitor's snapshot rides on: arriving puts the host's town back as it came off the line)
+    if (mp_travel_state() != MP_TRAVEL_DEPARTED) {
+        memset(&l_keepSave, 0, sizeof(Save));
+    }
+#else
     memset(&l_keepSave, 0, sizeof(Save));
+#endif
     l_keepSave_set = FALSE;
 
     /* Load ARAM blocks from the other town */

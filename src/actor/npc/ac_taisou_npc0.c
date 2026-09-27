@@ -5,6 +5,9 @@
 #include "m_font.h"
 #include "m_msg.h"
 #include "m_soncho.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // TODO - this file needs enums for action & talk states
 
@@ -14,6 +17,10 @@ static ACTOR* aTS0_failure_actor_p = NULL;
 
 // @ 8056b300
 static mActor_name_t aTS0_leader_no = SP_NPC_EV_TAISOU_4 + 1;
+
+#ifdef VITA_MP
+static u8 aTS0_mp_present; // which of the five are out
+#endif
 
 
 // @ 8056b304
@@ -151,6 +158,11 @@ static void aTS0_actor_ct(ACTOR* actorx, GAME* game) {
 
         aTS0_regist_sum++;
         actor->soncho_event = 0xFF;
+#ifdef VITA_MP
+        if (actorx->npc_id >= SP_NPC_EV_TAISOU_0 && actorx->npc_id <= SP_NPC_EV_TAISOU_4) {
+            aTS0_mp_present |= (u8)(1 << (actorx->npc_id - SP_NPC_EV_TAISOU_0));
+        }
+#endif
     }
 }
 
@@ -179,6 +191,11 @@ static void aTS0_actor_dt(ACTOR* actorx, GAME* game) {
     }
 
     aTS0_regist_sum--;
+#ifdef VITA_MP
+    if (actorx->npc_id >= SP_NPC_EV_TAISOU_0 && actorx->npc_id <= SP_NPC_EV_TAISOU_4) {
+        aTS0_mp_present &= (u8)~(1 << (actorx->npc_id - SP_NPC_EV_TAISOU_0));
+    }
+#endif
 
     if (aTS0_regist_sum <= 0) {
         aTS0_regist_sum = 0;

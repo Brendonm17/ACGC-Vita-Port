@@ -144,6 +144,12 @@ static void aGYO_actor_draw_fish(GRAPH* graph, aGYO_CTRL_ACTOR* ctrl, GAME* game
     gSPDisplayList(POLY_OPA_DISP++, ((Gfx**)aGYO_displayList[ctrl->gyo_type])[(int)(frame * 0.5f)]);
 
     CLOSE_POLY_OPA_DISP(graph);
+#ifdef VITA_MP
+    // the fish on the local player's line shows on the other screens too
+    if ((ctrl->gyo_flags & 4) != 0) {
+        pc_mp_attach(MP_ATT_FISH, ctrl->gyo_type, (int)(frame * 0.5f), NULL, get_Matrix_now());
+    }
+#endif
 
     {
         static xyz_t offset0 = { 0.0f, 0.0f, 0.0f };
@@ -193,6 +199,15 @@ static void aGYO_actor_draw_gyoei(GRAPH* graph, aGYO_CTRL_ACTOR* ctrl, GAME* gam
 
     CLOSE_DISP(graph);
 }
+
+#ifdef VITA_MP
+Gfx* aGYO_mp_fish_dl(int type, int frame) {
+    if (type < 0 || type >= (int)ARRAY_COUNT(aGYO_displayList) || frame < 0 || frame > 2) {
+        return NULL;
+    }
+    return ((Gfx**)aGYO_displayList[type])[frame];
+}
+#endif
 
 static void aGYO_actor_draw(ACTOR* actorx, GAME* game) {
     GYOEI_ACTOR* gyoei = (GYOEI_ACTOR*)actorx;

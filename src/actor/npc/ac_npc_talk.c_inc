@@ -644,6 +644,12 @@ static void aNPC_talk_request_normal_npc(ACTOR* actorx, GAME* game) {
 static void aNPC_talk_request_check(ACTOR* actorx, GAME* game) {
     NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    // another player is talking to this villager right now (or this player has no room left for a talk's result)
+    if (mp_npc_talk_locked(actorx->npc_id) || mp_npc_talk_full()) {
+        return;
+    }
+#endif
     if ((nactorx->condition_info.demo_flg & aNPC_COND_DEMO_SKIP_TALK_CHECK) == 0 &&
         nactorx->condition_info.talk_condition == aNPC_TALK_TYPE_NONE && !nactorx->condition_info.hide_flg) {
         if (mEv_CheckTitleDemo() == mEv_TITLEDEMO_NONE || mEv_CheckTitleDemo() == mEv_TITLEDEMO_STAFFROLL) {

@@ -628,3 +628,12 @@ static void aIMN_actor_move(ACTOR* actorx, GAME* game) {
         insect->action_proc(actorx, game);
     }
 }
+
+#ifdef VITA_MP
+// another game ran this bug until now: this one carries on from the state that one had it in
+void aIMN_mp_set_action(aINS_INSECT_ACTOR* insect, int action, GAME* game) {
+    if (action >= 0 && action < aIMN_ACT_NUM && action != insect->action) {
+        aIMN_setupAction(insect, action, game);
+    }
+}
+#endif

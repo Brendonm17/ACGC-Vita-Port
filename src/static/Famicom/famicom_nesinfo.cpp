@@ -37,6 +37,17 @@ static u32 nesinfo_expand_rom_size = 0;
 u8 tcs_bad = false;
 u8 ics_bad = false;
 
+#ifdef BUGFIXES
+// what a card game's tags may reach: the ROM buffer and battery RAM as famicom_init allocates them
+#define NESINFO_ROM_MAX (KS_NES_NESFILE_HEADER_SIZE + KS_NES_PRGROM_SIZE + KS_NES_CHRROM_SIZE)
+#define NESINFO_FITS(ofs, size, max) ((u32)(ofs) <= (u32)(max) && (u32)(size) <= (u32)(max) - (u32)(ofs))
+#define NESINFO_HSC_SIZE(data) ((data)[NESTAG_CMD_SIZE] >= 2 ? (data)[NESTAG_CMD_SIZE] - 2 : 0)
+#else
+#define NESINFO_ROM_MAX 0x100000
+#define NESINFO_FITS(ofs, size, max) TRUE
+#define NESINFO_HSC_SIZE(data) ((data)[NESTAG_CMD_SIZE] - 2)
+#endif
+
 // clang-format off
 
 enum highscore_state {
@@ -724,7 +735,7 @@ extern void nesinfo_tag_process1(u8* save_data, int mode, u32* max_ofs_p) {
         } else if (memcmp(data, NESTAG_OFS, NESTAG_CMD_SIZE) == 0) {
             cur_ofs = nesinfo_get_u16(&data[4]);
         } else if (memcmp(data, NESTAG_HSC, NESTAG_CMD_SIZE) == 0) {
-            size_t highscore_size = data[NESTAG_CMD_SIZE] - 2;
+            size_t highscore_size = NESINFO_HSC_SIZE(data);
 
             OSReport("ハイスコア: オフセット＝%04x 初期値＝",
                      nesinfo_get_u16(&data[4])); // High Score: Offset=%04x Default Value=
@@ -758,7 +769,7 @@ extern void nesinfo_tag_process1(u8* save_data, int mode, u32* max_ofs_p) {
             u16 bbram_ofs = nesinfo_get_u16(&data[4]);
             u16 size = nesinfo_get_u16(&data[6]);
 
-            if (save_data != nullptr && mode == 1) {
+            if (save_data != nullptr && mode == 1 && NESINFO_FITS(bbram_ofs, size, KS_NES_BBRAM_SIZE)) {
                 if (first_play) {
                     OSReport("初プレイなので。クリアします\n"); // Since it's the first play, it will be cleared.\n
                     bzero(famicomCommon.bbramp + bbram_ofs, size);
@@ -775,7 +786,7 @@ extern void nesinfo_tag_process1(u8* save_data, int mode, u32* max_ofs_p) {
             u16 ofs_00_16 = nesinfo_get_u16(&data[5]);
             u16 size = nesinfo_get_u16(&data[7]);
 
-            if (save_data != nullptr && mode == 1) {
+            if (save_data != nullptr && mode == 1 && NESINFO_FITS(((u32)ofs_16_24 << 16) + ofs_00_16, size, NESINFO_ROM_MAX)) {
                 if (first_play) {
                     OSReport("初プレイなのでディスクセーブエリアを保持します\n"); // Since it's the first play, the disk
                                                                                   // save area will be retained.\n
@@ -848,8 +859,13 @@ extern void nesinfo_tag_process1(u8* save_data, int mode, u32* max_ofs_p) {
             u8* rom_p = famicomCommon.nesromp;
 
             OSReport("ロムデータ参照: %d\n", rom_id); // Referencing ROM data: %d\n
+#ifdef BUGFIXES
+            // (a card game has its own image: its tags never pick one of the built-in games' files)
+            if (nesrom_filename_ptrs != nullptr && rom_p != nullptr && !famicomCommon.nesrom_memcard) {
+#else
             if (nesrom_filename_ptrs != nullptr && rom_p != nullptr) {
-                nesinfo_data_size = JKRFileLoader::readGlbResource(rom_p, 0x100000, (char*)nesrom_filename_ptrs[rom_id],
+#endif
+                nesinfo_data_size = JKRFileLoader::readGlbResource(rom_p, NESINFO_ROM_MAX, (char*)nesrom_filename_ptrs[rom_id],
                                                                    EXPAND_SWITCH_DECOMPRESS);
                 nesinfo_data_start = rom_p;
                 nesinfo_data_end = rom_p + nesinfo_data_size;
@@ -972,6 +988,13 @@ extern void nesinfo_tag_process2() {
                     }
                 }
 
+#ifdef BUGFIXES
+                // (only the loaded ROM itself is patched, never an address in memory)
+                if ((patch_type != 2 && patch_type != 9) || nesinfo_rom_start == nullptr || dst_p < nesinfo_rom_start ||
+                    dst_p + patch_size > nesinfo_rom_end) {
+                    dst_p = nullptr;
+                }
+#endif
                 if (dst_p != nullptr) {
                     while (patch_size-- > 0) {
                         *dst_p++ = *patch_data_p++;
@@ -1009,14 +1032,18 @@ extern void nesinfo_tag_process3(u8* save_data) {
         } else if (memcmp(data, NESTAG_OFS, NESTAG_CMD_SIZE) == 0) {
             cur_ofs = nesinfo_get_u16(&data[4]);
         } else if (memcmp(data, NESTAG_HSC, NESTAG_CMD_SIZE) == 0) {
+#ifdef BUGFIXES
+            cur_ofs += NESINFO_HSC_SIZE(data);
+#else
             cur_ofs = data[NESTAG_CMD_SIZE] + cur_ofs;
             cur_ofs -= 2;
+#endif
             print_hex_lf(&data[6], data[NESTAG_CMD_SIZE] - 2);
         } else if (memcmp(data, NESTAG_BBR, NESTAG_CMD_SIZE) == 0) {
             u16 bbram_ofs = nesinfo_get_u16(&data[4]);
             u16 size = nesinfo_get_u16(&data[6]);
 
-            if (save_data != nullptr) {
+            if (save_data != nullptr && NESINFO_FITS(bbram_ofs, size, KS_NES_BBRAM_SIZE)) {
                 OSReport("バッテリーバックアップの保存\n"); // Saving battery backup.\n
                 memcpy(save_data + 8 + cur_ofs, famicomCommon.bbramp + bbram_ofs, size);
             }
@@ -1028,7 +1055,7 @@ extern void nesinfo_tag_process3(u8* save_data) {
             u16 ofs_00_16 = nesinfo_get_u16(&data[5]);
             u16 size = nesinfo_get_u16(&data[7]);
 
-            if (save_data != nullptr) {
+            if (save_data != nullptr && NESINFO_FITS(((u32)ofs_16_24 << 16) + ofs_00_16, size, NESINFO_ROM_MAX)) {
                 OSReport("ディスクセーブの保存\n"); // Saving the disk save.\n
                 memcpy(save_data + 8 + cur_ofs, famicomCommon.nesromp + (ofs_16_24 << 16) + ofs_00_16, size);
             }
@@ -1073,7 +1100,7 @@ extern void nesinfo_update_highscore(u8* save_data, int mode) {
             } else if (memcmp(data, NESTAG_OFS, NESTAG_CMD_SIZE) == 0) {
                 cur_ofs = nesinfo_get_u16(&data[4]);
             } else if (memcmp(data, NESTAG_HSC, NESTAG_CMD_SIZE) == 0) {
-                size_t highscore_size = data[NESTAG_CMD_SIZE] - 2;
+                size_t highscore_size = NESINFO_HSC_SIZE(data);
                 u16 ofs_data = nesinfo_get_u16(&data[4]);
                 u32 ofs = ofs_data & 0x7FF;
                 u32 bit = (ofs_data >> 15) & 1;

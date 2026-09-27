@@ -85,6 +85,9 @@ extern void mHandbill_Set_free_str(int str_num, u8* str, int str_len) {
         free_str[j] = CHAR_SPACE;
     }
 
+#ifdef BUGFIXES
+    mFont_clean_save_text(free_str, mHandbill_FREE_STR_LEN);
+#endif
     handbill_data->free_str_art[str_num] = mIN_ARTICLE_NONE;
 }
 
@@ -432,7 +435,12 @@ static int mHandbill_Put_String(u8* buf, int buf_size, int start_idx, int str_le
         }
     }
 
+#ifdef BUGFIXES
+    return mHandbill_MoveDataCut(buf, buf_size, start_idx, start_idx + mFont_CodeSize_idx_get(buf, start_idx), str_len,
+                                 mHandbill_FILL_NONE);
+#else
     return str_len;
+#endif
 }
 
 static void mHandbill_Change_ControlCode(u8* buf, int buf_size, int str_len, int fill_type) {

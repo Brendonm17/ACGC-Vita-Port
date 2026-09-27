@@ -1,6 +1,13 @@
 #include "ef_effect_control.h"
 #include "m_common_data.h"
 #include "m_player_lib.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+// arg1 with this bit: the switch's shared seed; each shell then draws alike on every screen
+#define eHanabiSet_MP_SEEDED 0x4000
+#define eHanabiSet_MP_SHELL  0x40
+#endif
 
 static void eHanabiSet_init(xyz_t pos, int prio, s16 angle, GAME* game, u16 item_name, s16 arg0, s16 arg1);
 static void eHanabiSet_ct(eEC_Effect_c* effect, GAME* game, void* ct_arg);
@@ -116,13 +123,22 @@ static void eHanabiSet_SearchNicePos(xyz_t* outPos, GAME* game) {
 static void eHanabiSet_init(xyz_t pos, int prio, s16 angle, GAME* game, u16 item_name, s16 arg0, s16 arg1) {
     xyz_t outPos;
     eHanabiSet_SearchNicePos(&outPos, game);
+#ifdef VITA_MP
+    eEC_CLIP->make_effect_proc(eEC_EFFECT_HANABI_SET, outPos, NULL, game, NULL, item_name, prio, 0, arg1);
+#else
     eEC_CLIP->make_effect_proc(eEC_EFFECT_HANABI_SET, outPos, NULL, game, NULL, item_name, prio, 0, 0);
+#endif
 }
 
 static void eHanabiSet_ct(eEC_Effect_c* effect, GAME* game, void* ct_arg) {
     int f = RANDOM(1000.f) % 4;
     int hourEndMinusOne = mEv_get_end_time(mEv_EVENT_FIREWORKS_SHOW) - 1;
     lbRTC_hour_t hour = Common_Get(time.rtc_time.hour);
+#ifdef VITA_MP
+    if (effect->arg1 & eHanabiSet_MP_SEEDED) {
+        f = mp_shared_hash(effect->arg1, 0xFF, 0) % 4;
+    }
+#endif
     effect->timer = EFFECT_LIFETIME;
     if (hour > hourEndMinusOne && hour <= mEv_get_end_time(mEv_EVENT_FIREWORKS_SHOW)) {
         effect->effect_specific[1] = TRUE;
@@ -150,6 +166,23 @@ static void eHanabiSet_mv(eEC_Effect_c* effect, GAME* game) {
             if (effect->effect_specific[1] == 1) {
                 arg = 1;
             }
+#ifdef VITA_MP
+            if (effect->arg1 & eHanabiSet_MP_SEEDED) {
+                s16 shell;
+
+                effect_position.x += (f32)(mp_shared_hash(effect->arg1, i, 1) & 0xFFFF) * (250.f / 65536.f) - 125.f;
+                effect_position.z += (f32)(mp_shared_hash(effect->arg1, i, 2) & 0xFFFF) * (250.f / 65536.f) - 125.f;
+                shell = (s16)(eHanabiSet_MP_SHELL | (mp_shared_hash(effect->arg1, i, 3) & 0xF));
+                mFI_Wpos2BlockNum(&bx, &bz, effect_position);
+                if (!eEC_CLIP->check_lookat_block_proc(effect->position) ||
+                    mFI_CheckBlockKind_OR(bx, bz, mRF_BLOCKKIND_SLOPE | mRF_BLOCKKIND_CLIFF)) {
+                    effect_id = eEC_EFFECT_HANABI_DUMMY;
+                }
+                eEC_CLIP->effect_make_proc(effect_id, effect_position, effect->prio, 0, game,
+                                           (mActor_name_t)effect->item_name, arg, shell);
+                continue;
+            }
+#endif
             effect_position.x += RANDOM_F(250.f) - 125.f;
             effect_position.z += RANDOM_F(250.f) - 125.f;
             mFI_Wpos2BlockNum(&bx, &bz, effect_position);

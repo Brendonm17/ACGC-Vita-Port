@@ -100,6 +100,9 @@ extern int mMmd_CountDisplayedFossil();
 extern int mMmd_CountDisplayedArt();
 extern int mMmd_CountDisplayedInsect();
 extern int mMmd_CountDisplayedFish();
+#ifdef VITA_MP
+extern int mMmd_mp_fossil_unit(int fossil_no, int* ut_x, int* ut_z, mActor_name_t* item);
+#endif
 
 #ifdef __cplusplus
 }

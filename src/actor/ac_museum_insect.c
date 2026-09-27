@@ -1,4 +1,7 @@
 #include "ac_museum_insect_priv.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 // clang-format off
 extern Gfx
     act_m_mu_monshiro1T_model,
@@ -705,6 +708,18 @@ int Museum_Insect_GetMsgNo(ACTOR* actorx) {
         mMsg_Set_free_str(mMsg_Get_base_window_p(), mMsg_FREE_STR0,
                           common_data.save.save.private_data[insect_caught_by - 1].player_ID.player_name, 8);
     }
+#ifdef VITA_MP
+    {
+        u8 mp_name[PLAYER_NAME_LEN];
+
+        // a visitor's donation the host noted reads with their name, as a resident's does
+        if (insect_caught_by == mMmd_DONATOR_DELETED_PLAYER &&
+            pc_mp_museum_donor(mMmd_CATEGORY_INSECT, actor->_2F80[actor->_2F7C].insectName, mp_name)) {
+            mMsg_Set_free_str(mMsg_Get_base_window_p(), mMsg_FREE_STR0, mp_name, PLAYER_NAME_LEN);
+            insect_caught_by = mMmd_DONATOR_PLAYER1;
+        }
+    }
+#endif
 
     if (actor->_2F7C < actor->_2F78 - 1) {
         if (insect_caught_by >= 1 && insect_caught_by <= 4) {
@@ -817,6 +832,83 @@ void Museum_Insect_Talk_process(ACTOR* actorx, GAME* game) {
     }
 }
 
+#ifdef VITA_MP
+// the insect record the garden was stocked from (4 bits an insect)
+static u8 minsect_mp_insect_bit[mMmd_INSECT_BIT_NUM];
+// stag beetles by log spot (_70), and those still turning to a partner that came late (bit per spot)
+static const u8 minsect_mp_kuwa_idx[4] = { 0x15, 0x1d, 0x1e, 0x1f };
+static u8 minsect_mp_kuwa_turn;
+
+// the lean minsect_kuwagata_ct gives a stag beetle toward its partner's spot
+static s16 minsect_mp_kuwa_lean(MUSEUM_INSECT_PRIVATE_DATA* priv) {
+    int mate = (priv->_00 == 0x15 || priv->_00 == 0x1e) ? priv->_70 + 1 : priv->_70 - 1;
+    xyz_t p;
+
+    xyz_t_sub(&kuwagata_base_pos[mate], &kuwagata_base_pos[priv->_70], &p);
+    return atans_table(p.y, -p.x);
+}
+
+// an insect donated while this screen is in the room joins the garden, set up as entering the room would
+static void minsect_mp_stock(MUSEUM_INSECT_ACTOR* actor, GAME* game) {
+    PLAYER_ACTOR* player;
+    int held = FALSE;
+    int i;
+
+    for (i = 0; minsect_mp_kuwa_turn != 0 && i < 4; i++) {
+        MUSEUM_INSECT_PRIVATE_DATA* priv = &actor->privInsects[minsect_mp_kuwa_idx[i]];
+
+        if ((minsect_mp_kuwa_turn & (1 << i)) &&
+            add_calc_short_angle2(&priv->_74, minsect_mp_kuwa_lean(priv), CALC_EASE2(0.3f), DEG2SHORT_ANGLE(5.0f),
+                                  DEG2SHORT_ANGLE(0.25f)) == 0) {
+            minsect_mp_kuwa_turn &= ~(1 << i);
+        }
+    }
+
+    if (!mp_active() ||
+        mem_cmp(minsect_mp_insect_bit, Save_Get(museum_display).insect_bit, sizeof(minsect_mp_insect_bit))) {
+        return;
+    }
+
+    player = get_player_actor_withoutCheck((GAME_PLAY*)game);
+    for (i = 0; i < aINS_INSECT_TYPE_NUM; i++) {
+        MUSEUM_INSECT_PRIVATE_DATA* priv = &actor->privInsects[i];
+
+        if ((priv->_8C & 1) || !mMmd_InsectInfo(i)) {
+            continue;
+        }
+
+        // back to the zeroed slot ct starts every insect from (a lone stag beetle's battles write its partner's)
+        mem_clear((u8*)priv, sizeof(MUSEUM_INSECT_PRIVATE_DATA), 0);
+        priv->_8C |= 1;
+        priv->_00 = i;
+        priv->_14 = minsect_scale_tbl[i];
+        set_relax_active_time(priv, game);
+        // resting, but another butterfly or dragonfly holds its perch: it comes in flying and lands where there's room
+        if (priv->_8E == 0 && ((i <= 2 && (actor->_2F9C[0] & (1 << i))) ||
+                               (i >= 9 && i <= 12 && (actor->_2F9C[2] & (1 << (i - 9)))))) {
+            priv->_8E = TRUE;
+        }
+        minsect_ct[i](priv, game);
+
+        if (i == 0x1c && player != NULL &&
+            search_position_distanceXZ(&player->actor_class.world.position, &priv->_1C) < 40.0f) {
+            // the roach starts mid-floor: it waits for this player to step off, or it bumps them into its talk
+            priv->_8C = 0;
+            held = TRUE;
+        } else if (minsect_ct[i] == minsect_kuwagata_ct && (priv->_8C & 0x10) &&
+                   (actor->privInsects[minsect_mp_kuwa_idx[priv->_70 ^ 1]]._8C & 1)) {
+            // its partner was set up alone: it turns to face the newcomer, the pose a pair starts in
+            actor->privInsects[minsect_mp_kuwa_idx[priv->_70 ^ 1]]._8C |= 0x10;
+            minsect_mp_kuwa_turn |= 1 << (priv->_70 ^ 1);
+        }
+    }
+
+    if (!held) {
+        mem_copy(minsect_mp_insect_bit, Save_Get(museum_display).insect_bit, sizeof(minsect_mp_insect_bit));
+    }
+}
+#endif
+
 void Museum_Insect_Actor_ct(ACTOR* actorx, GAME* game) {
     int i;
     MUSEUM_INSECT_ACTOR* actor = (MUSEUM_INSECT_ACTOR*)actorx;
@@ -833,6 +925,10 @@ void Museum_Insect_Actor_ct(ACTOR* actorx, GAME* game) {
             minsect_ct[i](&actor->privInsects[i], game);
         }
     }
+#ifdef VITA_MP
+    mem_copy(minsect_mp_insect_bit, Save_Get(museum_display).insect_bit, sizeof(minsect_mp_insect_bit));
+    minsect_mp_kuwa_turn = 0;
+#endif
 }
 
 void Museum_Insect_Actor_dt(ACTOR* actor, GAME* game) {
@@ -842,6 +938,9 @@ void Museum_Insect_Actor_dt(ACTOR* actor, GAME* game) {
 void Museum_Insect_Actor_move(ACTOR* actorx, GAME* game) {
     MUSEUM_INSECT_ACTOR* actor = (MUSEUM_INSECT_ACTOR*)actorx;
     int i;
+#ifdef VITA_MP
+    minsect_mp_stock(actor, game);
+#endif
     actorx->world.position.y = 4000.f;
     Museum_Insect_Talk_process(actorx, game);
     for (i = 0; i < aINS_INSECT_TYPE_NUM; i++) {

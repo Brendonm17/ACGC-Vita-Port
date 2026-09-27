@@ -24,12 +24,21 @@ extern "C" {
 #define FONT_SIZE 256
 */
 
+#ifdef VITA_MP
+// room for chat text and the Online options page: a frame whose lists overflow is never shown
+#define POLY_OPA_SIZE 12000
+#else
 #define POLY_OPA_SIZE 9952
+#endif
 #define POLY_XLU_SIZE 2048
 #define OVERLAY_SIZE 1024
 #define WORK_SIZE 128
 #define UNK_BUF0_SIZE 32
+#ifdef VITA_MP
+#define FONT_SIZE 4096
+#else
 #define FONT_SIZE 1792
+#endif
 #define SHADOW_SIZE 512
 #define LIGHT_SIZE 256
 #define NEW0_SIZE 512

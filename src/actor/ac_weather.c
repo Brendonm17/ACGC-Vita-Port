@@ -13,6 +13,12 @@
 #include "m_player_lib.h"
 #include "m_event.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+// a visitor's sky follows the host's saved weather
+static u8 l_mp_weather;
+#endif
 
 static void Weather_Actor_ct(ACTOR* actor, GAME* game);
 static void Weather_Actor_dt(ACTOR* actor, GAME* game);
@@ -386,6 +392,9 @@ static void Weather_Actor_ct(ACTOR* actor, GAME* game) {
     int cur;
     xyz_t* pos = Camera2_getCenterPos_p();
 
+#ifdef VITA_MP
+    l_mp_weather = Save_Get(weather);
+#endif
     aWeather_SetClip(actor, 0);
 
     if (mEv_IsTitleDemo()) {
@@ -613,6 +622,29 @@ static void aWeather_ChangeWeatherTime0(ACTOR* actorx) {
             Save_Get(scene_no) == SCENE_START_DEMO3) {
             return;
         }
+#ifdef VITA_MP
+        // a visitor never rolls the weather; the host's roll arrives in its save and eases in here
+        if (!mp_town_writer_allowed()) {
+            u8 now_weather = Save_Get(weather);
+
+            mTM_off_renew_time(0);
+            if (now_weather != l_mp_weather) {
+                s16 type = mEnv_SAVE_GET_WEATHER_TYPE(now_weather);
+                s16 was = mEnv_SAVE_GET_WEATHER_TYPE(l_mp_weather);
+
+                if ((type == mEnv_WEATHER_CLEAR || type == mEnv_WEATHER_SAKURA) &&
+                    (was == mEnv_WEATHER_SNOW || was == mEnv_WEATHER_RAIN)) {
+                    mEnv_PreRainNowFine_Init();
+                }
+                l_mp_weather = now_weather;
+                if (mFI_CheckInIsland() == 0) {
+                    aWeather_RequestChangeWeather(actorx, type, mEnv_SAVE_GET_WEATHER_INTENSITY(now_weather));
+                }
+                Common_Set(weather_time, Common_Get(time.rtc_time));
+            }
+            return;
+        }
+#endif
         if (!(mFI_CheckPlayerBlockInfo() & 0x400000) && (mTM_check_renew_time(0) != 0)) {
             mEnv_RandomWeather(&rndWeather, &rndIntensity);
             mEv_GetEventWeather(&evWeather, &evIntensity);
@@ -642,6 +674,81 @@ static void aWeather_ChangeWeatherTime0(ACTOR* actorx) {
     }
 }
 
+#ifdef VITA_MP
+// the host in an NES game (no play game, so no actor): the day's weather is still rolled at midnight into its save,
+// where visitors' screens ease into it and its own takes it up once it's back
+void aWeather_mp_headless_roll(void) {
+    s16 rndWeather;
+    s16 rndIntensity;
+    s16 evWeather;
+    s16 evIntensity;
+    s16 save_weather;
+
+    if (!mEv_IsNotTitleDemo() || mTM_check_renew_time(0) == 0) {
+        return;
+    }
+    mEnv_RandomWeather(&rndWeather, &rndIntensity);
+    mEv_GetEventWeather(&evWeather, &evIntensity);
+    if (evWeather != -1) {
+        rndWeather = evWeather;
+        rndIntensity = evIntensity;
+    }
+    if ((mEv_CheckRealArbeit() == TRUE) && (rndWeather == mEnv_WEATHER_RAIN)) {
+        rndWeather = mEnv_WEATHER_CLEAR;
+        rndIntensity = mEnv_WEATHER_INTENSITY_NONE;
+    }
+    mTM_off_renew_time(0);
+    save_weather = mEnv_SAVE_GET_WEATHER_TYPE(Save_Get(weather));
+    if ((rndWeather == mEnv_WEATHER_CLEAR || rndWeather == mEnv_WEATHER_SAKURA) &&
+        (save_weather == mEnv_WEATHER_SNOW || save_weather == mEnv_WEATHER_RAIN)) {
+        mEnv_PreRainNowFine_Init();
+    }
+    Save_Set(weather, rndIntensity | (rndWeather * 16));
+    Common_Set(weather_time, Common_Get(time.rtc_time));
+}
+
+// host with visitors in town: the day's weather is rolled behind its menus too, where this actor waits
+void aWeather_mp_menu_roll(void) {
+    aWeather_Clip_c* clip = Common_Get(clip.weather_clip);
+
+    if (clip != NULL && clip->actor != NULL) {
+        aWeather_ChangeWeatherTime0(clip->actor);
+    }
+}
+#endif
+
+#ifdef VITA_MP
+// a shared town's storm flashes by its clock (a flash each thousand frames, at a spot of it the town's hash picks):
+// everyone out in it sees the same flash and hears the same thunder
+static int aWeather_mp_kaminari(int* flash, int* thunder) {
+    static unsigned int last_cycle;
+    static int last = -1;
+    unsigned int ms;
+    unsigned int cycle;
+    int f;
+    int t2;
+
+    *flash = FALSE;
+    *thunder = FALSE;
+    if (!mp_shared_clock_ms(&ms)) {
+        last = -1;
+        return FALSE;
+    }
+    cycle = ms / 16667u;
+    f = (int)((ms % 16667u) * 60u / 1000u);
+    t2 = 100 + (int)(mp_shared_hash(cycle, 0x4B41u, 0) % 500u);
+    // (from the top of the next thousand frames; on first coming out, from here, with nothing sprung at once)
+    if (cycle != last_cycle) {
+        last = (cycle == last_cycle + 1 && last >= 0) ? -1 : f;
+        last_cycle = cycle;
+    }
+    *flash = (last < t2 && f >= t2) || (last < t2 + 20 && f >= t2 + 20);
+    *thunder = last < t2 + 65 && f >= t2 + 65;
+    last = f;
+    return TRUE;
+}
+#endif
+
 static void aWeather_MakeKaminari(ACTOR* actorx) {
     WEATHER_ACTOR* weather = (WEATHER_ACTOR*)actorx;
     lbRTC_time_c time = Common_Get(time.rtc_time);
@@ -655,6 +762,24 @@ static void aWeather_MakeKaminari(ACTOR* actorx) {
         }
         if ((month >= lbRTC_JUNE) && (month <= lbRTC_AUGUST) && (weather->current_status == 1) &&
             (weather->current_level == 3)) {
+#ifdef VITA_MP
+            int flash;
+            int thunder;
+
+            if (aWeather_mp_kaminari(&flash, &thunder)) {
+                if (flash && (Common_Get(clip.effect_clip) != NULL) &&
+                    ((Save_Get(scene_no) - SCENE_MY_ROOM_BASEMENT_S) > 3U) &&
+                    ((Save_Get(scene_no) - SCENE_MUSEUM_ROOM_PAINTING) > 1U) &&
+                    (Save_Get(scene_no) != SCENE_MUSEUM_ROOM_FISH)) {
+                    rgba_t kaminari_color = { 70, 70, 160, 255 };
+                    Common_Get(clip.effect_clip)->regist_effect_light(kaminari_color, 2, 35, FALSE);
+                }
+                if (thunder) {
+                    sAdo_SysTrgStart(0x424);
+                }
+                return;
+            }
+#endif
             timer = weather->lightning_timer % 1000;
             if (((timer == weather->lightning_timer2) || (timer == (weather->lightning_timer2 + 20))) &&
                 (Common_Get(clip.effect_clip) != NULL) && ((Save_Get(scene_no) - SCENE_MY_ROOM_BASEMENT_S) > 3U) &&

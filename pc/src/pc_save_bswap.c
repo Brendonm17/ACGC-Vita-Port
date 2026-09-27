@@ -933,11 +933,11 @@ static int verify_compare(const char* label, const u8* original, const u8* round
     for (i = 0; i < size; i++) {
         if (roundtripped[i] != original[i]) {
             if (mismatches == 0) {
-                OSReport("[PC] BSWAP verify: %s round-trip FAILED!\n", label);
+                pc_log_error("[PC] BSWAP verify: %s round-trip FAILED!\n", label);
             }
             if (printed < 20) {
-                OSReport("[PC] BSWAP verify:   offset 0x%05X: expected 0x%02X, got 0x%02X\n",
-                         i, original[i], roundtripped[i]);
+                pc_log_error("[PC] BSWAP verify:   offset 0x%05X: expected 0x%02X, got 0x%02X\n",
+                             i, original[i], roundtripped[i]);
                 printed++;
             }
             mismatches++;
@@ -947,7 +947,7 @@ static int verify_compare(const char* label, const u8* original, const u8* round
     if (mismatches == 0) {
         OSReport("[PC] BSWAP verify: %s round-trip PASSED (%u bytes)\n", label, size);
     } else {
-        OSReport("[PC] BSWAP verify: %s total mismatches: %d / %u bytes\n", label, mismatches, size);
+        pc_log_error("[PC] BSWAP verify: %s total mismatches: %d / %u bytes\n", label, mismatches, size);
     }
     return mismatches;
 }
@@ -956,7 +956,7 @@ int pc_save_bswap_verify_roundtrip(const u8* original_be, u32 size) {
     u8* temp = (u8*)malloc(size);
     int result;
     if (!temp) {
-        OSReport("[PC] BSWAP verify: malloc(%u) failed\n", size);
+        pc_log_error("[PC] BSWAP verify: malloc(%u) failed\n", size);
         return -1;
     }
     memcpy(temp, original_be, size);

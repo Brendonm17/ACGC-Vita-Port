@@ -16,6 +16,9 @@
 #include "m_random_field.h"
 #include "zurumode.h"
 #include "_mem.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // this is cursed
 #define aEvMgr_SHOW_ACTOR_RESULT_NOT_SHOWN (mEv_place_data_c*)-1
@@ -838,6 +841,12 @@ static void be_flat_unit(mEv_place_data_c* place_data) {
     xyz_t pos;
 
     mFI_BkandUtNum2CenterWpos(&pos, place_data->block.x, place_data->block.z, place_data->unit.x, place_data->unit.z);
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, MP_KEEP_FLAT)) {
+        return;
+    }
+#endif
     fg_p = mFI_GetUnitFG(pos);
 
     if (fg_p != NULL && mSN_ClearSnowman(fg_p) == FALSE) {
@@ -1116,20 +1125,30 @@ static int delete_FG2(int type, u8 id) {
     return TRUE;
 }
 
+static void clean_FG_block(int bx, int bz) {
+#ifdef VITA_MP
+    // (a visitor's game has the host's lost & found take the acre's things)
+    if (mp_town_keep_block(bx, bz)) {
+        return;
+    }
+#endif
+    mPB_keep_all_item_in_block(bx, bz);
+}
+
 static void clean_FG(EVENT_MANAGER_ACTOR* evmgr, u32 blockkind) {
     if (mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELDTYPE2_FG) {
         switch (blockkind) {
             case mRF_BLOCKKIND_POOL:
-                mPB_keep_all_item_in_block(evmgr->pool_block.x, evmgr->pool_block.z);
+                clean_FG_block(evmgr->pool_block.x, evmgr->pool_block.z);
                 break;
             case mRF_BLOCKKIND_SHRINE:
-                mPB_keep_all_item_in_block(evmgr->shrine_block.x, evmgr->shrine_block.z);
+                clean_FG_block(evmgr->shrine_block.x, evmgr->shrine_block.z);
                 break;
             case mRF_BLOCKKIND_STATION:
-                mPB_keep_all_item_in_block(evmgr->station_block.x, evmgr->station_block.z);
+                clean_FG_block(evmgr->station_block.x, evmgr->station_block.z);
                 break;
             case mRF_BLOCKKIND_PLAYER:
-                mPB_keep_all_item_in_block(evmgr->player_home_block.x, evmgr->player_home_block.z);
+                clean_FG_block(evmgr->player_home_block.x, evmgr->player_home_block.z);
                 break;
         }
     }
@@ -1150,6 +1169,12 @@ static mEv_place_data_c* make_FG_somewhere_lot4sale(EVENT_MANAGER_ACTOR* evmgr, 
     if (common_place_data != NULL) {
         mFI_GetBlockUtNum2FG(&reserve_item, common_place_data->block.x, common_place_data->block.z, common_place_data->unit.x, common_place_data->unit.z);
 
+#ifdef VITA_MP
+        // a visitor finds the host's tent already standing on the host's lot
+        if (!mp_town_writer_allowed()) {
+            reserve_item = SIGN00;
+        }
+#endif
         if (!mNT_IS_RESERVE(reserve_item)) {
             // the selected lot doesn't have a reserve item so re-roll event lot
             common_place_data = NULL;
@@ -1697,6 +1722,9 @@ static mEv_place_data_c* walk_actor_at_wade(EVENT_MANAGER_ACTOR* evmgr, aEvMgr_e
             }
 
             memcpy(common_place_data, &place_data, sizeof(mEv_place_data_c));
+#ifdef VITA_MP
+            pc_mp_ev_moved(ctrl->type, id, common_place_data);
+#endif
             return common_place_data;
         }
     }
@@ -1733,6 +1761,9 @@ static mEv_place_data_c* walk_actor_at_wade_hide(EVENT_MANAGER_ACTOR* evmgr, aEv
             }
 
             memcpy(common_place_data, &place_data, sizeof(mEv_place_data_c));
+#ifdef VITA_MP
+            pc_mp_ev_moved(ctrl->type, id, common_place_data);
+#endif
             return common_place_data;
         }
     }
@@ -3556,7 +3587,14 @@ static int ghost_start(EVENT_MANAGER_ACTOR* evmgr, aEvMgr_event_ctrl_c* ctrl) {
         ret = 1;
     }
 
+#ifdef VITA_MP
+    // (a visitor reads a record from another night as empty)
+    if (gst != NULL && (gst->flags & mEv_GHOST_FLAG_RETURNED_SPIRITS) != 0 &&
+        (mp_town_writer_allowed() || (now->year == gst->renew_time.year && now->month == gst->renew_time.month &&
+                                      now->day == gst->renew_time.day))) {
+#else
     if (gst != NULL && (gst->flags & mEv_GHOST_FLAG_RETURNED_SPIRITS) != 0) {
+#endif
         ret = 2;
     } else if (ret != 0) {
         wpppp = make_actor_in_free_block(evmgr, ctrl, SP_NPC_EV_GHOST, 0x51, 5);
@@ -4293,6 +4331,12 @@ static int event_at_oclock(EVENT_MANAGER_ACTOR* evmgr, aEvMgr_event_ctrl_c* ctrl
     int ret = TRUE;
 
     if (mEv_check_status(ctrl->type, mEv_STATUS_ACTIVE) != FALSE && mEv_check_status(ctrl->type, mEv_STATUS_RUN) == FALSE) {
+#ifdef VITA_MP
+        // a visitor waits for the host's setup instead of placing the event itself
+        if (!mp_event_may_start(ctrl->type)) {
+            return FALSE;
+        }
+#endif
         if (ctrl->start_proc != NULL && (*ctrl->start_proc)(evmgr, ctrl) == 0) {
             ret = FALSE;
         } else if (mEv_check_status(ctrl->type, mEv_STATUS_ERROR) == FALSE) {
@@ -4630,6 +4674,10 @@ static void schedule_main(ACTOR* actorx) {
     aEvMgr_event_ctrl_c* ctrl;
     u32 player_no = Common_Get(player_no);
 
+#ifdef VITA_MP
+    // the host picks the next special visitor; a visitor's copy follows it
+    if (mp_town_writer_allowed())
+#endif
     if (Save_Get(event_save_common).special_event.flags == 1) {
         set_special_event_save();
         Save_Get(event_save_common).special_event.flags = 0;
@@ -4643,11 +4691,18 @@ static void schedule_main(ACTOR* actorx) {
             }
 
             evmgr->month_day = month_day;
+#ifdef VITA_MP
+            // (the residents' holiday mail is the host's town's to send)
+            if (mp_town_writer_allowed())
+#endif
             mail_event_check();
         }
 
         day_hour = (day << 8) + hour;
         if (day_hour != evmgr->day_hour) {
+#ifdef VITA_MP
+            if (mp_town_writer_allowed())
+#endif
             vt_wt_mail_check();
             evmgr->day_hour = day_hour;
         }

@@ -1355,6 +1355,12 @@ void mfish_get_player_angle(MUSEUM_FISH_PRIVATE_DATA* actor, GAME* game, s16* at
     xyz_t p1;
     f32 v;
 
+#ifdef VITA_MP
+    // whoever is at the glass, this screen's player or another
+    if (mp_active()) {
+        mp_nearest_player_pos(&actor->position, &p);
+    }
+#endif
     p.y += 40.0f;
     xyz_t_sub(&p, &actor->position, &p1);
     v = SQ(p1.x) + SQ(p1.z);
@@ -1394,6 +1400,11 @@ BOOL mfish_peck_wall_check(MUSEUM_FISH_PRIVATE_DATA* actor, GAME* gamex) {
     s16 temp = (actor->_60C.y - actor->_62C);
     if (actor->_62E_flags & 0x1E && ABS(temp) < DEG2SHORT_ANGLE(45)) {
         xyz_t target = GET_PLAYER_ACTOR_GAME_ACTOR(gamex)->world.position;
+#ifdef VITA_MP
+        if (mp_active()) {
+            mp_nearest_player_pos(&actor->position, &target);
+        }
+#endif
         return search_position_distance(&actor->position, &target) < 60.0f;
     }
     return FALSE;

@@ -46,6 +46,7 @@ add_compile_definitions(
     NO_TEX_COMBINER
     PC_DESIGN_IMPORT
     VITA_TROPHIES
+    VITA_MP
     # uncomment for measurement builds.
     #VITA_PERF_LOG
     #VITA_DEBUG
@@ -180,6 +181,10 @@ set(VITA_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_design_convert.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_design_fs.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_trophy.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_mp_net.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_mp_adhoc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_mp_nat.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vita_ime.c
 
     ${DECOMP_ROOT}/pc/src/pc_gx.c
     ${DECOMP_ROOT}/pc/src/pc_gx_tev.c
@@ -202,6 +207,21 @@ set(VITA_SOURCES
     ${DECOMP_ROOT}/pc/src/pc_pad.c
     ${DECOMP_ROOT}/pc/src/pc_keybindings.c
     ${DECOMP_ROOT}/pc/src/pc_controls.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_session.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_world.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_text.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_link.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_lobby.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_travel.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_journal.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_player.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_notice.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_npc.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_event.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_critter.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_rights.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_chat.c
+    ${DECOMP_ROOT}/pc/src/pc_mp_mod.c
     ${DECOMP_ROOT}/src/static/dolphin/pad/Padclamp.c
     ${DECOMP_ROOT}/pc/lib/stb_image.c
 )
@@ -293,6 +313,20 @@ set_source_files_properties(
     "${DECOMP_ROOT}/pc/src/pc_pad.c"
     "${DECOMP_ROOT}/pc/src/pc_keybindings.c"
     "${DECOMP_ROOT}/pc/src/pc_controls.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_session.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_world.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_text.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_link.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_lobby.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_travel.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_journal.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_player.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_notice.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_npc.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_event.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_critter.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_rights.c"
+    "${DECOMP_ROOT}/pc/src/pc_mp_chat.c"
     PROPERTIES COMPILE_OPTIONS "-O2;-w"
 )
 
@@ -345,8 +379,9 @@ target_link_libraries(${PROJECT_NAME}
     SDL2
     vitaGL vitashark SceShaccCgExt taihen_stub SceShaccCg_stub
     SceDisplay_stub SceCtrl_stub SceAudio_stub SceAudioIn_stub
-    SceSysmodule_stub SceGxm_stub SceCommonDialog_stub SceTouch_stub
+    SceSysmodule_stub SceGxm_stub SceCommonDialog_stub SceTouch_stub SceIme_stub
     SceNpTrophy_stub
+    SceNet_stub SceNetCtl_stub ScePspnetAdhoc_stub
     SceHid_stub SceMotion_stub ScePower_stub SceAppMgr_stub
     SceAppUtil_stub SceKernelDmacMgr_stub SceKernelThreadMgr_stub
     mathneon pthread m z c stdc++

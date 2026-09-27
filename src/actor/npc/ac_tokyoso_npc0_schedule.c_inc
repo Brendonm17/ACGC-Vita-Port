@@ -233,3 +233,47 @@ static void aTKN0_schedule_proc(NPC_ACTOR* nactorx, GAME_PLAY* play, int type) {
             break;
     }
 }
+
+#ifdef VITA_MP
+// the starter's step as the screen running the race has it
+void aTKN0_mp_step(void* actorx, void* play, mp_evstep_t* st, int mode) {
+    static aNPC_TALK_REQUEST_PROC talk_request_table[] = { (aNPC_TALK_REQUEST_PROC)none_proc1, aTKN0_norm_talk_request, (aNPC_TALK_REQUEST_PROC)none_proc1 };
+    TOKYOSO_NPC0_ACTOR* actor = (TOKYOSO_NPC0_ACTOR*)actorx;
+    aTKN0_think_data_c* dt;
+
+    if (mode == MP_EVS_GET) {
+        st->think = (u8)actor->think_idx;
+        st->timer = actor->timer;
+        return;
+    }
+    if (st->think >= ARRAY_COUNT(dt_tbl)) {
+        return;
+    }
+    dt = &dt_tbl[st->think];
+    actor->think_idx = st->think;
+    actor->think_proc = proc_table[dt->think_proc_idx];
+    actor->npc_class.talk_info.talk_request_proc = talk_request_table[dt->talk_request_idx];
+    actor->talk_idx = dt->talk_idx;
+    actor->next_think_idx = dt->think_idx_after_talk;
+    if (mode == MP_EVS_TAKE) {
+        // what the step has the body do; its flag, shot and smoke went off on the runner's screen
+        switch (dt->think_init_idx) {
+            case 3:
+                aTKN0_normal_wait_init(actor, (GAME_PLAY*)play);
+                break;
+            case 5:
+                NPC_CLIP->animation_init_proc((ACTOR*)actor, aNPC_ANIM_YOUI1, FALSE);
+                break;
+            case 6:
+                NPC_CLIP->animation_init_proc((ACTOR*)actor, aNPC_ANIM_DON1, FALSE);
+                actor->npc_class.draw.main_animation.keyframe.frame_control.mode = cKF_FRAMECONTROL_STOP;
+                break;
+            default:
+                (*init_table[dt->think_init_idx])(actor, (GAME_PLAY*)play);
+                break;
+        }
+        actor->change_flag = TRUE;
+    }
+    actor->timer = st->timer;
+}
+#endif

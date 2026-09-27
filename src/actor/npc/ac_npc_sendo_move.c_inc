@@ -477,6 +477,18 @@ static void aSEN_chk_exist_island_data_in_ram_talk_proc(NPC_SENDO_ACTOR* sendo, 
     if (order != 0) {
         int keep_island = -1;
 
+#ifdef VITA_MP
+        if (mp_travel_state() == MP_TRAVEL_VISITING && Save_Get(island).renew_time.year == 0) {
+            mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
+
+            mDemo_Set_OrderValue(mDemo_ORDER_NPC0, 9, 0);
+            mMsg_Unset_LockContinue(msg_p);
+            mMsg_ChangeMsgData(msg_p, MP_MSG_V_ISLAND_UNNAMED);
+            mMsg_Set_ForceNext(msg_p);
+            aSEN_change_talk_proc(sendo, aSEN_TALK_END_WAIT);
+            return;
+        }
+#endif
         if (aSEN_chk_exist_island_data_in_ram() == FALSE) {
             keep_island = 0;
         } else {
@@ -518,6 +530,9 @@ static void aSEN_get_island_name_menu_start_wait_talk_proc(NPC_SENDO_ACTOR* send
 static void aSEN_get_island_name_menu_end_wait_talk_proc(NPC_SENDO_ACTOR* sendo, GAME_PLAY* play) {
     if (play->submenu.open_flag == FALSE) {
         mISL_KeepIsland(Save_GetPointer(island));
+#ifdef VITA_MP
+        mp_island_named();
+#endif
         mMsg_request_main_appear_wait_type1(mMsg_Get_base_window_p());
         aSEN_change_talk_proc(sendo, aSEN_TALK_MSG_WIN_OPEN_WAIT);
     }

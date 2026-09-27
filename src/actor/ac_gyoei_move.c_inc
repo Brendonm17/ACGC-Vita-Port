@@ -62,17 +62,109 @@ static u8 bite_check(void) {
     return ret;
 }
 
+#ifdef VITA_MP
+#define aGYO_MP_SNAP 150.0f
+
+static void aGYO_mp_put(u8* b, int v) {
+    b[0] = (u8)v;
+    b[1] = (u8)(v >> 8);
+}
+
+static s16 aGYO_mp_get(const u8* b) {
+    return (s16)(b[0] | (b[1] << 8));
+}
+
+// what another screen needs besides where it is; the key changes when that's worth telling at once
+static void aGYO_mp_report(aGYO_CTRL_ACTOR* ctrl) {
+    ACTOR* actorx = (ACTOR*)ctrl;
+    u8 b[MP_CR_BLOB];
+    u32 key;
+
+    if (!mp_cr_mine(ctrl)) {
+        return;
+    }
+    memset(b, 0, sizeof(b));
+    aGYO_mp_put(b + 0, actorx->shape_info.rotation.x);
+    aGYO_mp_put(b + 2, actorx->shape_info.rotation.y);
+    aGYO_mp_put(b + 4, ctrl->work0);
+    b[6] = (u8)(ctrl->alpha < 0 ? 0 : (ctrl->alpha > 255 ? 255 : ctrl->alpha));
+    b[7] = (u8)ctrl->draw_type;
+    aGYO_mp_put(b + 8, ctrl->gyo_flags & 0x300);
+    aGYO_mp_put(b + 10, (int)(actorx->scale.x * 10000.0f));
+    aGYO_mp_put(b + 12, actorx->world.angle.y);
+    key = (u32)ctrl->draw_type | ((u32)(ctrl->gyo_flags & 0x300) >> 4) | ((u32)(b[6] >> 5) << 8) |
+          ((u32)((ctrl->work0 > 60 ? 60 : ctrl->work0) >> 2) << 11) |
+          ((u32)((u16)actorx->shape_info.rotation.y >> 12) << 16) |
+          ((u32)((u16)actorx->shape_info.rotation.x >> 12) << 20);
+    pc_mp_cr_report(ctrl, &actorx->world.position, b, key);
+}
+
+// another game runs this fish: its shadow swims where that game has it; one on that player's line
+// shows at the end of it instead
+static int aGYO_mp_follow(aGYO_CTRL_ACTOR* ctrl) {
+    ACTOR* actorx = (ACTOR*)ctrl;
+    unsigned int age;
+    xyz_t to;
+    u8 b[MP_CR_BLOB];
+    f32 dx;
+    f32 dz;
+
+    if (!mp_cr_puppet(ctrl, &to, b, &age)) {
+        actorx->drawn = TRUE;
+        return FALSE;
+    }
+    dx = to.x - actorx->world.position.x;
+    dz = to.z - actorx->world.position.z;
+    if (dx * dx + dz * dz > aGYO_MP_SNAP * aGYO_MP_SNAP) {
+        actorx->world.position = to;
+    } else {
+        actorx->world.position.x += dx * 0.5f;
+        actorx->world.position.y += (to.y - actorx->world.position.y) * 0.5f;
+        actorx->world.position.z += dz * 0.5f;
+    }
+    add_calc_short_angle2(&actorx->shape_info.rotation.x, aGYO_mp_get(b + 0), 0.5f, 0x1000, 0);
+    add_calc_short_angle2(&actorx->shape_info.rotation.y, aGYO_mp_get(b + 2), 0.5f, 0x1000, 0);
+    actorx->world.angle.y = aGYO_mp_get(b + 12);
+    ctrl->work0 = aGYO_mp_get(b + 4);
+    ctrl->alpha += (b[6] - ctrl->alpha) / 2;
+    // nibbling at this player's float is only ever the local fish's doing
+    ctrl->gyo_flags = (u16)((ctrl->gyo_flags & ~(0x300 | 0x2 | 0x8)) | (aGYO_mp_get(b + 8) & 0x300));
+    actorx->scale.x = actorx->scale.y = actorx->scale.z = (f32)aGYO_mp_get(b + 10) / 10000.0f;
+    actorx->drawn = b[7] != aGYO_DRAW_TYPE_FISH;
+    // the shadow's shimmer runs on here
+    if (ctrl->fwork0 <= 0.0f) {
+        ctrl->fwork0 += 19.0f;
+    } else if (ctrl->size_type != aGYO_SIZE_WHALE) {
+        ctrl->fwork0 -= 0.5f;
+    }
+    Actor_world_to_eye(actorx, 0.0f);
+    return TRUE;
+}
+#endif
+
 static void aGYO_actor_move(ACTOR* actorx, GAME* game) {
     GYOEI_ACTOR* gyoei = (GYOEI_ACTOR*)actorx;
     aGYO_CTRL_ACTOR* ctrl = gyoei->ctrl;
     GAME_PLAY* play = (GAME_PLAY*)game;
     int i;
+#ifdef VITA_MP
+    int adopt = mp_cr_adopting();
+#endif
 
     for (i = 0; i < aGYO_MAX_GYOEI; i++) {
         if (ctrl->exist == TRUE) {
             ((ACTOR*)ctrl)->state_bitfield &= ~ACTOR_STATE_24;
+#ifdef VITA_MP
+            // this game's own fish the list missed go on it (not one on its line)
+            if (adopt && (ctrl->gyo_flags & (0x2 | 0x4 | 0x8 | 0x20)) == 0) {
+                pc_mp_cr_adopt(MP_CR_FISH, aGYO_mp_type[i], &((ACTOR*)ctrl)->world.position, 0, ctrl);
+            }
+#endif
 
             if ((((ACTOR*)ctrl)->state_bitfield & (ACTOR_STATE_NO_CULL | ACTOR_STATE_NO_MOVE_WHILE_CULLED)) != 0) {
+#ifdef VITA_MP
+                if (!aGYO_mp_follow(ctrl)) {
+#endif
                 aGYO_position_move(ctrl);
                 aGYO_BGcheck(ctrl);
 
@@ -90,11 +182,24 @@ static void aGYO_actor_move(ACTOR* actorx, GAME* game) {
 
                 (*((ACTOR*)ctrl)->mv_proc)((ACTOR*)ctrl, game);
                 Actor_world_to_eye((ACTOR*)ctrl, 0.0f);
+#ifdef VITA_MP
+                aGYO_mp_report(ctrl);
+                }
+#endif
             }
 
             aGYO_cull_check((ACTOR*)ctrl, play);
             if ((ctrl->gyo_flags & 0x20) != 0) {
                 ctrl->gyo_flags &= ~0x20;
+#ifdef VITA_MP
+                // landed, or darted off for good
+                if (aGYO_mp_bolted[i] != 0) {
+                    pc_mp_cr_bolted(ctrl, aGYO_mp_bolted[i] == 2);
+                } else {
+                    pc_mp_cr_gone(ctrl);
+                }
+                aGYO_mp_bolted[i] = 0;
+#endif
                 aGYO_destruct((ACTOR*)ctrl, game);
             }
         }

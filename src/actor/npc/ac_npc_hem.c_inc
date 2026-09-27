@@ -6,6 +6,12 @@ static void aNHM_set_request_act(NPC_HEM_ACTOR* hem) {
 }
 
 static void aNHM_appear_wait(NPC_HEM_ACTOR* hem, GAME_PLAY* play) {
+#ifdef VITA_MP
+    // a stand-in for another player's fairy only ever shows as that one does, and never speaks
+    if (hem->mp_remote) {
+        return;
+    }
+#endif
     if (Common_Get(hem_visible) == TRUE) {
         hem->actor.condition_info.hide_request = FALSE;
         hem->actor.talk_info.talk_request_proc = aNHM_talk_request;
@@ -141,6 +147,11 @@ static void aNHM_set_force_talk_info_talk_request() {
 }
 
 static void aNHM_talk_request(ACTOR* actorx, GAME* game) {
+#ifdef VITA_MP
+    if (((NPC_HEM_ACTOR*)actorx)->mp_remote) {
+        return;
+    }
+#endif
     mDemo_Request(mDemo_TYPE_SPEAK, actorx, aNHM_set_force_talk_info_talk_request);
 }
 
@@ -169,12 +180,83 @@ static BOOL aNHM_talk_end_chk(ACTOR* actorx, GAME* game) {
     return ret;
 }
 
+#ifdef VITA_MP
+#define aNHM_MP_IDLE_MAX  45  // frames a fairy that followed its owner's lingers after it stops
+#define aNHM_MP_FIRST_MAX 180 // frames a new one waits for its owner's to be followed at all
+#endif
+
 static void aNHM_actor_move(ACTOR* actorx, GAME* game) {
     NPC_HEM_ACTOR* hem = (NPC_HEM_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    // another player's fairy stays hidden until that game shows it, and goes when it stops
+    if (hem->mp_remote) {
+        if (mp_npc_is_puppet(actorx)) {
+            hem->mp_idle = 0;
+            hem->mp_seen = TRUE;
+        } else if (++hem->mp_idle > (hem->mp_seen ? aNHM_MP_IDLE_MAX : aNHM_MP_FIRST_MAX)) {
+            if (aSHR_GET_CLIP() != NULL) {
+                aSHR_GET_CLIP()->hem_flag = FALSE;
+            }
+            Actor_delete(actorx);
+            return;
+        } else {
+            hem->actor.condition_info.hide_request = TRUE;
+        }
+    }
+#endif
     NPC_CLIP->move_proc(actorx, game);
     if (hem->disappear_flag == TRUE) {
+#ifdef VITA_MP
+        {
+            // it sinks back into the well on the other screens too
+            u8 body[4] = { MP_VFX_HEM, 1, 0, 0 };
+
+            mp_vfx_send(body, sizeof(body));
+        }
+#endif
         aSHR_GET_CLIP()->hem_flag = FALSE;
         Actor_delete(actorx);
     }
 }
+
+#ifdef VITA_MP
+// the fairy rose from the well for another player (or went back), where this player sees the well
+void aNHM_mp_replay(struct game_play_s* play_s, const u8* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_s;
+    ACTOR* hem_actor;
+    ACTOR* shrine;
+
+    if (len < 4) {
+        return;
+    }
+    hem_actor = Actor_info_fgName_search(&play->actor_info, SP_NPC_HEM, ACTOR_PART_NPC);
+    if (body[1] != 0) {
+        if (hem_actor != NULL && ((NPC_HEM_ACTOR*)hem_actor)->mp_remote) {
+            if (aSHR_GET_CLIP() != NULL) {
+                aSHR_GET_CLIP()->hem_flag = FALSE;
+            }
+            Actor_delete(hem_actor);
+        }
+        return;
+    }
+    shrine = Actor_info_name_search(&play->actor_info, mAc_PROFILE_SHRINE, ACTOR_PART_ITEM);
+    if (hem_actor != NULL || shrine == NULL || aSHR_GET_CLIP() == NULL || aSHR_GET_CLIP()->hem_flag ||
+        NPC_CLIP == NULL || NPC_CLIP->setupActor_proc == NULL) {
+        return;
+    }
+    if (NPC_CLIP->setupActor_proc(play, SP_NPC_HEM, -1, -1, -1, shrine->block_x, shrine->block_z, 7, 8) == TRUE) {
+        hem_actor = Actor_info_fgName_search(&play->actor_info, SP_NPC_HEM, ACTOR_PART_NPC);
+        if (hem_actor != NULL) {
+            xyz_t pos = shrine->world.position;
+
+            hem_actor->parent_actor = shrine;
+            ((NPC_HEM_ACTOR*)hem_actor)->mp_remote = TRUE;
+            mp_npc_standin(hem_actor);
+            aSHR_GET_CLIP()->hem_flag = TRUE;
+            pos.z += mFI_UT_WORLDSIZE_Z_F;
+            eEC_CLIP->effect_make_proc(eEC_EFFECT_MAKE_HEM, pos, 2, 0, (GAME*)play, 0xFFFF, 1, 0);
+        }
+    }
+}
+#endif

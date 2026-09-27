@@ -19,6 +19,11 @@
 #ifdef VITA_TROPHIES
 #include "vita_trophy.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+static int l_mPO_mp_traveller; // the host taking in a visitor's letter: the trophy is theirs
+#endif
 
 static int mPO_keep_contents(Mail_c* mail) {
     int res = FALSE;
@@ -82,6 +87,18 @@ static void mPO_adjust_keep_mail() {
 static int mPO_receipt_check_mail(Mail_c* mail) {
     int res = FALSE;
 
+#ifdef VITA_MP
+    // a visitor's letter the host's post office took in: here it only leaves
+    if (pc_mp_letter_taken(mail)) {
+#ifdef VITA_TROPHIES
+        if (mail->header.recipient.type == mMl_NAME_TYPE_NPC) {
+            vita_trophy_unlock(TROPHY_PENPAL);
+        }
+#endif
+        mMl_clear_mail(mail);
+        return TRUE;
+    }
+#endif
     switch (mail->header.recipient.type) {
         case mMl_NAME_TYPE_PLAYER: {
             int house_idx = mMl_hunt_for_send_address(mail);
@@ -105,7 +122,10 @@ static int mPO_receipt_check_mail(Mail_c* mail) {
             if (res == TRUE) {
                 Save_Get(post_office).keep_mail_sum_npcs++;
 #ifdef VITA_TROPHIES
-                vita_trophy_unlock(TROPHY_PENPAL);
+#ifdef VITA_MP
+                if (!l_mPO_mp_traveller)
+#endif
+                    vita_trophy_unlock(TROPHY_PENPAL);
 #endif
             }
 
@@ -125,6 +145,25 @@ static int mPO_receipt_check_mail(Mail_c* mail) {
 
     return res;
 }
+
+#ifdef VITA_MP
+// host: a visitor's letter, taken in as a traveller's; the villager's reply goes in the traveller's own data, which
+// the caller stands in for theirs
+extern int mPO_mp_receipt_traveller(Mail_c* mail, Private_c* traveller) {
+    u8 was_no = Common_Get(player_no);
+    Private_c* was_priv = Common_Get(now_private);
+    int res;
+
+    Common_Set(player_no, mPr_FOREIGNER);
+    Common_Set(now_private, traveller);
+    l_mPO_mp_traveller = TRUE;
+    res = mPO_receipt_check_mail(mail);
+    l_mPO_mp_traveller = FALSE;
+    Common_Set(now_private, was_priv);
+    Common_Set(player_no, was_no);
+    return res;
+}
+#endif
 
 extern int mPO_receipt_proc(Mail_c* mail, int send_type) {
     int res = FALSE;
@@ -459,6 +498,17 @@ static void mPO_set_next_delivery_time(lbRTC_time_c* time) {
     time->sec = 0;
     lbRTC_TimeCopy(&Save_Get(post_office).delivery_time, time);
 }
+
+#ifdef VITA_MP
+// host: a visitor's game brought Pete by; the next round is set as when this game brings him
+void mPO_mp_post_man_came(void) {
+    lbRTC_time_c time;
+
+    lbRTC_TimeCopy(&time, Common_GetPointer(time.rtc_time));
+    mPO_set_next_delivery_time(&time);
+    Common_Set(force_mail_delivery_flag, FALSE);
+}
+#endif
 
 static void mPO_delivery_proc(GAME_PLAY* play) {
     lbRTC_time_c time;

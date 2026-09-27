@@ -12,6 +12,10 @@
 #include "m_roll_lib.h"
 #include "sys_matrix.h"
 #include "m_collision_bg.h"
+#ifdef VITA_MP
+#include "m_play.h"
+#include "pc_mp.h"
+#endif
 
 extern Gfx act_ball_b_model[];
 extern Gfx act_ball_d_model[];
@@ -68,6 +72,73 @@ static void aBALL_process_ground(ACTOR*, GAME*);
 static void aBALL_process_air(ACTOR*, GAME*);
 static void aBALL_process_air_water_init(ACTOR* actor, GAME*);
 static void aBALL_process_ground_water_init(ACTOR* actor, GAME*);
+
+#ifdef VITA_MP
+enum {
+    aBALL_MP_GROUND,
+    aBALL_MP_AIR,
+    aBALL_MP_AIR_WATER,
+    aBALL_MP_GROUND_WATER,
+};
+
+#define aBALL_MP_REST_EVERY 30 // frames between a resting ball's reports
+#define aBALL_MP_SNAP       120.0f
+#define aBALL_MP_AHEAD      12 // frames a report is rolled on at most; past that it waits for the next
+
+// the game that kicked the ball last moves it; the others follow its reports
+static u32 aBALL_mp_mine_ms; // shared clock at this game's last kick, 0 for never
+static u8 aBALL_mp_snd;      // this game's thuds and bounces
+static u16 aBALL_mp_snd_id;
+static f32 aBALL_mp_snd_speed;
+static u8 aBALL_mp_heard; // the mover's count last played here
+static u8 aBALL_mp_heard_ok;
+static int aBALL_mp_timer;
+static int aBALL_mp_ripple;
+
+static void aBALL_mp_claim(void) {
+    unsigned int ms;
+
+    if (mp_shared_clock_ms(&ms)) {
+        aBALL_mp_mine_ms = ms | 1;
+    }
+}
+
+// kick a came before kick b, the short way round the clock; 0 never kicked
+static int aBALL_mp_older(u32 a, u32 b) {
+    return b != 0 && (a == 0 || (s32)(a - b) < 0);
+}
+
+// the local player, or a villager this game moves
+static int aBALL_mp_local_kicker(ACTOR* hit, GAME* game) {
+    if (hit == NULL) {
+        return FALSE;
+    }
+    return hit == GET_PLAYER_ACTOR_GAME_ACTOR(game) || (hit->part == ACTOR_PART_NPC && !mp_npc_is_puppet(hit));
+}
+
+// another player, or a villager another game moves: that game plays the bump out
+static int aBALL_mp_remote_bump(ACTOR* hit) {
+    return hit != NULL &&
+           (hit->id == mAc_PROFILE_MP_PLAYER || (hit->part == ACTOR_PART_NPC && mp_npc_is_puppet(hit)));
+}
+
+// a thud or bounce, heard here and counted for the others
+static void aBALL_mp_se(f32 speed, u16 se_no, xyz_t* pos) {
+    if (speed > 0.0f) {
+        sAdo_OngenTrgStartSpeed(speed, se_no, pos);
+    } else {
+        sAdo_OngenTrgStart(se_no, pos);
+    }
+    aBALL_mp_snd++;
+    aBALL_mp_snd_id = se_no;
+    aBALL_mp_snd_speed = speed;
+}
+#define aBALL_SE_SPEED(speed, se_no, pos) aBALL_mp_se((speed), (se_no), (pos))
+#define aBALL_SE(se_no, pos)              aBALL_mp_se(0.0f, (se_no), (pos))
+#else
+#define aBALL_SE_SPEED(speed, se_no, pos) sAdo_OngenTrgStartSpeed((speed), (se_no), (pos))
+#define aBALL_SE(se_no, pos)              sAdo_OngenTrgStart((se_no), (pos))
+#endif
 
 static int aBALL_Random_pos_set(xyz_t* pos) {
     int x_max;
@@ -156,6 +227,12 @@ static void aBALL_actor_ct(ACTOR* actor, GAME* game) {
 
     ball->unk20A = 0;
     ball->unk20C = 0;
+#ifdef VITA_MP
+    aBALL_mp_mine_ms = 0;
+    aBALL_mp_heard_ok = FALSE;
+    aBALL_mp_timer = 0;
+    aBALL_mp_ripple = 0;
+#endif
 }
 
 static void aBALL_actor_dt(ACTOR* actor, GAME* game) {
@@ -255,7 +332,7 @@ static void aBALL_BGcheck(BALL_ACTOR* actor) {
             speed = -((pos_speed.z * cos) + (pos_speed.x * sin));
             speed_factor = (speed * 0.07f) + 1.2f;
             if (speed > 1.0f) {
-                sAdo_OngenTrgStartSpeed(speed, 0x8026, &actor->actor_class.world.position);
+                aBALL_SE_SPEED(speed, 0x8026, &actor->actor_class.world.position);
             }
 
             actor->actor_class.position_speed.z =
@@ -295,12 +372,22 @@ static void aBALL_OBJcheck(BALL_ACTOR* actor, GAME* _p1) {
         collided = actor->ball_pipe.collision_obj.collided_actor;
         actor->ball_pipe.collision_obj.collision_flags0 &= ~ClObj_FLAG_COLLIDED;
 
+#ifdef VITA_MP
+        if (aBALL_mp_remote_bump(collided)) {
+            // another player's bump plays out on that player's screen
+        } else
+#endif
         if (mQst_CheckSoccerTarget(collided) != 0) {
             mQst_NextSoccer(collided);
             actor->actor_class.speed = 0.0f;
             actor->actor_class.position_speed = ZeroVec;
         } else if ((collided != NULL) && (!(actor->state_flags & aBALL_STATE_IN_HOLE)) && (wade != mFI_WADE_START) &&
                    (wade != mFI_WADE_INPROGRESS)) {
+#ifdef VITA_MP
+            if (aBALL_mp_local_kicker(collided, _p1)) {
+                aBALL_mp_claim();
+            }
+#endif
             if (actor->collider != collided) {
                 pos_speed = collided->position_speed;
                 actor->collider = collided;
@@ -345,7 +432,7 @@ static void aBALL_OBJcheck(BALL_ACTOR* actor, GAME* _p1) {
 
                 actor->actor_class.world.angle.y = atans_table(newSpeedZ, newSpeedX);
                 actor->actor_class.speed *= 0.9f;
-                sAdo_OngenTrgStartSpeed(actor->actor_class.speed, NA_SE_25, &actor->actor_class.world.position);
+                aBALL_SE_SPEED(actor->actor_class.speed, NA_SE_25, &actor->actor_class.world.position);
                 actor->unk20C = GETREG(TAKREG, 15) + 30;
             } else {
                 collision = actor->actor_class.status_data.collision_vec;
@@ -391,7 +478,7 @@ static void aBALL_process_air_init(ACTOR* actor, GAME* game) {
     actor->shape_info.draw_shadow = TRUE;
 
     if ((ball->process_proc == aBALL_process_ground) && ((actor->world.position.y - bg_y) > 20.0f)) {
-        sAdo_OngenTrgStart(NA_SE_43D, &actor->world.position);
+        aBALL_SE(NA_SE_43D, &actor->world.position);
     }
 
     ball->process_proc = aBALL_process_air;
@@ -715,7 +802,7 @@ static void aBALL_status_check(ACTOR* actor, GAME* game) {
 
     if (!(ball->state_flags & aBALL_STATE_DEAD)) {
         if (actor->bg_collision_check.result.is_in_water) {
-            sAdo_OngenTrgStart(NA_SE_27, &actor->world.position);
+            aBALL_SE(NA_SE_27, &actor->world.position);
             ball->state_flags |= aBALL_STATE_DEAD;
             if (Common_Get(clip).gyo_clip != NULL) {
                 Common_Get(clip).gyo_clip->ballcheck_gyoei_proc(&actor->world.position, 20.0f, 0);
@@ -733,11 +820,197 @@ static void aBALL_status_check(ACTOR* actor, GAME* game) {
     }
 }
 
+#ifdef VITA_MP
+static int aBALL_mp_mode(BALL_ACTOR* ball) {
+    if (ball->process_proc == aBALL_process_air) {
+        return aBALL_MP_AIR;
+    }
+    if (ball->process_proc == aBALL_process_air_water) {
+        return aBALL_MP_AIR_WATER;
+    }
+    if (ball->process_proc == aBALL_process_ground_water) {
+        return aBALL_MP_GROUND_WATER;
+    }
+    return aBALL_MP_GROUND;
+}
+
+// this game moves the ball: while it rolls every frame, at rest now and then (the host speaks for a ball
+// nobody has kicked)
+static void aBALL_mp_report(BALL_ACTOR* ball) {
+    ACTOR* actor = (ACTOR*)ball;
+    int mode = aBALL_mp_mode(ball);
+    mp_ball_t b;
+
+    if (aBALL_mp_mine_ms == 0 && !mp_is_host()) {
+        return;
+    }
+    if (actor->speed == 0.0f && mode == aBALL_MP_GROUND && ++aBALL_mp_timer < aBALL_MP_REST_EVERY) {
+        return;
+    }
+    aBALL_mp_timer = 0;
+    b.pos[0] = actor->world.position.x;
+    b.pos[1] = actor->world.position.y;
+    b.pos[2] = actor->world.position.z;
+    b.speed = actor->speed;
+    b.vel_y = actor->position_speed.y;
+    b.ball_y = ball->ball_y;
+    b.angle_y = actor->world.angle.y;
+    b.mode = (u8)mode;
+    b.flags = (u8)(ball->state_flags & (aBALL_STATE_DEAD | aBALL_STATE_IN_HOLE));
+    b.type = (u8)ball->type;
+    b.snd = aBALL_mp_snd;
+    b.snd_id = aBALL_mp_snd_id;
+    b.snd_speed = aBALL_mp_snd_speed;
+    b.kick_ms = aBALL_mp_mine_ms;
+    pc_mp_ball_report(&b);
+}
+
+// the ball as another game moves it; its thuds, splashes and leaves happen here too
+static void aBALL_mp_apply(BALL_ACTOR* ball, GAME* game, const mp_ball_t* b, u32 age_ms) {
+    static BALL_PROCESS_PROC mode_proc[] = { aBALL_process_ground, aBALL_process_air, aBALL_process_air_water,
+                                             aBALL_process_ground_water };
+    ACTOR* actor = (ACTOR*)ball;
+    xyz_t to;
+    f32 ahead = (f32)age_ms * (60.0f / 1000.0f);
+    f32 dx;
+    f32 dz;
+
+    if (ahead > aBALL_MP_AHEAD) {
+        ahead = aBALL_MP_AHEAD;
+    }
+
+    // where it has rolled on to since the report
+    to.x = b->pos[0] + b->speed * sin_s(b->angle_y) * ahead;
+    to.y = b->pos[1];
+    to.z = b->pos[2] + b->speed * cos_s(b->angle_y) * ahead;
+    dx = to.x - actor->world.position.x;
+    dz = to.z - actor->world.position.z;
+    if (dx * dx + dz * dz > aBALL_MP_SNAP * aBALL_MP_SNAP) {
+        actor->world.position = to;
+    } else {
+        actor->world.position.x += dx * 0.5f;
+        actor->world.position.y += (to.y - actor->world.position.y) * 0.5f;
+        actor->world.position.z += dz * 0.5f;
+    }
+    actor->speed = b->speed;
+    actor->position_speed.y = b->vel_y;
+    actor->world.angle.y = b->angle_y;
+    ball->ball_y = b->ball_y;
+    if (b->mode < 4) {
+        ball->process_proc = mode_proc[b->mode];
+        actor->shape_info.draw_shadow = b->mode == aBALL_MP_GROUND || b->mode == aBALL_MP_AIR;
+    }
+    if (b->type < 3) {
+        ball->type = b->type;
+        Common_Set(ball_type, b->type);
+    }
+    if ((b->flags & aBALL_STATE_IN_HOLE) && !(ball->state_flags & aBALL_STATE_IN_HOLE)) {
+        ball->state_flags |= aBALL_STATE_IN_HOLE;
+        ball->ball_pipe.attribute.pipe.height = 20;
+        ball->ball_pipe.attribute.pipe.radius = 18;
+        actor->status_data.weight = MASSTYPE_HEAVY;
+    } else if (!(b->flags & aBALL_STATE_IN_HOLE) && (ball->state_flags & aBALL_STATE_IN_HOLE)) {
+        ball->state_flags &= ~aBALL_STATE_IN_HOLE;
+        ball->ball_pipe.attribute.pipe.height = 30;
+        ball->ball_pipe.attribute.pipe.radius = 13;
+        actor->status_data.weight = 0x64;
+    }
+    if (!(b->flags & aBALL_STATE_DEAD)) {
+        ball->state_flags &= ~aBALL_STATE_DEAD;
+    } else if (!(ball->state_flags & aBALL_STATE_DEAD)) {
+        int i;
+
+        ball->state_flags |= aBALL_STATE_DEAD;
+        ball->ball_pipe.attribute.pipe.height = 10;
+        Common_Get(clip).effect_clip->effect_make_proc(eEC_EFFECT_AMI_MIZU, actor->world.position, 1, 0, game,
+                                                       actor->npc_id, 1, 0);
+        for (i = 2; i < 6; i++) {
+            Common_Get(clip).effect_clip->effect_make_proc(eEC_EFFECT_MIZUTAMA, actor->world.position, 1,
+                                                           actor->world.angle.y, game, actor->npc_id, 0,
+                                                           i | 0x3000);
+        }
+    }
+    if (aBALL_mp_heard_ok && b->snd != aBALL_mp_heard) {
+        if (b->snd_speed > 0.0f) {
+            sAdo_OngenTrgStartSpeed(b->snd_speed, b->snd_id, &actor->world.position);
+        } else {
+            sAdo_OngenTrgStart(b->snd_id, &actor->world.position);
+        }
+    }
+    aBALL_mp_heard = b->snd;
+    aBALL_mp_heard_ok = TRUE;
+    if (b->mode == aBALL_MP_GROUND && !(game->frame_counter & 7) && actor->speed > 1.0f &&
+        mCoBG_Wpos2Attribute(actor->world.position, NULL) == 9) {
+        Common_Get(clip).effect_clip->effect_make_proc(eEC_EFFECT_BUSH_HAPPA, actor->world.position, 1,
+                                                       actor->world.angle.y, game, actor->npc_id, 0,
+                                                       actor->speed > 4.0f);
+    }
+    if (b->mode == aBALL_MP_AIR_WATER || b->mode == aBALL_MP_GROUND_WATER) {
+        if (aBALL_mp_ripple < 0x20 && !(game->frame_counter & 7)) {
+            Common_Get(clip).effect_clip->effect_make_proc(eEC_EFFECT_TURI_HAMON, actor->world.position, 1,
+                                                           actor->world.angle.y, game, actor->npc_id, 1, 0);
+        }
+        if (aBALL_mp_ripple < 0x20) {
+            aBALL_mp_ripple++;
+        }
+    } else {
+        aBALL_mp_ripple = 0;
+    }
+    Common_Set(ball_pos, actor->world.position);
+}
+
+// TRUE while another game's newer kick moves the ball; the local player's own kick takes it back
+static int aBALL_mp_follow(BALL_ACTOR* ball, GAME* game) {
+    ACTOR* actor = (ACTOR*)ball;
+    GAME_PLAY* play = (GAME_PLAY*)game;
+    mp_ball_t b;
+    int slot;
+    unsigned int age_ms;
+
+    if (!mp_ball_remote(&b, &slot, &age_ms)) {
+        // the mover went quiet (a menu, a lost line): this game takes the ball on from where it is
+        if (aBALL_mp_heard_ok) {
+            aBALL_mp_claim();
+        }
+        aBALL_mp_heard_ok = FALSE;
+        return FALSE;
+    }
+    if (aBALL_mp_older(b.kick_ms, aBALL_mp_mine_ms) || (b.kick_ms == aBALL_mp_mine_ms && slot > mp_lobby_self_slot())) {
+        aBALL_mp_heard_ok = FALSE;
+        return FALSE;
+    }
+    if ((ClObj_DID_COLLIDE(ball->ball_pipe.collision_obj) &&
+         aBALL_mp_local_kicker(ball->ball_pipe.collision_obj.collided_actor, game)) ||
+        (ball->state_flags & (aBALL_STATE_PLAYER_HIT_SCOOP | aBALL_STATE_PLAYER_HIT_AXE))) {
+        // this frame's physics plays the kick out from where the mover had it
+        aBALL_mp_claim();
+        aBALL_mp_heard_ok = FALSE;
+        return FALSE;
+    }
+    aBALL_mp_apply(ball, game, &b, age_ms);
+    if (ball->unk20C <= 0) {
+        ball->collider = NULL;
+    } else {
+        ball->unk20C--;
+    }
+    ball->ball_pipe.collision_obj.collision_flags0 &= ~ClObj_FLAG_COLLIDED;
+    CollisionCheck_Uty_ActorWorldPosSetPipeC(actor, &ball->ball_pipe);
+    CollisionCheck_setOC(game, &play->collision_check, &ball->ball_pipe.collision_obj);
+    aBALL_calc_axis(actor);
+    return TRUE;
+}
+#endif
+
 static void aBALL_actor_move(ACTOR* actor, GAME* game) {
     BALL_ACTOR* ball = (BALL_ACTOR*)actor;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
     aBALL_House_Tree_Rev_Check(ball);
+#ifdef VITA_MP
+    if (aBALL_mp_follow(ball, game)) {
+        return;
+    }
+#endif
 
     if (!(actor->state_bitfield & ACTOR_STATE_NO_CULL)) {
         if (actor->bg_collision_check.result.is_in_water || (ball->state_flags & aBALL_STATE_IN_HOLE)) {
@@ -756,7 +1029,15 @@ static void aBALL_actor_move(ACTOR* actor, GAME* game) {
     CollisionCheck_Uty_ActorWorldPosSetPipeC(&ball->actor_class, &ball->ball_pipe);
     CollisionCheck_setOC(game, &play->collision_check, &ball->ball_pipe.collision_obj);
     aBALL_calc_axis(actor);
+#ifdef VITA_MP
+    if (ball->state_flags & (aBALL_STATE_PLAYER_HIT_SCOOP | aBALL_STATE_PLAYER_HIT_AXE)) {
+        aBALL_mp_claim();
+    }
+#endif
     aBALL_status_check(actor, game);
+#ifdef VITA_MP
+    aBALL_mp_report(ball);
+#endif
 }
 
 static void aBALL_actor_draw(ACTOR* actor, GAME* game) {

@@ -53,7 +53,12 @@ static void aHN0_talk_stop_player(HATUMODE_NPC0_ACTOR* hatumode_npc0, GAME_PLAY*
 
 static void aHN0_talk_saisen_suru(HATUMODE_NPC0_ACTOR* hatumode_npc0, GAME_PLAY* play) {
     if (mMsg_CHECK_MAINNORMALCONTINUE()) {
+#ifdef VITA_MP
+        // the line is another screen's (its player is at the shrine): this player can't step in now
+        if (mChoice_GET_CHOSENUM() == mChoice_CHOICE0 && !pc_mp_ev_follows(1)) {
+#else
         if (mChoice_GET_CHOSENUM() == mChoice_CHOICE0) {
+#endif
             aHN0_change_talk_proc(hatumode_npc0, aHN0_TALK_STOP_PLAYER);
             mMsg_SET_CONTINUE_MSG_NUM(hatumode_npc0->base_msg + 1);
             hatumode_npc0->next_think_idx = 0x22;

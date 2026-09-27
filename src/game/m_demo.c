@@ -7,6 +7,9 @@
 #include "m_bgm.h"
 #include "m_event.h"
 #include "_mem.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 /* Z-X */
 static f32 direct_vector[mDemo_DIRECT_NUM][2] = { { -1.0f, 0.0f },      { -F_SQRT2, F_SQRT2 }, { 0.0f, 1.0f },
@@ -849,6 +852,10 @@ static int choice_demo() {
     if (request_idx != -1) {
         memcpy(&demo->current, &demo->request[request_idx], sizeof(mDemo_Request_c));
         (*default_set_func[demo->current.type])();
+#ifdef VITA_MP
+        // a talk's before-picture comes ahead of its set-up callback, which may already write the save
+        mp_npc_talk_opening();
+#endif
 
         if (demo->current.proc != NULL) {
             (*demo->current.proc)(demo->current.actor);

@@ -6,6 +6,9 @@
 #include "m_private.h"
 #include "m_event.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 int fuusen_DEBUG_mode_flag;
 
@@ -57,6 +60,13 @@ extern void Balloon_move(GAME_PLAY* play) {
   if (mEv_CheckFirstIntro()) {
     return;
   }
+
+#ifdef VITA_MP
+  // the town's balloons are rolled by the game flying them for everyone
+  if (mp_cr_balloon_elsewhere()) {
+    return;
+  }
+#endif
 
   switch (Common_Get(balloon_state)) {
     case Balloon_STATE_DEAD:

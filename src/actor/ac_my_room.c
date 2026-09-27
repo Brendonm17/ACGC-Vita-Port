@@ -18,6 +18,15 @@
 #include "m_mark_room.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#ifdef VITA_MP
+#include "m_demo.h"
+#include "m_museum_display.h"
+#include "m_submenu.h"
+#include "sys_math3d.h"
+#endif
+#endif
 
 enum {
     aMR_ICON_LEAF,
@@ -141,6 +150,151 @@ typedef struct my_room_work_s {
 } aMR_work_c;
 
 static aMR_work_c l_aMR_work;
+
+#ifdef VITA_MP
+// another player's hand on the furniture in this room: storage it opened, moves glided into place
+#define aMR_MP_FTR_MAX 256
+
+static u8 aMR_mp_remote_demo[aMR_MP_FTR_MAX];
+static u8 aMR_mp_rsv_remote[16]; // a reserved birth another screen asked for
+static s16 aMR_mp_glide_left[aMR_MP_FTR_MAX];
+static xyz_t aMR_mp_glide_to[aMR_MP_FTR_MAX];
+static int aMR_mp_replaying;
+static u8 aMR_mp_fossil_bit[mMmd_FOSSIL_BIT_NUM]; // the fossil record this room's exhibits were laid out from
+// the island's cottage shared in a session: the room follows its cells, logic at once and drawing easing in
+static u16 aMR_mp_shadow[mCoBG_LAYER_NUM * UT_TOTAL_NUM]; // the cells as the room last followed them
+static int aMR_mp_retry;                 // something had to wait: look again shortly
+static int aMR_mp_retry_wait;
+static u8 aMR_mp_quiet[aMR_MP_FTR_MAX];  // coming or going by another player's hand: nothing of this player's
+static xyz_t aMR_mp_vis[aMR_MP_FTR_MAX]; // drawn this far from where it now stands, easing in
+static s16 aMR_mp_vis_rot[aMR_MP_FTR_MAX];
+static xyz_t aMR_mp_hint[aMR_MP_FTR_MAX];    // another player's push or turn under way: the drawing leads there
+static s16 aMR_mp_hint_rot[aMR_MP_FTR_MAX];
+static s16 aMR_mp_hint_left[aMR_MP_FTR_MAX]; // frames of that glide to go
+static s16 aMR_mp_hint_hold[aMR_MP_FTR_MAX]; // ...then how long it waits there for the cells
+static u8 aMR_mp_demo_idle[aMR_MP_FTR_MAX];  // another player's storage open with nobody's hands on it: frames
+static u8 aMR_mp_session[UT_TOTAL_NUM / 8];  // every unit the furniture in the player's hands has stood on since
+static int aMR_mp_session_on;                // ...while it's in hand, or let go and still on the move
+static int aMR_mp_session_id;                // ...the piece in hand, -1 none
+static int aMR_mp_sounds;                    // sounds a pass of the room's catching up has made
+#define aMR_MP_HANIWA_WAIT 8
+// gyroids another screen switched on while this list was full
+static int aMR_mp_haniwa_wait[aMR_MP_HANIWA_WAIT] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+static int aMR_mp_nosave;                    // the cells already hold what the room is building
+
+static int aMR_PosType2FurniturePoccessUnitNo(int* ut_info, const xyz_t* pos, u8 type);
+#ifdef TARGET_VITA
+static int s_vita_nes_picker_ftrID;
+#endif
+static mActor_name_t aMR_GetSaveAngle(f32 angle, mActor_name_t item);
+static void aMR_mp_follow_start(void);
+static int aMR_mp_house_calm; // frames since the other screen last changed something in this house room
+static void aMR_mp_hint_move(FTR_ACTOR* ftr_actor, const u8* body);
+static void aMR_mp_hint_turn(FTR_ACTOR* ftr_actor, const u8* body);
+static int aMR_mp_sound_ok(void);
+
+// the island's cottage in a session: its rooms follow the cells, not each other's hands
+static int aMR_mp_cot_shared(void) {
+    return aMR_CLIP != NULL && aMR_CLIP->my_room_actor_p != NULL &&
+           ((MY_ROOM_ACTOR*)aMR_CLIP->my_room_actor_p)->scene == SCENE_COTTAGE_MY && mp_cot_shared();
+}
+
+static int aMR_mp_ut_in_use(int ut) {
+    return aMR_mp_cot_shared() && mp_cot_in_use(ut);
+}
+
+// a house's room in a session, where only its owner moves things
+static int aMR_mp_house(void) {
+    return mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_PLAYER0_ROOM && mp_active();
+}
+
+// another player has this piece in hand (the cottage), or sits or lies on it (a house)
+static int aMR_mp_in_use(FTR_ACTOR* ftr_actor) {
+    int cot = aMR_mp_cot_shared();
+    int ut[4];
+    int n;
+    int i;
+
+    if (!cot && !aMR_mp_house()) {
+        return FALSE;
+    }
+    n = aMR_PosType2FurniturePoccessUnitNo(ut, &ftr_actor->position, ftr_actor->shape_type);
+    for (i = 0; i < n; i++) {
+        if (cot ? mp_cot_in_use(ut[i]) : mp_player_on_unit(ut[i])) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// a unit furniture can't go to: another player has it in hand, or stands there
+static int aMR_mp_ut_blocked(int ut) {
+    if (aMR_mp_cot_shared()) {
+        return mp_cot_in_use(ut) || mp_cot_unit_taken(ut);
+    }
+    return aMR_mp_house() && mp_player_on_unit(ut);
+}
+
+static int aMR_mp_remote(FTR_ACTOR* ftr_actor) {
+    return ftr_actor->id >= 0 && ftr_actor->id < aMR_MP_FTR_MAX && aMR_mp_remote_demo[ftr_actor->id];
+}
+
+static void aMR_mp_put(u8* p, const void* v, int n) {
+    const u8* s = (const u8*)v;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        p[i] = s[i];
+    }
+}
+
+static void aMR_mp_get(void* v, const u8* p, int n) {
+    u8* d = (u8*)v;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        d[i] = p[i];
+    }
+}
+
+// the local player did something to this furniture: the other screens in the room do it too
+static void aMR_mp_send(int kind, FTR_ACTOR* ftr_actor, const void* extra, int extra_len) {
+    u8 body[48];
+    s16 id = (s16)ftr_actor->id;
+
+    // (a shared cottage's rooms take furniture's comings and goings from its cells; a move only leads the drawing)
+    if (aMR_mp_replaying || extra_len > 34 ||
+        ((kind == MP_VFX_FTR_BIRTH || kind == MP_VFX_FTR_BYE) && aMR_mp_cot_shared())) {
+        return;
+    }
+    body[0] = (u8)kind;
+    aMR_mp_put(body + 1, &id, 2);
+    aMR_mp_put(body + 3, &ftr_actor->name, 2);
+    aMR_mp_put(body + 5, &ftr_actor->position.x, 4);
+    aMR_mp_put(body + 9, &ftr_actor->position.z, 4);
+    if (extra_len > 0) {
+        aMR_mp_put(body + 13, extra, extra_len);
+    }
+    mp_vfx_send(body, 13 + extra_len);
+}
+
+// how a stereo's music changed: a record put in or swapped, a switch by hand, or the music box taking its record
+enum { aMR_MP_REC_PUT, aMR_MP_REC_HAND, aMR_MP_REC_GONE };
+
+static void aMR_mp_send_record(FTR_ACTOR* ftr_actor, int how) {
+    u8 extra[4];
+
+    extra[0] = (u8)(ftr_actor->switch_bit == TRUE);
+    extra[1] = (u8)how;
+    aMR_mp_put(extra + 2, &ftr_actor->items[0], 2);
+    aMR_mp_send(MP_VFX_FTR_RECORD, ftr_actor, extra, 4);
+}
+#endif
+#ifndef VITA_MP
+#define aMR_mp_in_use(ftr_actor) FALSE
+#define aMR_mp_ut_in_use(ut) FALSE
+#define aMR_mp_ut_blocked(ut) FALSE
+#endif
 static u8 l_bank_index_table[FTR_NUM];
 static u8* l_bank_address_table[aMR_FTR_BANK_NUM];
 
@@ -900,9 +1054,32 @@ static int aMR_HaniwaOffReport(ACTOR* actorx, int ftr_idx) {
     int* haniwa_on_table_p = my_room->haniwa_on_table;
     int i;
 
+#ifdef VITA_MP
+    for (i = 0; i < aMR_MP_HANIWA_WAIT; i++) {
+        if (ftr_idx == aMR_mp_haniwa_wait[i]) {
+            for (; i < aMR_MP_HANIWA_WAIT - 1; i++) {
+                aMR_mp_haniwa_wait[i] = aMR_mp_haniwa_wait[i + 1];
+            }
+            aMR_mp_haniwa_wait[aMR_MP_HANIWA_WAIT - 1] = -1;
+            return TRUE;
+        }
+    }
+#endif
     for (i = 0; i < aMR_HANIWA_ON_TABLE_NUM; i++) {
         if (*haniwa_on_table_p == ftr_idx) {
             aMR_TidyHaniwaOnTable(actorx, i);
+#ifdef VITA_MP
+            // (the first switched on elsewhere while the list was full takes the place)
+            if (aMR_mp_haniwa_wait[0] >= 0) {
+                int w;
+
+                my_room->haniwa_on_table[aMR_HANIWA_ON_TABLE_NUM - 1] = aMR_mp_haniwa_wait[0];
+                for (w = 0; w < aMR_MP_HANIWA_WAIT - 1; w++) {
+                    aMR_mp_haniwa_wait[w] = aMR_mp_haniwa_wait[w + 1];
+                }
+                aMR_mp_haniwa_wait[aMR_MP_HANIWA_WAIT - 1] = -1;
+            }
+#endif
             return TRUE;
         }
 
@@ -926,6 +1103,34 @@ static void aMR_HaniwaSwitchOn(ACTOR* actorx, FTR_ACTOR* ftr_actor) {
     if (free_idx == -1) {
         int ftr_id = haniwa_on_table_p[0];
 
+#ifdef VITA_MP
+        // (another screen's switch: that screen chose which one goes off, and says so)
+        if (aMR_mp_replaying) {
+            ftr_actor->switch_changed_flag = TRUE;
+            ftr_actor->switch_bit = TRUE;
+            {
+                int w;
+
+                for (w = 0; w < aMR_MP_HANIWA_WAIT && aMR_mp_haniwa_wait[w] >= 0; w++) {
+                }
+                // (the longest waiting never heard its turn off: it goes off now)
+                if (w == aMR_MP_HANIWA_WAIT) {
+                    FTR_ACTOR* old = l_aMR_work.ftr_actor_list + aMR_mp_haniwa_wait[0];
+
+                    if (old->switch_bit && aFTR_CHECK_INTERACTION(aMR_GetFurnitureProfile(old->name)->interaction_type,
+                                                                  aFTR_INTERACTION_TYPE_HANIWA)) {
+                        old->switch_changed_flag = TRUE;
+                        old->switch_bit = FALSE;
+                    }
+                    for (w = 0; w < aMR_MP_HANIWA_WAIT - 1; w++) {
+                        aMR_mp_haniwa_wait[w] = aMR_mp_haniwa_wait[w + 1];
+                    }
+                }
+                aMR_mp_haniwa_wait[w] = ftr_actor->id;
+            }
+            return;
+        }
+#endif
         if (ftr_id >= 0) {
             FTR_ACTOR* target_ftr_actor = l_aMR_work.ftr_actor_list + ftr_id;
 
@@ -933,6 +1138,18 @@ static void aMR_HaniwaSwitchOn(ACTOR* actorx, FTR_ACTOR* ftr_actor) {
             target_ftr_actor->switch_changed_flag = TRUE;
             target_ftr_actor->switch_bit = FALSE;
             aMR_HaniwaOffReport(actorx, target_ftr_actor->id);
+#ifdef VITA_MP
+            // (ones switched on elsewhere took the places freed: the next oldest make room)
+            while (haniwa_on_table_p[aMR_HANIWA_ON_TABLE_NUM - 1] != -1 && haniwa_on_table_p[0] >= 0) {
+                u8 off = FALSE;
+
+                target_ftr_actor = l_aMR_work.ftr_actor_list + haniwa_on_table_p[0];
+                target_ftr_actor->switch_changed_flag = TRUE;
+                target_ftr_actor->switch_bit = FALSE;
+                aMR_HaniwaOffReport(actorx, target_ftr_actor->id);
+                aMR_mp_send(MP_VFX_FTR_SWITCH, target_ftr_actor, &off, 1);
+            }
+#endif
 
             /* Turn on new one */
             ftr_actor->switch_changed_flag = TRUE;
@@ -1231,6 +1448,19 @@ static void aMR_FurnitureCt(FTR_ACTOR* ftr_actor, GAME* game, int ut_x, int ut_z
     xyz_t pos;
 
     bzero(ftr_actor, sizeof(FTR_ACTOR));
+#ifdef VITA_MP
+    // (a new piece in this slot inherits nothing of the last one's)
+    if (ftr_idx >= 0 && ftr_idx < aMR_MP_FTR_MAX) {
+        aMR_mp_remote_demo[ftr_idx] = FALSE;
+        aMR_mp_glide_left[ftr_idx] = 0;
+        aMR_mp_quiet[ftr_idx] = FALSE;
+        aMR_mp_vis[ftr_idx].x = aMR_mp_vis[ftr_idx].y = aMR_mp_vis[ftr_idx].z = 0.0f;
+        aMR_mp_vis_rot[ftr_idx] = 0;
+        aMR_mp_hint_left[ftr_idx] = 0;
+        aMR_mp_hint_hold[ftr_idx] = 0;
+        aMR_mp_demo_idle[ftr_idx] = 0;
+    }
+#endif
     ftr_actor->ctr_type = aFTR_CTR_TYPE_GAME_PLAY;
     ftr_actor->base_position = xyz0;
     ftr_actor->layer = layer;
@@ -1643,7 +1873,12 @@ extern void aMR_SaveWaltzTempo2(void) {
     if (aMR_CLIP != NULL) {
         ACTOR* actorx = aMR_CLIP->my_room_actor_p;
 
+#ifdef VITA_MP
+        // (a visitor's go to the host with the cottage's lamps)
+        if (actorx != NULL && !(aMR_mp_cot_shared() && mp_is_guest())) {
+#else
         if (actorx != NULL) {
+#endif
             MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
 
             aMR_SaveWaltzTempo(my_room);
@@ -1653,6 +1888,12 @@ extern void aMR_SaveWaltzTempo2(void) {
 }
 
 static int aMR_CheckRoomOwner(u32 player_no, MY_ROOM_ACTOR* my_room) {
+#ifdef VITA_MP
+    // the island's cottage is shared: whether visitors rearrange it is the host's say
+    if (my_room->scene == SCENE_COTTAGE_MY && !mp_cot_owner()) {
+        return FALSE;
+    }
+#endif
     if (Common_Get(field_type) == mFI_FIELDTYPE2_PLAYER_ROOM || my_room->scene == SCENE_COTTAGE_MY) {
         return TRUE;
     }
@@ -1787,6 +2028,11 @@ static void My_Room_Actor_ct(ACTOR* actorx, GAME* game) {
 
     bzero(&l_aMR_work, sizeof(l_aMR_work));
     my_room->scene = Save_Get(scene_no);
+#ifdef VITA_MP
+    if (my_room->scene == SCENE_COTTAGE_MY) {
+        mp_cot_room_enter();
+    }
+#endif
     aMR_SetClip(actorx);
     aMR_InitFurnitureWork();
     aMR_SetMelodyData(my_room->melody);
@@ -1801,6 +2047,30 @@ static void My_Room_Actor_ct(ACTOR* actorx, GAME* game) {
     aMR_InitHaniwaOnTable(actorx);
     my_room->state = 0;
     aMR_InitFurnitureBankTable();
+#ifdef VITA_MP
+    bzero(aMR_mp_remote_demo, sizeof(aMR_mp_remote_demo));
+    bzero(aMR_mp_glide_left, sizeof(aMR_mp_glide_left));
+    bzero(aMR_mp_quiet, sizeof(aMR_mp_quiet));
+    bzero(aMR_mp_vis, sizeof(aMR_mp_vis));
+    bzero(aMR_mp_vis_rot, sizeof(aMR_mp_vis_rot));
+    bzero(aMR_mp_hint_left, sizeof(aMR_mp_hint_left));
+    bzero(aMR_mp_hint_hold, sizeof(aMR_mp_hint_hold));
+    bzero(aMR_mp_session, sizeof(aMR_mp_session));
+    aMR_mp_session_on = FALSE;
+    aMR_mp_session_id = -1;
+    aMR_mp_nosave = FALSE;
+#ifdef TARGET_VITA
+    s_vita_nes_picker_ftrID = -1; // (a picker left open as the last room went holds nothing here)
+#endif
+    mem_copy(aMR_mp_fossil_bit, Save_Get(museum_display).fossil_bit, sizeof(aMR_mp_fossil_bit));
+    {
+        int w;
+
+        for (w = 0; w < aMR_MP_HANIWA_WAIT; w++) {
+            aMR_mp_haniwa_wait[w] = -1;
+        }
+    }
+#endif
     aMR_MakeFurnitureActor(actorx, play, mCoBG_LAYER0);
     aMR_MakeFurnitureActor(actorx, play, mCoBG_LAYER1);
     my_room->parent_ftr.ftrID = -1;
@@ -1816,12 +2086,19 @@ static void My_Room_Actor_ct(ACTOR* actorx, GAME* game) {
     my_room->bgm_info.reserve_flag = FALSE;
     my_room->bgm_info.md_no = -1;
     my_room->bgm_info.last_md_no = -1;
+#ifdef VITA_MP
+    // (a shared cottage's save keeps its lamps while its rooms are up, for players coming in)
+    if (!aMR_mp_cot_shared())
+#endif
     aMR_ClearSwitchSaveData(my_room);
     aMR_OneMDFurnitureSwitchOn();
     aMR_SetMDIslandNPC();
     my_room->emu_info.request_flag = FALSE;
     my_room->emu_info.explaination_given_flag = FALSE;
     mCkRh_InitCanLookGokiCount();
+#ifdef VITA_MP
+    aMR_mp_follow_start();
+#endif
 }
 
 // Part 3
@@ -1859,10 +2136,135 @@ static void aMR_FreeHeapArea(ACTOR* actorx) {
     }
 }
 
+#ifdef VITA_MP
+// the unit a piece's item sits in, as aMR_SetFurniture2FG writes it
+static int aMR_mp_main_ut(FTR_ACTOR* ftr_actor) {
+    xyz_t base = ftr_actor->base_position;
+    int ut_x;
+    int ut_z;
+
+    if (ftr_actor->shape_type == aFTR_SHAPE_TYPEA || ftr_actor->shape_type == aFTR_SHAPE_TYPEC) {
+        int ut[4];
+
+        return aMR_PosType2FurniturePoccessUnitNo(ut, &ftr_actor->position, ftr_actor->shape_type) > 0 ? ut[0] : -1;
+    }
+    sMath_RotateY(&base, DEG2RAD(ftr_actor->angle_y_target));
+    ut_x = (int)((ftr_actor->position.x + base.x) / mFI_UT_WORLDSIZE_X_F);
+    ut_z = (int)((ftr_actor->position.z + base.z) / mFI_UT_WORLDSIZE_Z_F);
+    return (ut_x >= 0 && ut_x < UT_X_NUM && ut_z >= 0 && ut_z < UT_Z_NUM) ? ut_x + ut_z * UT_X_NUM : -1;
+}
+
+static int aMR_mp_is_storage(FTR_ACTOR* ftr_actor) {
+    aFTR_PROFILE* profile = aMR_GetFurnitureProfile(ftr_actor->name);
+
+    return profile != NULL && aFTR_IS_STORAGE(profile);
+}
+
+// a piece's things back in the save: over its main unit, and nothing over the rest of its units
+static void aMR_mp_keep_canon(FTR_ACTOR* ftr_actor) {
+    int ut[4];
+    int n;
+    int main_ut;
+    int layer;
+    int idx;
+    int i;
+
+    if (!aMR_mp_is_storage(ftr_actor) || ftr_actor->state == aFTR_STATE_BYE || ftr_actor->state == aFTR_STATE_DEATH) {
+        return;
+    }
+    n = aMR_PosType2FurniturePoccessUnitNo(ut, &ftr_actor->position, ftr_actor->shape_type);
+    main_ut = aMR_mp_main_ut(ftr_actor);
+    for (layer = ftr_actor->layer + 1, idx = 0; layer < mCoBG_LAYER_NUM; layer++, idx++) {
+        mActor_name_t* fg_p = aMR_GetLayerTopFg(layer);
+
+        if (fg_p == NULL) {
+            continue;
+        }
+        for (i = 0; i < n; i++) {
+            fg_p[ut[i]] = EMPTY_NO;
+        }
+        if (main_ut >= 0) {
+            fg_p[main_ut] = ftr_actor->items[idx];
+        }
+        ftr_actor->items[idx] = EMPTY_NO;
+    }
+}
+
+// ...and as the capture takes them while the room is up
+static void aMR_mp_report_canon(FTR_ACTOR* ftr_actor, void (*cb)(unsigned int save_off, unsigned short name, void* arg),
+                                void* arg) {
+    const u8* base = (const u8*)&common_data.save.save;
+    int ut[4];
+    int n;
+    int main_ut;
+    int layer;
+    int idx;
+    int i;
+
+    if (ftr_actor->state == aFTR_STATE_BYE || ftr_actor->state == aFTR_STATE_DEATH || !aMR_mp_is_storage(ftr_actor) ||
+        (main_ut = aMR_mp_main_ut(ftr_actor)) < 0) {
+        return;
+    }
+    n = aMR_PosType2FurniturePoccessUnitNo(ut, &ftr_actor->position, ftr_actor->shape_type);
+    for (layer = ftr_actor->layer + 1, idx = 0; layer < mCoBG_LAYER_NUM; layer++, idx++) {
+        mActor_name_t* fg_p = aMR_GetLayerTopFg(layer);
+
+        if (fg_p == NULL) {
+            continue;
+        }
+        for (i = 0; i < n; i++) {
+            if (ut[i] != main_ut) {
+                cb((unsigned int)((const u8*)&fg_p[ut[i]] - base), EMPTY_NO, arg);
+            }
+        }
+        cb((unsigned int)((const u8*)&fg_p[main_ut] - base), ftr_actor->items[idx], arg);
+    }
+}
+
+// the piece is still in the cells where it stands
+static int aMR_mp_ftr_in_cells(FTR_ACTOR* ftr_actor) {
+    mActor_name_t* fg_p = aMR_GetLayerTopFg(ftr_actor->layer);
+    int main_ut = aMR_mp_main_ut(ftr_actor);
+
+    return fg_p != NULL && main_ut >= 0 && ftr_actor->state != aFTR_STATE_BYE &&
+           fg_p[main_ut] ==
+               aMR_GetSaveAngle(ftr_actor->angle_y_target, mRmTp_FtrIdx2FtrItemNo(ftr_actor->name, mRmTp_DIRECT_SOUTH));
+}
+
+// a pick-up that found its piece gone: the pocket gives back what it just took (from the slot it went to)
+static void aMR_mp_unpocket(FTR_ACTOR* ftr_actor) {
+    mActor_name_t item =
+        mRmTp_FtrItemNo2Item1ItemNo(mRmTp_FtrIdx2FtrItemNo(ftr_actor->name, mRmTp_DIRECT_SOUTH), TRUE);
+    PLAYER_ACTOR* player = GET_PLAYER_ACTOR((GAME_PLAY*)gamePT);
+    Private_c* priv = Now_Private;
+    int slot = -1;
+
+    if (priv == NULL || ITEM_IS_MYMANNIQUIN(item) || ITEM_IS_MYUMBRELLA(item)) {
+        return;
+    }
+    if (player != NULL) {
+        slot = player->requested_main_index_data.pickup_furniture.inv_slot;
+    }
+    if (slot < 0 || slot >= mPr_POCKETS_SLOT_COUNT || priv->inventory.pockets[slot] != item) {
+        slot = mPr_GetPossessionItemIdxWithCond(priv, item, mPr_ITEM_COND_NORMAL);
+    }
+    if (slot >= 0) {
+        mPr_SetPossessionItem(priv, slot, EMPTY_NO, mPr_ITEM_COND_NORMAL);
+    }
+}
+#endif
+
 static void aMR_KeepItem2Fg(FTR_ACTOR* ftr_actor) {
     int idx = 0;
     int i;
 
+#ifdef VITA_MP
+    // a shared cottage keeps a piece's things over its main unit, where every screen looks for them
+    if (aMR_mp_cot_shared()) {
+        aMR_mp_keep_canon(ftr_actor);
+        return;
+    }
+#endif
     for (i = ftr_actor->layer + 1; i < mCoBG_LAYER_NUM; i++) {
         if (ftr_actor->items[idx] != EMPTY_NO) {
             mActor_name_t* fg_p = aMR_GetLayerTopFg(i);
@@ -1881,6 +2283,115 @@ static void aMR_KeepItem2Fg(FTR_ACTOR* ftr_actor) {
         idx++;
     }
 }
+
+#ifdef TARGET_VITA
+// what the room's furniture holds right now (a dresser's contents, a stereo's record), as leaving puts it back
+void aMR_pc_stored_cells(void (*cb)(unsigned int save_off, unsigned short name, void* arg), void* arg) {
+    const u8* base = (const u8*)&common_data.save.save;
+    FTR_ACTOR* ftr_actor = l_aMR_work.ftr_actor_list;
+    u8* used = l_aMR_work.used_list;
+    int i;
+
+    if (aMR_CLIP == NULL || aMR_CLIP->my_room_actor_p == NULL || ftr_actor == NULL || used == NULL) {
+        return;
+    }
+    for (i = 0; i < l_aMR_work.list_size; i++, ftr_actor++, used++) {
+        int idx = 0;
+        int layer;
+        int ut_x;
+        int ut_z;
+
+#ifdef VITA_MP
+        if (*used && aMR_mp_cot_shared()) {
+            aMR_mp_report_canon(ftr_actor, cb, arg);
+            continue;
+        }
+#endif
+        if (!*used || !aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type)) {
+            continue;
+        }
+        for (layer = ftr_actor->layer + 1; layer < mCoBG_LAYER_NUM; layer++, idx++) {
+            mActor_name_t* fg_p = aMR_GetLayerTopFg(layer);
+            const u8* cell;
+
+            if (ftr_actor->items[idx] == EMPTY_NO || fg_p == NULL) {
+                continue;
+            }
+            cell = (const u8*)&fg_p[ut_x + ut_z * UT_X_NUM];
+            if (cell >= base && cell < base + sizeof(Save_t)) {
+                cb((unsigned int)(cell - base), ftr_actor->items[idx], arg);
+            }
+        }
+    }
+}
+
+// ...and which lamps and the like are on, as leaving saves it (the room clears that from the save while it's up)
+void aMR_pc_switch_tables(void (*cb)(unsigned int save_off, unsigned long long bits, void* arg), void* arg) {
+    const u8* base = (const u8*)&common_data.save.save;
+    MY_ROOM_ACTOR* my_room;
+    int layer;
+
+    if (aMR_CLIP == NULL || (my_room = (MY_ROOM_ACTOR*)aMR_CLIP->my_room_actor_p) == NULL ||
+        l_aMR_work.ftr_actor_list == NULL || l_aMR_work.used_list == NULL) {
+        return;
+    }
+    for (layer = mCoBG_LAYER0; layer < mCoBG_LAYER2; layer++) {
+        u64* table = aMR_GetBitSwitchTable(layer, my_room);
+        mActor_name_t* fg_p = aMR_GetLayerTopFg(layer);
+        u64 bits = 0;
+        int ut_x;
+        int ut_z;
+
+        if (table == NULL || fg_p == NULL || (const u8*)table < base || (const u8*)table >= base + sizeof(Save_t)) {
+            continue;
+        }
+        for (ut_z = aMR_MIN_BOUND; ut_z <= aMR_MAX_BOUND; ut_z++) {
+            for (ut_x = aMR_MIN_BOUND; ut_x <= aMR_MAX_BOUND; ut_x++) {
+                aMR_SaveOneFtrSwitchData(fg_p[ut_x + ut_z * UT_X_NUM], ut_x, ut_z, layer, &bits);
+            }
+        }
+        cb((unsigned int)((const u8*)table - base), bits, arg);
+    }
+}
+#endif
+
+#ifdef VITA_MP
+// that save cell is where a stereo in this room keeps its record: no item of its own (the music box has the record)
+int aMR_mp_music_slot(unsigned int save_off) {
+    const u8* base = (const u8*)&common_data.save.save;
+    FTR_ACTOR* ftr_actor = l_aMR_work.ftr_actor_list;
+    u8* used = l_aMR_work.used_list;
+    int i;
+
+    if (aMR_CLIP == NULL || aMR_CLIP->my_room_actor_p == NULL || ftr_actor == NULL || used == NULL) {
+        return FALSE;
+    }
+    for (i = 0; i < l_aMR_work.list_size; i++, ftr_actor++, used++) {
+        aFTR_PROFILE* profile;
+        mActor_name_t* fg_p;
+        int ut_x;
+        int ut_z;
+        int ut;
+
+        if (!*used || ftr_actor->state == aFTR_STATE_BYE || (profile = aMR_GetFurnitureProfile(ftr_actor->name)) == NULL ||
+            !aFTR_CHECK_INTERACTION(profile->interaction_type, aFTR_INTERACTION_TYPE_MUSIC_DISK) ||
+            ftr_actor->layer + 1 >= mCoBG_LAYER_NUM || (fg_p = aMR_GetLayerTopFg(ftr_actor->layer + 1)) == NULL) {
+            continue;
+        }
+        if (aMR_mp_cot_shared()) {
+            ut = aMR_mp_main_ut(ftr_actor);
+        } else if (aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type)) {
+            ut = ut_x + ut_z * UT_X_NUM;
+        } else {
+            continue;
+        }
+        if (ut >= 0 && (const u8*)&fg_p[ut] == base + save_off) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+#endif
 
 static void aMR_AllFurnitureDestruct(ACTOR* actorx, GAME* game) {
     FTR_ACTOR* ftr_actor = l_aMR_work.ftr_actor_list;
@@ -1993,6 +2504,13 @@ static int aMR_SetLeaf(const xyz_t* pos, f32 scale) {
 static void My_Room_Actor_dt(ACTOR* actorx, GAME* game) {
     MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    // (a visitor's lamps go to the host as it leaves; its copy of the town keeps nothing of them)
+    if (my_room->scene == SCENE_COTTAGE_MY) {
+        mp_cot_room_leave();
+    }
+    if (!(aMR_mp_cot_shared() && mp_is_guest()))
+#endif
     aMR_SaveSwitchData(my_room);
     aMR_AllFurnitureDestruct(actorx, game);
     aMR_FreeHeapArea(actorx);
@@ -2025,9 +2543,1487 @@ static void My_Room_Actor_dt(ACTOR* actorx, GAME* game) {
 static int s_vita_nes_picker_ftrID = -1;
 #endif
 
+#ifdef VITA_MP
+// a stand-in leaves at once and quietly, the way the room drops furniture on leaving (no pick-up puff or sound)
+static void aMR_mp_fossil_drop(ACTOR* actorx, int ftrID) {
+    FTR_ACTOR* ftr_actor = &l_aMR_work.ftr_actor_list[ftrID];
+    aFTR_PROFILE* profile = aMR_GetFurnitureProfile(ftr_actor->name);
+    int ut_x;
+    int ut_z;
+
+    aMR_SetFurniture2FG(ftr_actor, ftr_actor->position, FALSE);
+    if (aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type)) {
+        aMR_SetInfoFurnitureTable(ftr_actor->shape_type, ut_x + ut_z * UT_X_NUM, aMR_NO_FTR_ID, ftr_actor->layer);
+    }
+    mCoBG_CrossOffMoveBg(ftr_actor->move_bg_idx);
+    aMR_MinusWeight(actorx, ftr_actor);
+    if (profile != NULL && profile->vtable != NULL && profile->vtable->dt_proc != NULL) {
+        profile->vtable->dt_proc(ftr_actor, aMR_FtrNo2BankAddress(ftr_actor->name));
+    }
+
+    l_aMR_work.used_list[ftrID] = FALSE;
+    aMR_DeleteFurnitureBank(ftr_actor->name);
+    aMR_ClearBitSwitch(ftr_actor);
+    if (ftrID < aMR_MP_FTR_MAX) {
+        aMR_mp_remote_demo[ftrID] = FALSE;
+        aMR_mp_glide_left[ftrID] = 0;
+    }
+}
+
+// a part donated while this screen is in the fossil room goes up in its stand-in's place, as entering would show it
+static void aMR_mp_fossil_refresh(ACTOR* actorx, GAME* game) {
+    MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
+    GAME_PLAY* play = (GAME_PLAY*)game;
+    int i;
+
+    if (my_room->scene != SCENE_MUSEUM_ROOM_FOSSIL || !mp_active() ||
+        mem_cmp(aMR_mp_fossil_bit, Save_Get(museum_display).fossil_bit, sizeof(aMR_mp_fossil_bit))) {
+        return;
+    }
+
+    // not under a talk, a door or a menu, nor mid furniture action: the old record keeps it pending
+    if (mDemo_CheckDemo() || my_room->state != 0 || play->submenu.process_status != mSM_PROCESS_WAIT ||
+        l_aMR_work.ftr_actor_list == NULL || l_aMR_work.used_list == NULL) {
+        return;
+    }
+
+    mem_copy(aMR_mp_fossil_bit, Save_Get(museum_display).fossil_bit, sizeof(aMR_mp_fossil_bit));
+    aMR_mp_replaying = TRUE; // each screen makes this swap itself: nothing goes out
+    for (i = 0; i < mMmd_FOSSIL_NUM; i++) {
+        mActor_name_t item;
+        int ut_x;
+        int ut_z;
+        int ftrID;
+
+        if (mMmd_FossilInfo(i) == mMmd_DONATOR_NONE || !mMmd_mp_fossil_unit(i, &ut_x, &ut_z, &item)) {
+            continue;
+        }
+
+        if (aMR_UnitNum2FtrItemNoFtrID(NULL, &ftrID, ut_x, ut_z, mCoBG_LAYER0) && l_aMR_work.used_list[ftrID]) {
+            if (l_aMR_work.ftr_actor_list[ftrID].name == mRmTp_FtrItemNo2FtrIdx(item)) {
+                continue; // up already
+            }
+
+            aMR_mp_fossil_drop(actorx, ftrID);
+        }
+
+        aMR_MakeOneFurniture(actorx, item, game, ut_x, ut_z, mCoBG_LAYER0);
+    }
+    aMR_mp_replaying = FALSE;
+}
+#endif
+
 #include "../src/actor/ac_my_room_melody.c_inc"
 #include "../src/actor/ac_my_room_move.c_inc"
 #include "../src/actor/ac_my_room_draw.c_inc"
+
+#ifdef VITA_MP
+// the same furniture on this screen: same slot and name, or the nearest of that name
+static FTR_ACTOR* aMR_mp_find(s16 id, u16 name, f32 x, f32 z) {
+    FTR_ACTOR* best = NULL;
+    f32 best_d = 60.0f * 60.0f;
+    int i;
+
+    if (l_aMR_work.ftr_actor_list == NULL || l_aMR_work.used_list == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < l_aMR_work.list_size; i++) {
+        FTR_ACTOR* ftr_actor = &l_aMR_work.ftr_actor_list[i];
+        f32 dx = ftr_actor->position.x - x;
+        f32 dz = ftr_actor->position.z - z;
+        f32 d;
+
+        if (!l_aMR_work.used_list[i] || ftr_actor->name != name || ftr_actor->state == aFTR_STATE_BYE) {
+            continue;
+        }
+        // (another player's hands still on it: that player's game has it where the drawing leads it)
+        if (i < aMR_MP_FTR_MAX && (aMR_mp_hint_left[i] > 0 || aMR_mp_hint_hold[i] > 0)) {
+            dx += aMR_mp_hint[i].x;
+            dz += aMR_mp_hint[i].z;
+        }
+        d = dx * dx + dz * dz;
+        if (i == id && d < best_d) {
+            return ftr_actor;
+        }
+        if (d < best_d) {
+            best_d = d;
+            best = ftr_actor;
+        }
+    }
+    return best;
+}
+
+// a stereo as another player left it: its record, and its music on or off
+static void aMR_mp_set_record(ACTOR* actorx, FTR_ACTOR* ftr_actor, int on, mActor_name_t record, int how) {
+    aFTR_PROFILE* profile = aMR_GetFurnitureProfile(ftr_actor->name);
+
+    if (profile == NULL || !aFTR_CHECK_INTERACTION(profile->interaction_type, aFTR_INTERACTION_TYPE_MUSIC_DISK)) {
+        return;
+    }
+    on = on && record >= ITM_MINIDISK_START && record < ITM_MINIDISK_END;
+    if (ftr_actor->items[0] == record && (ftr_actor->switch_bit == TRUE) == on) {
+        return;
+    }
+    ftr_actor->items[0] = record;
+    if (on) {
+        aMR_OneMDSwitchOn_TheOtherSwitchOff(ftr_actor);
+        aMR_ReserveBgm(actorx, BGM_MD0 + (record - ITM_MINIDISK_START), ftr_actor, how == aMR_MP_REC_HAND ? 30 : 0);
+        if (how == aMR_MP_REC_HAND) {
+            sAdo_OngenTrgStart(NA_SE_LIGHT_ON, &ftr_actor->position);
+        } else {
+            aMR_ChangeMDBgm(actorx, ftr_actor);
+        }
+        return;
+    }
+    if (ftr_actor->switch_bit == TRUE) {
+        ftr_actor->switch_bit = FALSE;
+        ftr_actor->switch_changed_flag = TRUE;
+        aMR_AllMDSwitchOff();
+        aMR_ReserveDefaultBgm(actorx, ftr_actor);
+        aMR_ChangeMDBgm(actorx, ftr_actor);
+    }
+    if (how == aMR_MP_REC_HAND) {
+        sAdo_OngenTrgStart(NA_SE_LIGHT_OFF, &ftr_actor->position);
+    } else if (how == aMR_MP_REC_GONE) {
+        sAdo_OngenTrgStart(0x17, &ftr_actor->position);
+    }
+}
+
+// host: another player switched a piece in a floor of a house this game isn't in: the floor keeps it, as its room
+// would have on leaving (the piece's own unit is the one naming it nearest where that screen had it)
+void aMR_mp_keep_switch(int scene, int field, const u8* body, int len) {
+    int floor_no = mFI_GetPlayerHouseFloorNo(scene);
+    mHm_flr_c* flr;
+    u64* table = NULL;
+    f32 best = 1e9f;
+    int shift = 0;
+    u16 name;
+    f32 x;
+    f32 z;
+    int layer;
+
+    if (mFI_GET_TYPE(field) != mFI_FIELD_PLAYER0_ROOM || floor_no < 0 || floor_no >= mHm_ROOM_NUM || len < 14) {
+        return;
+    }
+    flr = &Save_Get(homes[(field - mFI_FIELD_PLAYER0_ROOM) & 3]).floors[floor_no];
+    aMR_mp_get(&name, body + 3, 2);
+    aMR_mp_get(&x, body + 5, 4);
+    aMR_mp_get(&z, body + 9, 4);
+    for (layer = mCoBG_LAYER0; layer < mCoBG_LAYER2; layer++) {
+        mHm_lyr_c* lyr = &(&flr->layer_main)[layer];
+        int ut_x;
+        int ut_z;
+
+        for (ut_z = aMR_MIN_BOUND; ut_z <= aMR_MAX_BOUND; ut_z++) {
+            for (ut_x = aMR_MIN_BOUND; ut_x <= aMR_MAX_BOUND; ut_x++) {
+                mActor_name_t item = lyr->items[ut_z][ut_x];
+                f32 dx = (ut_x + 0.5f) * mFI_UT_WORLDSIZE_X_F - x;
+                f32 dz = (ut_z + 0.5f) * mFI_UT_WORLDSIZE_Z_F - z;
+
+                if (ITEM_IS_FTR(item) && mRmTp_FtrItemNo2FtrIdx(item) == name && dx * dx + dz * dz < best) {
+                    best = dx * dx + dz * dz;
+                    table = &lyr->ftr_switch;
+                    shift = (ut_x - 1 + (ut_z - 1) * 8) & 0x3F;
+                }
+            }
+        }
+    }
+    if (table != NULL) {
+        *table = body[13] ? (*table | (1ull << shift)) : (*table & ~(1ull << shift));
+    }
+}
+
+// a furniture slot neither in use nor waiting on a piece still to grow in
+static int aMR_mp_free_slot(MY_ROOM_ACTOR* my_room) {
+    int slot;
+    int k;
+
+    for (slot = 0; slot < l_aMR_work.list_size; slot++) {
+        if (l_aMR_work.used_list[slot]) {
+            continue;
+        }
+        for (k = 0; k < aMR_RSV_FTR_NUM; k++) {
+            if (my_room->rsv_ftr[k].exist_flag && my_room->rsv_ftr[k].free_no == slot) {
+                break;
+            }
+        }
+        if (k == aMR_RSV_FTR_NUM) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+// that piece already stands (or grows in) there: the room came up with it
+static int aMR_mp_birth_here(MY_ROOM_ACTOR* my_room, u16 ftr_no, int ut_x, int ut_z, int layer) {
+    FTR_ACTOR* ftr_actor = l_aMR_work.ftr_actor_list;
+    int i;
+
+    for (i = 0; i < aMR_RSV_FTR_NUM; i++) {
+        aMR_rsv_ftr_c* rsv = &my_room->rsv_ftr[i];
+
+        if (rsv->exist_flag && rsv->ftr_name == ftr_no && rsv->ut_x == ut_x && rsv->ut_z == ut_z && rsv->layer == layer) {
+            return TRUE;
+        }
+    }
+    for (i = 0; i < l_aMR_work.list_size; i++, ftr_actor++) {
+        int px;
+        int pz;
+
+        if (l_aMR_work.used_list[i] && ftr_actor->name == ftr_no && ftr_actor->layer == layer &&
+            ftr_actor->state != aFTR_STATE_BYE && ftr_actor->state != aFTR_STATE_DEATH &&
+            aMR_Wpos2PlaceNumber(&px, &pz, ftr_actor->position, ftr_actor->shape_type) && px == ut_x && pz == ut_z) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+int aMR_mp_replay(const u8* body, int len) {
+    ACTOR* my_room_actorx = (aMR_CLIP != NULL) ? aMR_CLIP->my_room_actor_p : NULL;
+    FTR_ACTOR* ftr_actor;
+    s16 id;
+    u16 name;
+    f32 x;
+    f32 z;
+    int idx;
+
+    aMR_mp_house_calm = 0;
+    if (my_room_actorx == NULL || len < 10) {
+        return TRUE;
+    }
+    // (a shared cottage's rooms take comings and goings from its cells; a move or turn only leads the drawing)
+    if (aMR_mp_cot_shared() && (body[0] == MP_VFX_FTR_BIRTH || body[0] == MP_VFX_FTR_BYE)) {
+        return TRUE;
+    }
+    if (body[0] == MP_VFX_FTR_BIRTH) {
+        MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)my_room_actorx;
+        u16 ftr_no;
+        u16 rotation;
+        int free_idx;
+        int ok;
+
+        aMR_mp_get(&ftr_no, body + 1, 2);
+        aMR_mp_get(&rotation, body + 5, 2);
+        if (ftr_no >= FTR_NUM || body[3] >= UT_X_NUM || body[4] >= UT_Z_NUM || rotation > 3 || body[7] > 3 ||
+            body[8] > mCoBG_LAYER1 || aMR_mp_birth_here(my_room, ftr_no, body[3], body[4], body[8])) {
+            return TRUE;
+        }
+        // (with every slot or reservation taken it waits for the pieces growing in now)
+        if ((free_idx = aMR_mp_free_slot(my_room)) < 0) {
+            return FALSE;
+        }
+        aMR_mp_replaying = TRUE;
+        ok = aMR_ReserveFurniture(gamePT, ftr_no, free_idx, body[3], body[4], rotation, body[7], body[8]);
+        aMR_mp_replaying = FALSE;
+        return ok;
+    }
+    if (len < 13) {
+        return TRUE;
+    }
+    aMR_mp_get(&id, body + 1, 2);
+    aMR_mp_get(&name, body + 3, 2);
+    aMR_mp_get(&x, body + 5, 4);
+    aMR_mp_get(&z, body + 9, 4);
+    ftr_actor = aMR_mp_find(id, name, x, z);
+    if (ftr_actor == NULL) {
+        return TRUE;
+    }
+    idx = ftr_actor - l_aMR_work.ftr_actor_list;
+    if (idx < 0 || idx >= aMR_MP_FTR_MAX) {
+        return TRUE;
+    }
+    switch (body[0]) {
+        case MP_VFX_FTR_SWITCH:
+            if (len >= 14 && ftr_actor->switch_bit != body[13]) {
+                aFTR_PROFILE* profile = aMR_GetFurnitureProfile(ftr_actor->name);
+
+                aMR_mp_replaying = TRUE;
+                aMR_FtrIdx2ChangeFtrSwitch_main(my_room_actorx, idx);
+                aMR_mp_replaying = FALSE;
+                // (the sounds the switching player's room made at the piece)
+                if (!aMR_mp_sound_ok()) {
+                } else if (ftr_actor->name == FTR_IKE_K_OTOME01) {
+                    sAdo_OngenTrgStart(NA_SE_166, &ftr_actor->position);
+                } else if (profile != NULL &&
+                           aFTR_CHECK_INTERACTION(profile->interaction_type, aFTR_INTERACTION_TYPE_TOGGLE)) {
+                    sAdo_OngenTrgStart(ftr_actor->switch_bit ? NA_SE_LIGHT_ON : NA_SE_LIGHT_OFF, &ftr_actor->position);
+                }
+            }
+            break;
+        case MP_VFX_FTR_RECORD:
+            if (len >= 17) {
+                mActor_name_t record;
+
+                aMR_mp_get(&record, body + 15, 2);
+                aMR_mp_replaying = TRUE;
+                aMR_mp_set_record(my_room_actorx, ftr_actor, body[13], record, body[14]);
+                aMR_mp_replaying = FALSE;
+            }
+            break;
+        case MP_VFX_FTR_OPEN:
+            if (ftr_actor->demo_status == 0) {
+                aMR_mp_remote_demo[idx] = TRUE;
+                ftr_actor->demo_status = 1;
+            }
+            break;
+        case MP_VFX_FTR_CLOSE:
+            if (aMR_mp_remote_demo[idx] && ftr_actor->demo_status >= 1 && ftr_actor->demo_status <= 4) {
+                ftr_actor->demo_status = 5;
+            }
+            break;
+        case MP_VFX_FTR_MOVE:
+            if (len >= 27 && aMR_mp_cot_shared()) {
+                aMR_mp_hint_move(ftr_actor, body);
+            } else if (len >= 27) {
+                s16 frames;
+
+                // (a push before it that hasn't finished here ends where it was going)
+                if (aMR_mp_glide_left[idx] > 0) {
+                    aMR_mp_glide_left[idx] = 0;
+                    ftr_actor->position = aMR_mp_glide_to[idx];
+                    aMR_mp_ride_end(my_room_actorx, ftr_actor);
+                }
+                aMR_mp_ride_start(my_room_actorx, ftr_actor);
+                aMR_mp_get(&aMR_mp_glide_to[idx], body + 13, 12);
+                aMR_mp_get(&frames, body + 25, 2);
+                aMR_mp_glide_left[idx] = frames < 1 ? 1 : (frames > 120 ? 120 : frames);
+                if (aMR_mp_sound_ok()) {
+                    aMR_SetMoveSE(ftr_actor);
+                }
+            }
+            break;
+        case MP_VFX_FTR_BYE:
+            aMR_mp_ride_drop(my_room_actorx, ftr_actor);
+            aMR_mp_glide_left[idx] = 0;
+            aMR_MiniDiskCommonDt(ftr_actor, my_room_actorx);
+            aMR_RadioCommonDt(ftr_actor, my_room_actorx);
+            aMR_ClearHaniwaSwitch(my_room_actorx, ftr_actor);
+            aMR_FtrID2ExtinguishFurniture(idx);
+            break;
+        case MP_VFX_FTR_ROTATE:
+            if (len >= 19 && aMR_mp_cot_shared()) {
+                aMR_mp_hint_turn(ftr_actor, body);
+            } else if (len >= 19 && body[14] < aFTR_SHAPE_TYPE_NUM) {
+                // (a turn before the last one here has finished waits for it)
+                if (ftr_actor->state == aFTR_STATE_RROTATE || ftr_actor->state == aFTR_STATE_LROTATE) {
+                    return FALSE;
+                }
+                if (ftr_actor->state == aFTR_STATE_STOP) {
+                    int ut_x;
+                    int ut_z;
+
+                    // (what's on it turns along, set down again as the turn ends)
+                    aMR_mp_ride_start(my_room_actorx, ftr_actor);
+                    aMR_mp_get(&ftr_actor->angle_y_target, body + 15, 4);
+                    ftr_actor->shape_type = body[14];
+                    ftr_actor->state = body[13] ? aFTR_STATE_RROTATE : aFTR_STATE_LROTATE;
+                    if (aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type)) {
+                        aMR_SetInfoFurnitureTable(ftr_actor->shape_type, ut_x + ut_z * UT_X_NUM, ftr_actor->id,
+                                                  ftr_actor->layer);
+                    }
+                    aMR_SetFurniture2FG(ftr_actor, ftr_actor->position, TRUE);
+                    if (aMR_mp_sound_ok()) {
+                        aMR_SetRotateSE(ftr_actor);
+                    }
+                }
+            }
+            break;
+    }
+    return TRUE;
+}
+
+// the island's cottage shared in a session: the room follows the cells as the host has them. What they say changed is
+// done here at once (the drawing eases into it); what this player is in the middle of is left be till it's done.
+
+#define aMR_MP_PIECES (2 * UT_TOTAL_NUM / 4)
+#define aMR_MP_EASE   0.7f
+
+typedef struct {
+    u16 name;
+    u8 layer;
+    u8 dir;
+    u8 ut;
+    s16 actor; // the piece standing for it here: -1 none, -2 left be for now
+} aMR_mp_piece_c;
+
+static int aMR_mp_ut_busy(const u8* busy, int ut) {
+    int layer;
+
+    for (layer = 0; layer < mCoBG_LAYER_NUM; layer++) {
+        int c = layer * UT_TOTAL_NUM + ut;
+
+        if ((busy[c >> 3] >> (c & 7)) & 1) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static u8 aMR_mp_shape(u16 name, int dir) {
+    aFTR_PROFILE* profile = aMR_GetFurnitureProfile(name);
+
+    return profile->shape == aFTR_SHAPE_TYPEB_0 ? l_typeB0_table[dir & 3] : profile->shape;
+}
+
+// any of a piece's units the room here is to leave be
+static int aMR_mp_units_busy(const u8* busy, int ut, u8 shape) {
+    int units[4];
+    int n = aMR_GetFurniturePoccessUnitNo(units, ut & 15, (ut >> 4) & 15, shape);
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (units[i] >= 0 && units[i] < UT_TOTAL_NUM && aMR_mp_ut_busy(busy, units[i])) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static int aMR_mp_actor_busy(const u8* busy, FTR_ACTOR* ftr_actor) {
+    int ut_x;
+    int ut_z;
+
+    return aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type) &&
+           aMR_mp_units_busy(busy, ut_x + ut_z * UT_X_NUM, ftr_actor->shape_type);
+}
+
+// the units a piece would take are free in this room
+static int aMR_mp_free_for(int ut, u8 shape, int layer) {
+    u8* place_table = aMR_GetLayerPlaceTable(layer);
+    int units[4];
+    int n = aMR_GetFurniturePoccessUnitNo(units, ut & 15, (ut >> 4) & 15, shape);
+    int i;
+
+    if (place_table == NULL || n == 0) {
+        return FALSE;
+    }
+    for (i = 0; i < n; i++) {
+        if (units[i] < 0 || units[i] >= UT_TOTAL_NUM || place_table[units[i]] != aMR_NO_FTR_ID) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static int aMR_mp_carried(MY_ROOM_ACTOR* my_room, int id) {
+    int i;
+
+    for (i = 0; my_room->parent_ftr.ftrID != -1 && i < aMR_FIT_FTR_MAX; i++) {
+        if (my_room->parent_ftr.fit_ftr_table[i].exist_flag && my_room->parent_ftr.fit_ftr_table[i].ftr_ID == id) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// a table under this unit for a table-top piece
+static int aMR_mp_on_table(int ut) {
+    int id = aMR_place_table[0][ut];
+
+    return id < l_aMR_work.list_size && l_aMR_work.used_list[id] &&
+           aMR_layer_set_info[l_aMR_work.ftr_actor_list[id].name] == aFTR_SET_TYPE_SURFACE;
+}
+
+// how high a piece stands on its unit: the floor (not the tops of furniture there, which may be on their way out),
+// or the top of the table under it
+static f32 aMR_mp_stand_y(int layer, xyz_t pos, int ut) {
+    if (layer == mCoBG_LAYER1 && aMR_mp_on_table(ut)) {
+        FTR_ACTOR* under = &l_aMR_work.ftr_actor_list[aMR_place_table[0][ut]];
+
+        return under->position.y + aMR_GetFurnitureProfile(under->name)->height;
+    }
+    return mCoBG_GetBgY_OnlyCenter_FromWpos2(pos, 0.0f);
+}
+
+// a piece's sound as the room catches up, a few a pass
+static int aMR_mp_sound_ok(void) {
+    static u32 frame;
+
+    if (gamePT != NULL && frame != (u32)((GAME_PLAY*)gamePT)->game_frame) {
+        frame = (u32)((GAME_PLAY*)gamePT)->game_frame;
+        aMR_mp_sounds = 0;
+    }
+    return aMR_mp_sounds++ < 3;
+}
+
+// another player's storage left open with nobody's hands on it any more (they went, or warped away): it closes
+static void aMR_mp_demo_watch(void) {
+    int i;
+
+    for (i = 0; i < l_aMR_work.list_size && i < aMR_MP_FTR_MAX; i++) {
+        FTR_ACTOR* ftr_actor = &l_aMR_work.ftr_actor_list[i];
+
+        if (!l_aMR_work.used_list[i] || !aMR_mp_remote_demo[i] || ftr_actor->demo_status < 1 ||
+            ftr_actor->demo_status > 4 || aMR_mp_in_use(ftr_actor)) {
+            aMR_mp_demo_idle[i] = 0;
+        } else if (++aMR_mp_demo_idle[i] > 90) {
+            aMR_mp_demo_idle[i] = 0;
+            ftr_actor->demo_status = 5;
+        }
+    }
+}
+
+// the cells name a piece the player here has in hand elsewhere (it moved under the player): made once it's let go
+static int aMR_mp_twin_busy(const aMR_mp_piece_c* p, const u8* kind, const s16* match, int size) {
+    int i;
+
+    for (i = 0; i < size; i++) {
+        if (kind[i] == 2 && match[i] < 0 && l_aMR_work.ftr_actor_list[i].name == p->name &&
+            l_aMR_work.ftr_actor_list[i].layer == p->layer) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// the save under the room holds what the cells say (a value held off while the player was at it, or taken in behind a
+// menu), but for what's kept in furniture here and items in the air
+static void aMR_mp_raw_follow(const u16* truth, const u8* busy) {
+    int i;
+
+    for (i = 0; i < mCoBG_LAYER_NUM * UT_TOTAL_NUM; i++) {
+        int layer = i / UT_TOTAL_NUM;
+        int ut = i % UT_TOTAL_NUM;
+        mActor_name_t* fg_p;
+
+        if (((busy[i >> 3] >> (i & 7)) & 1) || (fg_p = aMR_GetLayerTopFg(layer)) == NULL || fg_p[ut] == truth[i] ||
+            fg_p[ut] == RSV_NO || (layer > mCoBG_LAYER0 && aMR_mp_holds_cell(layer, ut))) {
+            continue;
+        }
+        fg_p[ut] = truth[i];
+    }
+}
+
+// another player's hands on it: the drawing starts on from where its last move leaves it (else from the cells)
+static void aMR_mp_hint_start(int id) {
+    if (aMR_mp_hint_left[id] == 0 && aMR_mp_hint_hold[id] == 0) {
+        aMR_mp_hint[id].x = aMR_mp_hint[id].y = aMR_mp_hint[id].z = 0.0f;
+        aMR_mp_hint_rot[id] = 0;
+    }
+}
+
+// another player's push under way: the drawing leads the piece where it's going, ahead of its cells
+static void aMR_mp_hint_move(FTR_ACTOR* ftr_actor, const u8* body) {
+    int id = ftr_actor->id;
+    xyz_t to;
+    f32 at_x;
+    f32 at_z;
+    s16 frames;
+
+    if (id < 0 || id >= aMR_MP_FTR_MAX || ftr_actor->state != aFTR_STATE_STOP) {
+        return;
+    }
+    aMR_mp_get(&at_x, body + 5, 4);
+    aMR_mp_get(&at_z, body + 9, 4);
+    aMR_mp_get(&to, body + 13, 12);
+    aMR_mp_get(&frames, body + 25, 2);
+    // (a push goes a unit at a time)
+    if (ABS(to.x - at_x) > 1.5f * mFI_UT_WORLDSIZE_X_F || ABS(to.z - at_z) > 1.5f * mFI_UT_WORLDSIZE_Z_F) {
+        return;
+    }
+    aMR_mp_hint_start(id);
+    aMR_mp_hint[id].x += to.x - at_x;
+    aMR_mp_hint[id].z += to.z - at_z;
+    aMR_mp_hint_left[id] = frames < 1 ? 1 : (frames > 120 ? 120 : frames);
+    aMR_mp_hint_hold[id] = 90;
+}
+
+// ...and a turn, about the end it was taken hold of by: the other screen has the piece stand there
+static void aMR_mp_hint_turn(FTR_ACTOR* ftr_actor, const u8* body) {
+    int id = ftr_actor->id;
+    xyz_t shift;
+    f32 target;
+    f32 at_x;
+    f32 at_z;
+    s16 turn;
+
+    if (id < 0 || id >= aMR_MP_FTR_MAX || ftr_actor->state != aFTR_STATE_STOP) {
+        return;
+    }
+    aMR_mp_get(&at_x, body + 5, 4);
+    aMR_mp_get(&at_z, body + 9, 4);
+    aMR_mp_get(&target, body + 15, 4);
+    aMR_mp_hint_start(id);
+    turn = (s16)(RAD2SHORT_ANGLE2(DEG2RAD(target)) - ftr_actor->s_angle_y - aMR_mp_hint_rot[id]);
+    shift.x = ftr_actor->position.x + aMR_mp_hint[id].x - at_x;
+    shift.y = 0.0f;
+    shift.z = ftr_actor->position.z + aMR_mp_hint[id].z - at_z;
+    if (ABS(shift.x) <= mFI_UT_WORLDSIZE_X_F && ABS(shift.z) <= mFI_UT_WORLDSIZE_Z_F) {
+        xyz_t turned = shift;
+
+        sMath_RotateY(&turned, SHORT2RAD_ANGLE2(turn));
+        aMR_mp_hint[id].x += turned.x - shift.x;
+        aMR_mp_hint[id].z += turned.z - shift.z;
+    }
+    aMR_mp_hint_rot[id] += turn;
+    aMR_mp_hint_left[id] = 16;
+    aMR_mp_hint_hold[id] = 90;
+}
+
+static void aMR_mp_ease(void) {
+    int i;
+
+    for (i = 0; i < l_aMR_work.list_size && i < aMR_MP_FTR_MAX; i++) {
+        xyz_t* vis = &aMR_mp_vis[i];
+
+        if (aMR_mp_hint_left[i] > 0) {
+            f32 t = 1.0f / (f32)aMR_mp_hint_left[i];
+
+            vis->x += (aMR_mp_hint[i].x - vis->x) * t;
+            vis->y += (aMR_mp_hint[i].y - vis->y) * t;
+            vis->z += (aMR_mp_hint[i].z - vis->z) * t;
+            aMR_mp_vis_rot[i] += (s16)((f32)(s16)(aMR_mp_hint_rot[i] - aMR_mp_vis_rot[i]) * t);
+            aMR_mp_hint_left[i]--;
+            continue;
+        }
+        // (there already: it waits for the cells to say so while the other player still has it in hand, and a while
+        // after, else it goes back)
+        if (aMR_mp_hint_hold[i] > 0) {
+            if (!l_aMR_work.used_list[i] || !aMR_mp_in_use(&l_aMR_work.ftr_actor_list[i])) {
+                aMR_mp_hint_hold[i]--;
+            }
+            continue;
+        }
+        vis->x *= aMR_MP_EASE;
+        vis->y *= aMR_MP_EASE;
+        vis->z *= aMR_MP_EASE;
+        if (ABS(vis->x) < 0.5f && ABS(vis->y) < 0.5f && ABS(vis->z) < 0.5f) {
+            vis->x = vis->y = vis->z = 0.0f;
+        }
+        aMR_mp_vis_rot[i] = (s16)((int)aMR_mp_vis_rot[i] * 7 / 10);
+    }
+}
+
+// the piece takes its new place and facing at once; the drawing eases over from where it stood
+static void aMR_mp_reseat(FTR_ACTOR* ftr_actor, int ut, int dir) {
+    xyz_t from = ftr_actor->position;
+    xyz_t base = ftr_actor->base_position;
+    s16 old_angle = ftr_actor->s_angle_y;
+    int moved = aMR_mp_main_ut(ftr_actor) != ut;
+    xyz_t pos;
+    int id = ftr_actor->id;
+
+    // (turned as it's drawn)
+    sMath_RotateY(&base, DEG2RAD(ftr_actor->angle_y) +
+                             ((id >= 0 && id < aMR_MP_FTR_MAX) ? SHORT2RAD_ANGLE2(aMR_mp_vis_rot[id]) : 0.0f));
+    from.x += base.x;
+    from.y += base.y;
+    from.z += base.z;
+    ftr_actor->base_position.x = 0.0f;
+    ftr_actor->base_position.y = 0.0f;
+    ftr_actor->base_position.z = 0.0f;
+    aMR_SetFurnitureType(ftr_actor, dir);
+    ftr_actor->angle_y = aMR_angle_table[dir & 3];
+    ftr_actor->angle_y_target = ftr_actor->angle_y;
+    ftr_actor->s_angle_y = RAD2SHORT_ANGLE2(DEG2RAD(ftr_actor->angle_y));
+    aMR_UnitNumber2Position(&pos, ftr_actor->shape_type, ut & 15, ut >> 4);
+    pos.y = aMR_mp_stand_y(ftr_actor->layer, pos, ut);
+    // (a floor piece keeps its height: the floor's)
+    if (ftr_actor->layer == mCoBG_LAYER0) {
+        pos.y = ftr_actor->position.y;
+    }
+    ftr_actor->position = pos;
+    ftr_actor->last_position = pos;
+    ftr_actor->target_position = pos;
+    aMR_SetInfoFurnitureTable(ftr_actor->shape_type, ut, id, ftr_actor->layer);
+    if (id >= 0 && id < aMR_MP_FTR_MAX) {
+        aMR_mp_hint_left[id] = 0;
+        aMR_mp_hint_hold[id] = 0;
+        aMR_mp_vis[id].x += from.x - pos.x;
+        aMR_mp_vis[id].y += from.y - pos.y;
+        aMR_mp_vis[id].z += from.z - pos.z;
+        aMR_mp_vis_rot[id] += (s16)(old_angle - ftr_actor->s_angle_y);
+    }
+    if (!aMR_mp_sound_ok()) {
+    } else if (moved) {
+        aMR_SetMoveSE(ftr_actor);
+    } else {
+        aMR_SetRotateSE(ftr_actor);
+    }
+}
+
+// gone from the cells: it goes here, tidied up the way leaving the room would, nothing written back
+static void aMR_mp_drop(ACTOR* actorx, FTR_ACTOR* ftr_actor) {
+    MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
+    int ut_x;
+    int ut_z;
+
+    aMR_mp_ride_drop(actorx, ftr_actor);
+
+    aMR_MiniDiskCommonDt(ftr_actor, actorx);
+    aMR_RadioCommonDt(ftr_actor, actorx);
+    aMR_ClearHaniwaSwitch(actorx, ftr_actor);
+    if (my_room->bgm_info.reserved_ftr_actor == ftr_actor) {
+        my_room->bgm_info.reserve_flag = FALSE;
+        my_room->bgm_info.reserved_ftr_actor = NULL;
+    }
+    if (aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type)) {
+        aMR_SetInfoFurnitureTable(ftr_actor->shape_type, ut_x + ut_z * UT_X_NUM, aMR_NO_FTR_ID, ftr_actor->layer);
+    }
+    mCoBG_CrossOffMoveBg(ftr_actor->move_bg_idx);
+    ftr_actor->move_bg_idx = -1;
+    bzero(ftr_actor->items, sizeof(ftr_actor->items));
+    ftr_actor->state = aFTR_STATE_BYE;
+    ftr_actor->dust_timer = 2;
+    if (ftr_actor->id >= 0 && ftr_actor->id < aMR_MP_FTR_MAX) {
+        aMR_mp_quiet[ftr_actor->id] = TRUE;
+        aMR_mp_remote_demo[ftr_actor->id] = FALSE;
+        aMR_mp_glide_left[ftr_actor->id] = 0;
+        aMR_mp_hint_left[ftr_actor->id] = 0;
+        aMR_mp_hint_hold[ftr_actor->id] = 0;
+    }
+    if (aMR_mp_sound_ok()) {
+        aMR_SetCleanUpFtrSE(ftr_actor->position);
+    }
+}
+
+// new in the cells: it comes up here the way furniture set down does, nothing written (the cells have it)
+static int aMR_mp_add(ACTOR* actorx, GAME* game, const aMR_mp_piece_c* p) {
+    MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
+    mActor_name_t item = mRmTp_FtrIdx2FtrItemNo(p->name, p->dir);
+    u8 shape = aMR_mp_shape(p->name, p->dir);
+    PLAYER_ACTOR* player = GET_PLAYER_ACTOR((GAME_PLAY*)game);
+    FTR_ACTOR* ftr_actor;
+    int units[4];
+    int n;
+    int slot;
+    int i;
+
+    // (a table-top piece waits for its table)
+    if (!aMR_mp_free_for(p->ut, shape, p->layer) || (p->layer == mCoBG_LAYER1 && !aMR_mp_on_table(p->ut))) {
+        return FALSE;
+    }
+    if (!aMR_WeightPossible(actorx, shape)) {
+        return FALSE;
+    }
+    for (slot = 0; slot < l_aMR_work.list_size && slot < aMR_MP_FTR_MAX; slot++) {
+        int k;
+
+        for (k = 0; k < aMR_RSV_FTR_NUM; k++) {
+            if (my_room->rsv_ftr[k].exist_flag && my_room->rsv_ftr[k].free_no == slot) {
+                break;
+            }
+        }
+        if (!l_aMR_work.used_list[slot] && k == aMR_RSV_FTR_NUM) {
+            break;
+        }
+    }
+    if (slot >= l_aMR_work.list_size || slot >= aMR_MP_FTR_MAX || !aMR_GetFurnitureBank2(p->name, game, item)) {
+        return FALSE;
+    }
+    ftr_actor = &l_aMR_work.ftr_actor_list[slot];
+    l_aMR_work.used_list[slot] = TRUE;
+    aMR_mp_nosave = TRUE;
+    aMR_FurnitureCt(ftr_actor, game, p->ut & 15, p->ut >> 4, item, slot, aFTR_STATE_BIRTH, p->layer, TRUE);
+    aMR_mp_nosave = FALSE;
+    aMR_PlussWeight(actorx, ftr_actor);
+    bzero(ftr_actor->items, sizeof(ftr_actor->items));
+    ftr_actor->position.y = aMR_mp_stand_y(p->layer, ftr_actor->position, p->ut);
+    ftr_actor->last_position = ftr_actor->position;
+    aMR_mp_quiet[slot] = TRUE;
+    aMR_mp_vis[slot].x = aMR_mp_vis[slot].y = aMR_mp_vis[slot].z = 0.0f;
+    aMR_mp_vis_rot[slot] = 0;
+    aMR_mp_hint_left[slot] = 0;
+    aMR_mp_hint_hold[slot] = 0;
+    // (a player where it comes up is eased out of it, as by furniture of their own)
+    n = aMR_GetFurniturePoccessUnitNo(units, p->ut & 15, p->ut >> 4, shape);
+    if (player != NULL && p->layer == mCoBG_LAYER0) {
+        int px;
+        int pz;
+
+        aMR_Wpos2PlaceNumber(&px, &pz, player->actor_class.world.position, 0);
+        for (i = 0; i < n; i++) {
+            if (units[i] == px + pz * UT_X_NUM) {
+                ftr_actor->collision_scale = 0.6f;
+            }
+        }
+    }
+    if (aMR_mp_sound_ok()) {
+        sAdo_OngenTrgStart(NA_SE_ITEM_HORIDASHI, &ftr_actor->position);
+    }
+    return TRUE;
+}
+
+// a stereo's record changed by another hand: its music follows if it's playing
+static void aMR_mp_record(ACTOR* actorx, FTR_ACTOR* ftr_actor, mActor_name_t record) {
+    if (!ftr_actor->switch_bit) {
+        return;
+    }
+    if (record >= ITM_MINIDISK_START && record < ITM_MINIDISK_END) {
+        aMR_ReserveBgm(actorx, BGM_MD0 + (record - ITM_MINIDISK_START), ftr_actor, 0);
+    } else {
+        ftr_actor->switch_bit = FALSE;
+        ftr_actor->switch_changed_flag = TRUE;
+        aMR_AllMDSwitchOff();
+        aMR_ReserveDefaultBgm(actorx, ftr_actor);
+        aMR_ChangeMDBgm(actorx, ftr_actor);
+    }
+}
+
+// what a piece holds, as the cells have it over its units; the save under it stays as a room keeps it (empty while
+// its things are in the furniture)
+static void aMR_mp_contents(ACTOR* actorx, FTR_ACTOR* ftr_actor, const u16* truth) {
+    aFTR_PROFILE* profile = aMR_GetFurnitureProfile(ftr_actor->name);
+    int units[4];
+    int n;
+    int main_ut;
+    int layer;
+    int idx;
+    int i;
+
+    if (profile == NULL || !aFTR_IS_STORAGE(profile) || (main_ut = aMR_mp_main_ut(ftr_actor)) < 0) {
+        return;
+    }
+    n = aMR_PosType2FurniturePoccessUnitNo(units, &ftr_actor->position, ftr_actor->shape_type);
+    for (layer = ftr_actor->layer + 1, idx = 0; layer < mCoBG_LAYER_NUM; layer++, idx++) {
+        mActor_name_t* fg_p = aMR_GetLayerTopFg(layer);
+        mActor_name_t item = truth[layer * UT_TOTAL_NUM + main_ut];
+
+        // (things the save kept over another of its units, as a room coming up takes them in)
+        for (i = 0; i < n && item == EMPTY_NO; i++) {
+            item = truth[layer * UT_TOTAL_NUM + units[i]];
+        }
+        if (ftr_actor->items[idx] != item) {
+            if (idx == 0 && aFTR_CHECK_INTERACTION(profile->interaction_type, aFTR_INTERACTION_TYPE_MUSIC_DISK)) {
+                aMR_mp_record(actorx, ftr_actor, item);
+            }
+            ftr_actor->items[idx] = item;
+        }
+        for (i = 0; i < n && fg_p != NULL; i++) {
+            fg_p[units[i]] = EMPTY_NO;
+        }
+    }
+}
+
+static void aMR_mp_follow_start(void) {
+    const u16* truth = mp_cot_truth(NULL);
+
+    aMR_mp_retry = FALSE;
+    aMR_mp_retry_wait = 0;
+    aMR_mp_house_calm = 0;
+    if (truth != NULL) {
+        mem_copy((u8*)aMR_mp_shadow, (u8*)truth, sizeof(aMR_mp_shadow));
+    } else {
+        bzero(aMR_mp_shadow, sizeof(aMR_mp_shadow));
+    }
+}
+
+// two players took hold of the same piece at once: the one who gives way lets go before anything moves (in a house,
+// its owner lets go of a piece another player sat or lay down on)
+static void aMR_mp_give_way(MY_ROOM_ACTOR* my_room) {
+    PLAYER_ACTOR* player = GET_PLAYER_ACTOR((GAME_PLAY*)gamePT);
+    FTR_ACTOR* ftr_actor;
+    int units[4];
+    int n;
+    int i;
+
+    if (player == NULL || player->now_main_index != mPlayer_INDEX_HOLD || my_room->demo_flag ||
+        my_room->force_open_demo_flag || (my_room->state != 1 && my_room->state != 6 && my_room->state != 7 &&
+                                          my_room->state != 8)) {
+        return;
+    }
+    i = player->main_data.hold.ftr_no;
+    if (i < 0 || i >= l_aMR_work.list_size || !l_aMR_work.used_list[i]) {
+        return;
+    }
+    ftr_actor = &l_aMR_work.ftr_actor_list[i];
+    n = aMR_PosType2FurniturePoccessUnitNo(units, &ftr_actor->position, ftr_actor->shape_type);
+    for (i = 0; i < n; i++) {
+        if (aMR_mp_cot_shared() ? mp_cot_must_yield(units[i]) : mp_player_on_unit(units[i])) {
+            my_room->state = 0;
+            my_room->push_timer = 0;
+            my_room->pull_timer = 0;
+            my_room->keep_push_flag = FALSE;
+            my_room->keep_pull_flag = FALSE;
+            return;
+        }
+    }
+}
+
+// a visitor's house room with something of the owner's under way: a piece gliding, turning, growing in or open, or
+// word of one just in (the owner's floor, which comes slower, is taken on once all is still)
+static int aMR_mp_house_moving(MY_ROOM_ACTOR* my_room) {
+    int i;
+
+    if (aMR_mp_house_calm < 90 || my_room->parent_ftr.ftrID != -1) {
+        return TRUE;
+    }
+    for (i = 0; i < aMR_RSV_FTR_NUM; i++) {
+        if (my_room->rsv_ftr[i].exist_flag) {
+            return TRUE;
+        }
+    }
+    for (i = 0; i < l_aMR_work.list_size && i < aMR_MP_FTR_MAX; i++) {
+        if (l_aMR_work.used_list[i] && (aMR_mp_glide_left[i] > 0 || aMR_mp_remote_demo[i] ||
+                                        l_aMR_work.ftr_actor_list[i].state != aFTR_STATE_STOP)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+void aMR_mp_reconcile(void) {
+    static const u8 no_busy[(mCoBG_LAYER_NUM * UT_TOTAL_NUM + 7) / 8];
+    ACTOR* actorx = (aMR_CLIP != NULL) ? aMR_CLIP->my_room_actor_p : NULL;
+    MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
+    FTR_ACTOR* list = l_aMR_work.ftr_actor_list;
+    u8* used = l_aMR_work.used_list;
+    int size = l_aMR_work.list_size < aMR_MP_FTR_MAX ? l_aMR_work.list_size : aMR_MP_FTR_MAX;
+    aMR_mp_piece_c pcs[aMR_MP_PIECES];
+    s16 match[aMR_MP_FTR_MAX];
+    u8 kind[aMR_MP_FTR_MAX]; // 0 the room's to change, 1 going or gone, 2 left be, 3 moving
+    const u16* truth;
+    const u8* busy;
+    int resync = FALSE;
+    int npc = 0;
+    int deferred = FALSE;
+    int layer;
+    int i;
+    int j;
+
+    if (my_room == NULL || list == NULL || used == NULL) {
+        return;
+    }
+    if (my_room->scene != SCENE_COTTAGE_MY) {
+        // a house: its owner (the host) lets go of what another player sits on; a visitor's room follows the owner's
+        // floor
+        if (!aMR_mp_house()) {
+            return;
+        }
+        aMR_mp_sounds = 0;
+        if (mp_is_host()) {
+            aMR_mp_give_way(my_room);
+            return;
+        }
+        aMR_mp_ease();
+        if (aMR_mp_house_calm < 0x7FFF) {
+            aMR_mp_house_calm++;
+        }
+        if ((truth = mp_house_truth()) == NULL || aMR_mp_house_moving(my_room)) {
+            return;
+        }
+        busy = no_busy;
+    } else {
+        aMR_mp_ease();
+        if ((truth = mp_cot_truth(&busy)) == NULL) {
+            return;
+        }
+        aMR_mp_demo_watch();
+        aMR_mp_give_way(my_room);
+        resync = mp_cot_take_resync();
+    }
+    for (i = 0; i < mCoBG_LAYER_NUM * UT_TOTAL_NUM && truth[i] == aMR_mp_shadow[i]; i++) {
+    }
+    if (i == mCoBG_LAYER_NUM * UT_TOTAL_NUM && !resync && (!aMR_mp_retry || ++aMR_mp_retry_wait < 10)) {
+        return;
+    }
+    mem_copy((u8*)aMR_mp_shadow, (u8*)truth, sizeof(aMR_mp_shadow));
+    aMR_mp_retry = FALSE;
+    aMR_mp_retry_wait = 0;
+    aMR_mp_sounds = 0;
+
+    // the furniture the cells name, floors first
+    for (i = 0; i < 2 * UT_TOTAL_NUM && npc < aMR_MP_PIECES; i++) {
+        mActor_name_t v = truth[i];
+
+        if (ITEM_IS_FTR(v) && mRmTp_FtrItemNo2FtrIdx(v) < FTR_NUM) {
+            pcs[npc].name = mRmTp_FtrItemNo2FtrIdx(v);
+            pcs[npc].layer = (u8)(i / UT_TOTAL_NUM);
+            pcs[npc].dir = (u8)FTR_GET_ROTATION(v);
+            pcs[npc].ut = (u8)(i % UT_TOTAL_NUM);
+            pcs[npc].actor = -1;
+            npc++;
+        }
+    }
+    // ...and what stands here
+    for (i = 0; i < size; i++) {
+        FTR_ACTOR* ftr_actor = &list[i];
+
+        match[i] = -1;
+        if (!used[i] || ftr_actor->state == aFTR_STATE_BYE || ftr_actor->state == aFTR_STATE_DEATH) {
+            kind[i] = 1;
+        } else if (aMR_mp_carried(my_room, i) || aMR_mp_actor_busy(busy, ftr_actor) || aMR_mp_main_ut(ftr_actor) < 0) {
+            kind[i] = 2;
+        } else {
+            kind[i] = 0;
+        }
+    }
+    // the same piece in the same place
+    for (j = 0; j < npc; j++) {
+        for (i = 0; i < size; i++) {
+            FTR_ACTOR* ftr_actor = &list[i];
+
+            if (kind[i] != 1 && match[i] < 0 && ftr_actor->name == pcs[j].name && ftr_actor->layer == pcs[j].layer &&
+                aMR_mp_main_ut(ftr_actor) == pcs[j].ut &&
+                (aMR_GetSaveAngle(ftr_actor->angle_y_target, 0) & 3) == pcs[j].dir) {
+                match[i] = (s16)j;
+                pcs[j].actor = (s16)i;
+                break;
+            }
+        }
+    }
+    // what this player is in the middle of stays as it is for now
+    for (j = 0; j < npc; j++) {
+        if (pcs[j].actor == -1 && aMR_mp_units_busy(busy, pcs[j].ut, aMR_mp_shape(pcs[j].name, pcs[j].dir))) {
+            pcs[j].actor = -2;
+            deferred = TRUE;
+        }
+    }
+    for (i = 0; i < size; i++) {
+        deferred |= kind[i] == 2 && match[i] < 0;
+    }
+    // the same piece moved or turned: the nearest of its kind
+    for (j = 0; j < npc; j++) {
+        int best = -1;
+        int best_d = 1000;
+
+        for (i = 0; pcs[j].actor == -1 && i < size; i++) {
+            FTR_ACTOR* ftr_actor = &list[i];
+            int m;
+            int d;
+
+            if (kind[i] != 0 || match[i] >= 0 || ftr_actor->name != pcs[j].name || ftr_actor->layer != pcs[j].layer) {
+                continue;
+            }
+            m = aMR_mp_main_ut(ftr_actor);
+            d = ABS((m & 15) - (pcs[j].ut & 15)) + ABS((m >> 4) - (pcs[j].ut >> 4));
+            if (d < best_d) {
+                best = i;
+                best_d = d;
+            }
+        }
+        if (best >= 0) {
+            match[best] = (s16)j;
+            pcs[j].actor = (s16)best;
+        }
+    }
+    // gone from the cells
+    for (i = 0; i < size; i++) {
+        if (kind[i] == 0 && match[i] < 0) {
+            aMR_mp_drop(actorx, &list[i]);
+            kind[i] = 1;
+        }
+    }
+    // moved or turned: all of them leave their old units first
+    for (i = 0; i < size; i++) {
+        FTR_ACTOR* ftr_actor = &list[i];
+        int ut_x;
+        int ut_z;
+
+        if (kind[i] != 0 || match[i] < 0 ||
+            (aMR_mp_main_ut(ftr_actor) == pcs[match[i]].ut &&
+             (aMR_GetSaveAngle(ftr_actor->angle_y_target, 0) & 3) == pcs[match[i]].dir)) {
+            continue;
+        }
+        if (aMR_Wpos2PlaceNumber(&ut_x, &ut_z, ftr_actor->position, ftr_actor->shape_type)) {
+            aMR_SetInfoFurnitureTable(ftr_actor->shape_type, ut_x + ut_z * UT_X_NUM, aMR_NO_FTR_ID, ftr_actor->layer);
+        }
+        kind[i] = 3;
+    }
+    // then the floor's take their new places and new ones come, then the table-tops' on what's under them now (one in
+    // the way of something left be goes, and comes back once it can; one the player has in hand elsewhere isn't made
+    // twice)
+    for (layer = mCoBG_LAYER0; layer <= mCoBG_LAYER1; layer++) {
+        for (i = 0; i < size; i++) {
+            aMR_mp_piece_c* p;
+
+            if (kind[i] != 3 || list[i].layer != layer) {
+                continue;
+            }
+            p = &pcs[match[i]];
+            if (aMR_mp_free_for(p->ut, aMR_mp_shape(p->name, p->dir), p->layer) &&
+                (layer == mCoBG_LAYER0 || aMR_mp_on_table(p->ut))) {
+                aMR_mp_reseat(&list[i], p->ut, p->dir);
+                kind[i] = 0;
+            } else {
+                aMR_mp_drop(actorx, &list[i]);
+                p->actor = -1;
+                match[i] = -1;
+                kind[i] = 1;
+                deferred = TRUE;
+            }
+        }
+        for (j = 0; j < npc; j++) {
+            if (pcs[j].layer == layer && pcs[j].actor == -1 &&
+                (aMR_mp_twin_busy(&pcs[j], kind, match, size) || !aMR_mp_add(actorx, gamePT, &pcs[j]))) {
+                deferred = TRUE;
+            }
+        }
+    }
+    // what storage holds
+    for (i = 0; i < size; i++) {
+        FTR_ACTOR* ftr_actor = &list[i];
+
+        int main_ut = aMR_mp_main_ut(ftr_actor);
+
+        if (used[i] && ftr_actor->state != aFTR_STATE_BYE && ftr_actor->state != aFTR_STATE_DEATH &&
+            !aMR_mp_carried(my_room, i) && main_ut >= 0 && !aMR_mp_ut_busy(busy, main_ut)) {
+            aMR_mp_contents(actorx, ftr_actor, truth);
+        }
+    }
+    aMR_mp_raw_follow(truth, busy);
+    aMR_mp_retry = deferred;
+}
+
+// what the local player is in the middle of in the cottage: cells others keep off, those whose changes wait till it's
+// done (what it only uses goes out as it happens), and the units whose furniture it has in hand
+static u8* aMR_mp_lk_cells;
+static u8* aMR_mp_lk_hold;
+static u8* aMR_mp_lk_units;
+static int aMR_mp_lk_use;
+
+static void aMR_mp_lock_ut(int ut, int pad) {
+    int x0 = ut & 15;
+    int z0 = (ut >> 4) & 15;
+    int dx;
+    int dz;
+    int layer;
+
+    if (ut < 0 || ut >= UT_TOTAL_NUM) {
+        return;
+    }
+    for (dz = -pad; dz <= pad; dz++) {
+        for (dx = -pad; dx <= pad; dx++) {
+            int x = x0 + dx;
+            int z = z0 + dz;
+
+            for (layer = 0; x >= 0 && x < UT_X_NUM && z >= 0 && z < UT_Z_NUM && layer < mCoBG_LAYER_NUM; layer++) {
+                int c = layer * UT_TOTAL_NUM + x + z * UT_X_NUM;
+
+                aMR_mp_lk_cells[c >> 3] |= (u8)(1 << (c & 7));
+                if (!aMR_mp_lk_use) {
+                    aMR_mp_lk_hold[c >> 3] |= (u8)(1 << (c & 7));
+                }
+            }
+        }
+    }
+    aMR_mp_lk_units[ut >> 3] |= (u8)(1 << (ut & 7));
+}
+
+// the units a piece stands on, and those a push or pull under way takes it to
+static int aMR_mp_ftr_units(FTR_ACTOR* ftr_actor, int* units) {
+    int n = aMR_PosType2FurniturePoccessUnitNo(units, &ftr_actor->position, ftr_actor->shape_type);
+
+    if (ftr_actor->state >= aFTR_STATE_WAIT_PUSH && ftr_actor->state <= aFTR_STATE_PULL) {
+        n += aMR_PosType2FurniturePoccessUnitNo(units + n, &ftr_actor->target_position, ftr_actor->shape_type);
+    }
+    return n;
+}
+
+static void aMR_mp_lock_ftr(int id, int pad) {
+    int units[8];
+    int n;
+    int i;
+
+    if (id < 0 || id >= l_aMR_work.list_size || !l_aMR_work.used_list[id]) {
+        return;
+    }
+    n = aMR_mp_ftr_units(&l_aMR_work.ftr_actor_list[id], units);
+    for (i = 0; i < n; i++) {
+        aMR_mp_lock_ut(units[i], pad);
+    }
+}
+
+static void aMR_mp_session_add(FTR_ACTOR* ftr_actor) {
+    int units[8];
+    int n = aMR_mp_ftr_units(ftr_actor, units);
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (units[i] >= 0 && units[i] < UT_TOTAL_NUM) {
+            aMR_mp_session[units[i] >> 3] |= (u8)(1 << (units[i] & 7));
+        }
+    }
+}
+
+static int aMR_mp_session_has(FTR_ACTOR* ftr_actor) {
+    int units[8];
+    int n = aMR_mp_ftr_units(ftr_actor, units);
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (units[i] >= 0 && units[i] < UT_TOTAL_NUM && ((aMR_mp_session[units[i] >> 3] >> (units[i] & 7)) & 1)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// the piece in the player's hands, from taking hold of it till it's let go
+static int aMR_mp_in_hand(MY_ROOM_ACTOR* my_room, PLAYER_ACTOR* player) {
+    int id = -1;
+
+    if (player != NULL) {
+        switch (player->now_main_index) {
+            case mPlayer_INDEX_HOLD:
+                id = player->main_data.hold.ftr_no;
+                break;
+            case mPlayer_INDEX_PUSH:
+                id = player->main_data.push.ftr_no;
+                break;
+            case mPlayer_INDEX_PULL:
+                id = player->main_data.pull.ftr_no;
+                break;
+            case mPlayer_INDEX_ROTATE_FURNITURE:
+                id = player->main_data.rotate_furniture.ftr_no;
+                break;
+        }
+    }
+    if (id < 0 && my_room->parent_ftr.ftrID != -1) {
+        id = my_room->parent_ftr.ftrID;
+    }
+    if (id < 0 && my_room->state != 0 && my_room->contact0.contact_flag && !my_room->demo_flag) {
+        id = my_room->contact0.ftrID;
+    }
+    return (id >= 0 && id < l_aMR_work.list_size && l_aMR_work.used_list[id]) ? id : -1;
+}
+
+static void aMR_mp_lock_pos(xyz_t pos, int under) {
+    int ut_x;
+    int ut_z;
+
+    if (aMR_Wpos2PlaceNumber(&ut_x, &ut_z, pos, 0)) {
+        if (under) {
+            aMR_mp_lock_ftr(aMR_place_table[0][ut_x + ut_z * UT_X_NUM], 0);
+        } else {
+            aMR_mp_lock_ut(ut_x + ut_z * UT_X_NUM, 0);
+        }
+    }
+}
+
+void aMR_mp_locks(unsigned char* cells, unsigned char* hold, unsigned char* units) {
+    ACTOR* actorx = (aMR_CLIP != NULL) ? aMR_CLIP->my_room_actor_p : NULL;
+    MY_ROOM_ACTOR* my_room = (MY_ROOM_ACTOR*)actorx;
+    FTR_ACTOR* list = l_aMR_work.ftr_actor_list;
+    u8* used = l_aMR_work.used_list;
+    PLAYER_ACTOR* player;
+    int requested;
+    int i;
+
+    bzero(cells, mCoBG_LAYER_NUM * UT_TOTAL_NUM / 8);
+    bzero(hold, mCoBG_LAYER_NUM * UT_TOTAL_NUM / 8);
+    bzero(units, UT_TOTAL_NUM / 8);
+    if (my_room == NULL || my_room->scene != SCENE_COTTAGE_MY || list == NULL || used == NULL) {
+        return;
+    }
+    aMR_mp_lk_cells = cells;
+    aMR_mp_lk_hold = hold;
+    aMR_mp_lk_units = units;
+    aMR_mp_lk_use = FALSE;
+    player = GET_PLAYER_ACTOR((GAME_PLAY*)gamePT);
+    // the furniture in the player's hands: every unit it has stood on since it was taken hold of (what it carries on
+    // top too), till it's let go and still, so all it did goes out at once
+    i = aMR_mp_in_hand(my_room, player);
+    if (aMR_mp_session_on && (i < 0 || i != aMR_mp_session_id)) {
+        int moving = FALSE;
+        int k;
+
+        // (let go while it still moves, or on its way into the pockets: the player's till then, and furniture taken
+        // hold of meanwhile goes out with it)
+        for (k = 0; k < l_aMR_work.list_size; k++) {
+            if (used[k] && list[k].state != aFTR_STATE_STOP && !(k < aMR_MP_FTR_MAX && aMR_mp_quiet[k]) &&
+                aMR_mp_session_has(&list[k])) {
+                aMR_mp_session_add(&list[k]);
+                moving = TRUE;
+            }
+        }
+        if (!moving) {
+            bzero(aMR_mp_session, sizeof(aMR_mp_session));
+            aMR_mp_session_on = FALSE;
+        }
+    }
+    aMR_mp_session_id = i;
+    if (i >= 0) {
+        aMR_mp_session_add(&list[i]);
+        aMR_mp_session_on = TRUE;
+    }
+    for (i = 0; aMR_mp_session_on && i < UT_TOTAL_NUM; i++) {
+        if ((aMR_mp_session[i >> 3] >> (i & 7)) & 1) {
+            aMR_mp_lock_ut(i, 0);
+        }
+    }
+    // furniture coming or going by this player's hand
+    for (i = 0; i < l_aMR_work.list_size; i++) {
+        if (used[i] && list[i].state != aFTR_STATE_STOP && !(i < aMR_MP_FTR_MAX && aMR_mp_quiet[i])) {
+            aMR_mp_lock_ftr(i, 0);
+        }
+    }
+    for (i = 0; i < aMR_RSV_FTR_NUM; i++) {
+        aMR_rsv_ftr_c* rsv = &my_room->rsv_ftr[i];
+        int units[4];
+        int n;
+        int k;
+
+        if (!rsv->exist_flag || aMR_mp_rsv_remote[i] || rsv->ftr_name >= FTR_NUM) {
+            continue;
+        }
+        n = aMR_GetFurniturePoccessUnitNo(units, rsv->ut_x, rsv->ut_z, aMR_mp_shape(rsv->ftr_name, rsv->angle_idx));
+        for (k = 0; k < n; k++) {
+            aMR_mp_lock_ut(units[k], 0);
+        }
+    }
+    // storage or a stereo open, the NES: others keep off, and what the player does there goes out as it happens
+    aMR_mp_lk_use = TRUE;
+    if (my_room->demo_flag || my_room->msg_type != aMR_MSG_STATE_NONE) {
+        aMR_mp_lock_ftr(my_room->demo_ftrID, 0);
+    }
+    for (i = 0; i < l_aMR_work.list_size; i++) {
+        if (used[i] && list[i].demo_status != 0 && !aMR_mp_remote(&list[i])) {
+            aMR_mp_lock_ftr(i, 0);
+        }
+    }
+    if (my_room->emu_info.request_flag) {
+        aMR_mp_lock_ftr(my_room->emu_ftrID, 0);
+    }
+#ifdef TARGET_VITA
+    aMR_mp_lock_ftr(s_vita_nes_picker_ftrID, 0);
+#endif
+    if (my_room->state != 0 && my_room->contact0.contact_flag) {
+        aMR_mp_lock_ftr(my_room->contact0.ftrID, 0);
+    }
+    aMR_mp_lk_use = FALSE;
+    // an item in flight, where it lands
+    if (my_room->throw_item_lock_flag) {
+        for (i = 0; i < 2 * UT_TOTAL_NUM; i++) {
+            mActor_name_t* fg_p = aMR_GetLayerTopFg(i / UT_TOTAL_NUM);
+
+            if (fg_p != NULL && fg_p[i % UT_TOTAL_NUM] == RSV_NO) {
+                aMR_mp_lock_ut(i % UT_TOTAL_NUM, 0);
+            }
+        }
+    }
+    // the player's own seat or bed (used, as above), or pick-up
+    if (player == NULL) {
+        return;
+    }
+    aMR_mp_lk_use = TRUE;
+    switch (player->now_main_index) {
+        case mPlayer_INDEX_SITDOWN:
+        case mPlayer_INDEX_SITDOWN_WAIT:
+        case mPlayer_INDEX_STANDUP:
+            aMR_mp_lock_pos(player->actor_class.world.position, TRUE);
+            if (my_room->contact0.contact_flag) {
+                aMR_mp_lock_ftr(my_room->contact0.ftrID, 0);
+            }
+            break;
+        case mPlayer_INDEX_LIE_BED:
+        case mPlayer_INDEX_WAIT_BED:
+        case mPlayer_INDEX_ROLL_BED:
+        case mPlayer_INDEX_STANDUP_BED:
+            aMR_mp_lock_ftr(my_room->bed_ftr_actor_idx, 0);
+            aMR_mp_lock_pos(player->actor_class.world.position, TRUE);
+            break;
+    }
+    requested = player->requested_main_index_changed ? player->requested_main_index : -1;
+    if (requested == mPlayer_INDEX_SITDOWN && my_room->contact0.contact_flag) {
+        aMR_mp_lock_ftr(my_room->contact0.ftrID, 0);
+    }
+    aMR_mp_lk_use = FALSE;
+    if (player->now_main_index == mPlayer_INDEX_PICKUP_FURNITURE || player->now_main_index == mPlayer_INDEX_PICKUP_JUMP ||
+        requested == mPlayer_INDEX_PICKUP_FURNITURE || requested == mPlayer_INDEX_PICKUP_JUMP) {
+        aMR_mp_lock_ftr(my_room->pickup_info.ftrID, 0);
+        aMR_mp_lock_pos(my_room->pickup_info.leaf_pos, FALSE);
+    }
+}
+
+// another player's furniture on its way into their pocket: the leaf it shows as, as the room draws this player's own
+void aMR_mp_draw_leaf(void* game_v, unsigned short item, const void* pos_v, float scale) {
+    GAME* game = (GAME*)game_v;
+    const xyz_t* pos = (const xyz_t*)pos_v;
+    int icon = aMR_ItemNo2IconNo(item);
+
+    OPEN_DISP(game->graph);
+    _texture_z_light_fog_prim(game->graph);
+    Matrix_translate(pos->x, pos->y, pos->z, MTX_LOAD);
+    Matrix_scale(scale, scale, scale, MTX_MULT);
+    gSPMatrix(NEXT_POLY_OPA_DISP, _Matrix_to_Mtx_new(game->graph), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(NEXT_POLY_OPA_DISP, aMR_IconNo2Gfx1(icon));
+    gSPDisplayList(NEXT_POLY_OPA_DISP, aMR_IconNo2Gfx2(icon));
+    CLOSE_DISP(game->graph);
+}
+
+// the save's floor of a player's house this room is, 0 for the cottage and anywhere else
+unsigned int aMR_mp_house_floor_off(void) {
+    MY_ROOM_ACTOR* my_room = (aMR_CLIP != NULL) ? (MY_ROOM_ACTOR*)aMR_CLIP->my_room_actor_p : NULL;
+    int floor_no;
+
+    if (my_room == NULL || mFI_GET_TYPE(mFI_GetFieldId()) != mFI_FIELD_PLAYER0_ROOM ||
+        (floor_no = mFI_GetPlayerHouseFloorNo(my_room->scene)) < 0 || floor_no >= mHm_ROOM_NUM) {
+        return 0;
+    }
+    return (unsigned int)((u8*)&Save_Get(homes[(mFI_GetFieldId() - mFI_FIELD_PLAYER0_ROOM) & 3]).floors[floor_no] -
+                          (u8*)&common_data.save.save);
+}
+
+// a stored thing's cell, kept in the furniture under it while the room is up
+int aMR_mp_holds_cell(int layer, int ut) {
+    int below;
+
+    if (aMR_CLIP == NULL || aMR_CLIP->my_room_actor_p == NULL || l_aMR_work.used_list == NULL || ut < 0 ||
+        ut >= UT_TOTAL_NUM) {
+        return FALSE;
+    }
+    for (below = mCoBG_LAYER0; below < layer && below <= mCoBG_LAYER1; below++) {
+        int id = aMR_place_table[below][ut];
+
+        if (id < l_aMR_work.list_size && l_aMR_work.used_list[id] &&
+            aMR_mp_is_storage(&l_aMR_work.ftr_actor_list[id])) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// the room's lamps and gyroids' steps as its leaving would save them, and the tempo
+int aMR_mp_meta(unsigned char* out, int max) {
+    ACTOR* actorx = (aMR_CLIP != NULL) ? aMR_CLIP->my_room_actor_p : NULL;
+    mHm_flr_c* room = Save_GetPointer(island.cottage.room);
+    FTR_ACTOR* list = l_aMR_work.ftr_actor_list;
+    int layer_bytes = sizeof(u64) + sizeof(room->layer_main.haniwa_step);
+    int size = 2 * layer_bytes + sizeof(TempoBeat_c);
+    TempoBeat_c tempo;
+    int layer;
+    int i;
+
+    if (actorx == NULL || ((MY_ROOM_ACTOR*)actorx)->scene != SCENE_COTTAGE_MY || list == NULL ||
+        l_aMR_work.used_list == NULL || max < size) {
+        return 0;
+    }
+    for (layer = mCoBG_LAYER0; layer < mCoBG_LAYER2; layer++) {
+        mActor_name_t* fg_p = aMR_GetLayerTopFg(layer);
+        u64 bits = 0;
+        u32 steps[8];
+        int ut_x;
+        int ut_z;
+
+        mem_copy((u8*)steps, (u8*)(&room->layer_main)[layer].haniwa_step, sizeof(steps));
+        for (ut_z = aMR_MIN_BOUND; ut_z <= aMR_MAX_BOUND && fg_p != NULL; ut_z++) {
+            for (ut_x = aMR_MIN_BOUND; ut_x <= aMR_MAX_BOUND; ut_x++) {
+                aMR_SaveOneFtrSwitchData(fg_p[ut_x + ut_z * UT_X_NUM], ut_x, ut_z, layer, &bits);
+            }
+        }
+        for (i = 0; i < l_aMR_work.list_size; i++) {
+            FTR_ACTOR* ftr_actor = &list[i];
+            aFTR_PROFILE* profile;
+
+            if (!l_aMR_work.used_list[i] || ftr_actor->layer != layer || ftr_actor->name >= FTR_NUM ||
+                (profile = aMR_GetFurnitureProfile(ftr_actor->name)) == NULL ||
+                !aFTR_CHECK_INTERACTION(profile->interaction_type, aFTR_INTERACTION_TYPE_HANIWA) ||
+                !mFI_Wpos2UtNum_inBlock(&ut_x, &ut_z, ftr_actor->position) || !aMR_BOUNDS_OK(ut_x, ut_z)) {
+                continue;
+            }
+            steps[ut_z - 1] &= ~(0xFu << ((ut_x - 1) * 4));
+            steps[ut_z - 1] |= (u32)(ftr_actor->haniwa_step & 0xF) << ((ut_x - 1) * 4);
+        }
+        mem_copy(out + layer * layer_bytes, (u8*)&bits, sizeof(bits));
+        mem_copy(out + layer * layer_bytes + sizeof(bits), (u8*)steps, sizeof(steps));
+    }
+    sAdo_GetRhythmInfo(&tempo);
+    mem_copy(out + 2 * layer_bytes, (u8*)&tempo, sizeof(tempo));
+    return size;
+}
+#endif
 
 static void aMR_RedmaFtrBank(void) {
     int i;

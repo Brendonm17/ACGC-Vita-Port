@@ -51,6 +51,14 @@ static void aNPC_set_head_angl(GAME* game, NPC_ACTOR* nactorx, s_xyz* rot_p, xyz
     s_xyz world_rot;
 
     Matrix_to_rotate_new(get_Matrix_now(), &world_rot, MTX_LOAD);
+#ifdef VITA_MP
+    // the game moving this villager already turned its head
+    if (mp_npc_is_puppet((ACTOR*)nactorx)) {
+        rot_p->x = nactorx->head.angle_y;
+        rot_p->y = nactorx->head.angle_x;
+        return;
+    }
+#endif
     aNPC_search_eye_target(nactorx, (GAME_PLAY*)game, &world_rot, rot_p);
     rot_p->x = nactorx->head.angle_y;
     rot_p->y = nactorx->head.angle_x;

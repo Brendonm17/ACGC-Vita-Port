@@ -10,6 +10,9 @@
 #include "m_room_type.h"
 #include "m_msg.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 typedef struct {
     s16 x;
@@ -172,11 +175,21 @@ static void Museum_Picture_Actor_move(ACTOR* actorx, GAME* game) {
 
         for (i = 0; i < mMmd_ART_NUM; i++) {
             int donator = mMmd_ArtInfo(i);
+#ifdef VITA_MP
+            u8 mp_name[PLAYER_NAME_LEN];
+            // a visitor's donation the host noted reads with their name, as a resident's does
+            int mp_named = donator == mMmd_DONATOR_DELETED_PLAYER && pc_mp_museum_donor(mMmd_CATEGORY_ART, i, mp_name);
+#endif
 
             if (aMP_CheckTalkAbleDist(&aMP_art_data_table[i].pos, game)) {
                 museum_picture->msg_no = (donator == mMmd_DONATOR_NONE)
                                              ? MSG_12193
                                              : ((donator == mMmd_DONATOR_DELETED_PLAYER) ? MSG_12192 : MSG_12191);
+#ifdef VITA_MP
+                if (mp_named) {
+                    museum_picture->msg_no = MSG_12191;
+                }
+#endif
                 if (mDemo_Request(mDemo_TYPE_SPEAK, actorx, &aMP_SetTalkInfo) && mMmd_IS_DONATED(donator)) {
                     mActor_name_t item = (i >= 0 && i < mMmd_ART_NUM)
                                              ? (mActor_name_t)(FTR_START(FTR_SUM_ART01) + (mActor_name_t)(i << 2))
@@ -193,6 +206,11 @@ static void Museum_Picture_Actor_move(ACTOR* actorx, GAME* game) {
                                           Save_Get(private_data[mMmd_DONATOR_PLR_IDX(donator)]).player_ID.player_name,
                                           PLAYER_NAME_LEN);
                     }
+#ifdef VITA_MP
+                    else if (mp_named) {
+                        mMsg_Set_free_str(mMsg_Get_base_window_p(), mMsg_FREE_STR0, mp_name, PLAYER_NAME_LEN);
+                    }
+#endif
                 }
             }
         }

@@ -22,9 +22,41 @@ static void aTS0_act_proc(NPC_ACTOR* nactorx, GAME_PLAY* play, int type) {
     (*act_proc[type])(nactorx, play);
 }
 
+#ifdef VITA_MP
+// in a shared town the song plays in step on every screen, and the dancers' whims come from it alike
+#define aTS0_RANDOM(actor, salt, n)                                                                          \
+    (pc_mp_aero_shared() ? (int)(pc_mp_aero_seed((actor)->radio.measure, (salt)) % (u32)(n)) : RANDOM(n))
+#define aTS0_RANDOM_F(actor, salt)                                                                           \
+    (pc_mp_aero_shared() ? (f32)(pc_mp_aero_seed((actor)->radio.measure, (salt)) & 0xFFFF) / 65536.0f      \
+                         : RANDOM_F(1.0f))
+
+// the one dancer who slips up at the end of that measure (the first out, in their order, whose roll comes
+// up), or -1; never the measure after a slip
+static int aTS0_mp_slipper(int measure) {
+    static f32 rate[] = { 0.0f, 0.05f, 0.1f, 0.15f, 0.3f };
+    int k;
+
+    if (measure < 0 || measure > 7) {
+        return -1;
+    }
+    for (k = 1; k < 5; k++) {
+        if (((aTS0_mp_present >> k) & 1) && (f32)(pc_mp_aero_seed(measure, 16 + k) & 0xFFFF) / 65536.0f < rate[k]) {
+            break;
+        }
+    }
+    if (k == 5 || aTS0_mp_slipper(measure - 1) >= 0) {
+        return -1;
+    }
+    return k;
+}
+#else
+#define aTS0_RANDOM(actor, salt, n) RANDOM(n)
+#define aTS0_RANDOM_F(actor, salt) RANDOM_F(1.0f)
+#endif
+
 static void aTS0_setup_delay_cnt(TAISOU_NPC0_ACTOR* actor) {
     if (actor->npc_class.actor_class.npc_id != SP_NPC_EV_TAISOU_0) {
-        actor->delay_cnt = RANDOM(48);
+        actor->delay_cnt = aTS0_RANDOM(actor, 64 + (actor->npc_class.actor_class.npc_id & 0xF), 48);
     }
 }
 
@@ -85,19 +117,32 @@ static void aTS0_ctrl_gymnastic_sub0(TAISOU_NPC0_ACTOR* actor) {
     } else {
         if (actor->radio.measure_progress >= aTS0_endRatio[(int)actor->radio.measure]) {
             s8 next_action = (actor->radio.measure + 1) % 10;
+            int slip;
+#ifdef VITA_MP
+            int tries = 0;
 
-            if (aTS0_failure_actor_p == NULL && next_action != 0 && next_action != 9 && RANDOM_F(1.0f) < chk_failure_rate[type]) {
+            if (pc_mp_aero_shared()) {
+                slip = aTS0_mp_slipper(actor->radio.measure) == type;
+            } else
+#endif
+            slip = aTS0_failure_actor_p == NULL && next_action != 0 && next_action != 9 && RANDOM_F(1.0f) < chk_failure_rate[type];
+
+            if (slip) {
                 s8 failure_action;
 
                 do {
+#ifdef VITA_MP
+                    failure_action = 1 + aTS0_RANDOM(actor, 40 + tries++, 8);
+#else
                     failure_action = 1 + RANDOM(8);
+#endif
                 } while (failure_action == next_action);
 
                 actor->gymnastic_state = 2;
                 actor->action = failure_action;
                 aTS0_setup_morph(actor);
                 aTS0_failure_actor_p = (ACTOR*)actor;
-            } else if (actor->npc_class.actor_class.npc_id == SP_NPC_SONCHO_D078 && RANDOM_F(1.0f) < 0.2f) {
+            } else if (actor->npc_class.actor_class.npc_id == SP_NPC_SONCHO_D078 && aTS0_RANDOM_F(actor, 48) < 0.2f) {
                 aTS0_set_animation2(actor, 12);
                 actor->gymnastic_state = 4;
                 aTS0_setup_morph(actor);
@@ -220,6 +265,15 @@ static void aTS0_ctrl_gymnastic(TAISOU_NPC0_ACTOR* actor, GAME_PLAY* play) {
                 }
                 break;
             case 1:
+#ifdef VITA_MP
+                // come on with the song already under way: straight into the move the others are doing
+                if (pc_mp_aero_shared() && actor->action == 11 && actor->radio.measure >= 1) {
+                    aTS0_ctrl_gymnastic_force(actor);
+                    actor->gymnastic_state = 0;
+                    aTS0_ctrl_gymnastic_sub0(actor);
+                    break;
+                }
+#endif
                 aTS0_ctrl_gymnastic_restart(actor);
                 break;
             case 4:

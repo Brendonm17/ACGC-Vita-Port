@@ -6136,7 +6136,29 @@ static void Player_actor_Set_EffectBgTree(GAME* game, mActor_name_t item, s16 bg
         }
 
         if (Common_Get(clip).make_effect_bg_proc != NULL) {
+#ifdef VITA_MP
+            if (mp_vfx_recording()) {
+                u8 body[17];
+                const u8* src = (const u8*)&pos;
+                int k;
+
+                body[0] = MP_VFX_TREE;
+                body[1] = (u8)bg_ef_type;
+                body[2] = (u8)(bg_ef_type >> 8);
+                body[3] = (u8)variant;
+                body[4] = (u8)(variant >> 8);
+                for (k = 0; k < 12; k++) {
+                    body[5 + k] = src[k];
+                }
+                mp_vfx_send(body, sizeof(body));
+            }
+            // its leaves and sound come with the sway on the other screens
+            pc_mp_fx_hush(TRUE);
             Common_Get(clip).make_effect_bg_proc(game, bg_ef_type, variant, &pos);
+            pc_mp_fx_hush(FALSE);
+#else
+            Common_Get(clip).make_effect_bg_proc(game, bg_ef_type, variant, &pos);
+#endif
         }
     }
 }
@@ -7577,6 +7599,11 @@ static int Player_actor_CheckAndRequest_main_pickup_all(GAME* game) {
                                                              item_is_signboard)) {
                             return TRUE;
                         }
+#ifdef VITA_MP
+                    } else if (field_type == mFI_FIELDTYPE2_FG && !mp_visitor_may(MP_RULE_ITEMS)) {
+                        // the host keeps its town's things where they are
+                        Player_actor_Request_main_refuse_pickup_all(game, Player_actor_MP_REFUSE_HOST);
+#endif
                     } else {
                         if (slot_idx >= 0 || can_exchange) {
                             if (Player_actor_request_main_pickup(game, changed_item, &target_pos, &item_pos, slot_idx,
@@ -7834,6 +7861,12 @@ static int Player_actor_CheckAndSet_UZAI_forNpc(ACTOR* actorx) {
                 (npc_actor->condition_info.demo_flg & aNPC_COND_DEMO_SKIP_UZAI_CHECK) == 0) {
                 npc_actor->uzai.tool++;
                 npc_actor->uzai.flag = TRUE;
+#ifdef VITA_MP
+                // another game moves this villager: this one takes it so the villager answers its hitter
+                if (mp_npc_is_puppet(actorx)) {
+                    mp_npc_claim(actorx);
+                }
+#endif
             }
         }
 

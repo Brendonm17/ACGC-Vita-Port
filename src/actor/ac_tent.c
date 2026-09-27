@@ -1,4 +1,7 @@
 #include "ac_tent.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #include "bg_item_h.h"
 #include "m_player_lib.h"
 #include "m_collision_bg.h"
@@ -66,6 +69,12 @@ static void aTnt_ChangeFg(ACTOR* actor, int type) {
 
     pos.z += 80.0f;
 
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, type != 0 ? MP_KEEP_UNIT : MP_KEEP_NONE)) {
+        return;
+    }
+#endif
     if (type == 0) {
         mFI_SetFG_common(0, pos, 1);
         return;

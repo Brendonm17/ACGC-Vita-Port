@@ -87,4 +87,15 @@ static void aUKI_actor_draw(ACTOR* actorx, GAME* game) {
     }
 
     CLOSE_POLY_OPA_DISP(graph);
+#ifdef VITA_MP
+    {
+        u8 rgba[4];
+
+        rgba[0] = (u8)uki->color[0];
+        rgba[1] = (u8)uki->color[1];
+        rgba[2] = (u8)uki->color[2];
+        rgba[3] = 255;
+        pc_mp_attach(MP_ATT_UKI, item != ITM_ROD, 0, rgba, get_Matrix_now());
+    }
+#endif
 }

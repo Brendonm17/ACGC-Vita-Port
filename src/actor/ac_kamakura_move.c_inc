@@ -19,6 +19,12 @@ static void change_FGUnit(STRUCTURE_ACTOR* kamakura, int type) {
     xyz_t_move(&pos, &kamakura->actor_class.world.position);
     pos.z += 80.0f;
 
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, type != FALSE ? MP_KEEP_UNIT : MP_KEEP_NONE)) {
+        return;
+    }
+#endif
     if (type == FALSE) {
         mFI_SetFG_common(EMPTY_NO, pos, TRUE);
         return;

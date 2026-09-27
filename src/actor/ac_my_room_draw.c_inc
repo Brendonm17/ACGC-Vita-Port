@@ -237,13 +237,25 @@ static void aMR_DrawOneFurniture(FTR_ACTOR* ftr_actor, ACTOR* actorx, GAME* game
             }
             Matrix_scale(scale, scale, scale, MTX_MULT);
         } else {
+            xyz_t at = ftr_actor->position;
+            s16 turn = ftr_actor->s_angle_y;
+
+#ifdef VITA_MP
+            // (moved by another player's hand: still easing into its new place)
+            if (ftr_actor->id >= 0 && ftr_actor->id < aMR_MP_FTR_MAX) {
+                at.x += aMR_mp_vis[ftr_actor->id].x;
+                at.y += aMR_mp_vis[ftr_actor->id].y;
+                at.z += aMR_mp_vis[ftr_actor->id].z;
+                turn += aMR_mp_vis_rot[ftr_actor->id];
+            }
+#endif
             if (ftr_actor->name == FTR_SUM_MEZACLOCK) { /* lower alarm clock ftr's height */
-                Matrix_translate(ftr_actor->position.x, ftr_actor->position.y - 4.0f, ftr_actor->position.z, MTX_LOAD);
+                Matrix_translate(at.x, at.y - 4.0f, at.z, MTX_LOAD);
             } else {
-                Matrix_translate(ftr_actor->position.x, ftr_actor->position.y, ftr_actor->position.z, MTX_LOAD);
+                Matrix_translate(at.x, at.y, at.z, MTX_LOAD);
             }
 
-            Matrix_RotateY(ftr_actor->s_angle_y, MTX_MULT);
+            Matrix_RotateY(turn, MTX_MULT);
 
             if (Save_Get(scene_no) == SCENE_MUSEUM_ROOM_FOSSIL &&
                 aFTR_CHECK_INTERACTION(profile->interaction_type, aFTR_INTERACTION_TYPE_FOSSIL) &&

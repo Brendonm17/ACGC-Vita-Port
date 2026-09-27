@@ -3,7 +3,14 @@ static void aHOI_set_se(HANDOVERITEM_ACTOR* handOverItem) {
     xyz_t sound_pos;
 
     xyz_t_move(&sound_pos, &Common_Get(clip).handOverItem_clip->master_actor->world.position);
+#ifdef VITA_MP
+    // the local player handing something over: the other screens hear it at its puppet
+    pc_mp_fx_capture(Common_Get(clip).handOverItem_clip->master_actor->part == ACTOR_PART_PLAYER);
+#endif
     sAdo_OngenTrgStart(0x56, &sound_pos);
+#ifdef VITA_MP
+    pc_mp_fx_capture(FALSE);
+#endif
     handOverItem->se_set_flag = FALSE;
   }
 }

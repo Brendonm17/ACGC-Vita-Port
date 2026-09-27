@@ -16,6 +16,10 @@ enum {
     mLE_TYPE_REQUEST,
     mLE_TYPE_MYORIGINAL_NAME,
     mLE_TYPE_ISLAND_NAME,
+#ifdef VITA_MP
+    mLE_TYPE_MP_TICKET, // multiplayer travel ticket at Porter's
+    mLE_TYPE_MP_CHAT,   // multiplayer chat message
+#endif
 
     mLE_TYPE_NUM
 };

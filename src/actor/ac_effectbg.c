@@ -6,6 +6,13 @@
 #include "m_debug.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+// (the lights on the trees blink alike on every screen)
+#define aEBG_FRAME(play) pc_mp_world_frame((play)->game_frame)
+#else
+#define aEBG_FRAME(play) ((play)->game_frame)
+#endif
 
 #define EffectBg_STATUS_ACTIVE (1 << 0)
 #define EffectBg_STATUS_1 (1 << 1)
@@ -935,7 +942,7 @@ static int EffectBG_object_before_display(GAME* game, cKF_SkeletonInfo_R_c* keyf
             *joint_shape = NULL;
         } else {
             GAME_PLAY* play = (GAME_PLAY*)game;
-            int type = ((play->game_frame & ~0x1F) + efbg->block_ux + efbg->block_uz) % 3;
+            int type = ((aEBG_FRAME(play) & ~0x1F) + efbg->block_ux + efbg->block_uz) % 3;
 
             OPEN_DISP(game->graph);
             if (type == 0) {
@@ -970,7 +977,7 @@ static int EffectBG_object_before_display_xlu(GAME* game, cKF_SkeletonInfo_R_c* 
             *joint_shape = NULL;
         } else {
             GAME_PLAY* play = (GAME_PLAY*)game;
-            int type = ((play->game_frame & ~0x1F) + efbg->block_ux + efbg->block_uz) % 3;
+            int type = ((aEBG_FRAME(play) & ~0x1F) + efbg->block_ux + efbg->block_uz) % 3;
             f32 remain = efbg->timer_max - efbg->timer;
             f32 divisor = efbg->timer_max - 70;
             u8 alpha = (u8)(255.0f * (remain / divisor));

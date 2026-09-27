@@ -6,6 +6,9 @@
 #include "m_field_info.h"
 #include "m_scene_table.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 /**
  * @brief Clamps the input cockroach count between [0, mCkRh_MAX_NUM].
@@ -100,6 +103,11 @@ extern void mCkRh_InitGokiSaveData_AllRoom() {
  * @param scene_id The current scene id
  **/
 extern void mCkRh_SetGoingOutCottageTime(int scene_id) {
+#ifdef VITA_MP
+    if (mp_is_guest()) {
+        return; // (the host's save keeps the town's cockroaches)
+    }
+#endif
     if (scene_id == SCENE_COTTAGE_MY) {
         Save_Set(island.cottage.goki.time.year, Common_Get(time.rtc_time.year));
         Save_Set(island.cottage.goki.time.month, Common_Get(time.rtc_time.month));
@@ -227,6 +235,12 @@ extern void mCkRh_DecideNowGokiFamilyCount(int player_no) {
 extern int mCkRh_PlussGokiN_NowRoom(int count, int scene_no) {
     mActor_name_t fieldid = mFI_GetFieldId();
 
+#ifdef VITA_MP
+    if (mp_is_guest()) {
+        return FALSE;
+    }
+#endif
+
     if (mFI_IS_PLAYER_ROOM(fieldid)) {
         int player_no = Common_Get(player_no);
         int house_field_id = mFI_GET_PLAYER_ROOM_NO(fieldid);
@@ -251,6 +265,12 @@ extern int mCkRh_PlussGokiN_NowRoom(int count, int scene_no) {
  **/
 extern int mCkRh_MinusGokiN_NowRoom(int count, int scene_id) {
     mActor_name_t field_id = mFI_GetFieldId();
+
+#ifdef VITA_MP
+    if (mp_is_guest()) {
+        return FALSE;
+    }
+#endif
     if (mFI_IS_PLAYER_ROOM(field_id)) {
         int player_no = Common_Get(player_no);
         int house_field_id = mFI_GET_PLAYER_ROOM_NO(field_id);

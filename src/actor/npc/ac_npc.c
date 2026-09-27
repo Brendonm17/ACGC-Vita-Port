@@ -17,6 +17,9 @@
 #ifdef TARGET_PC
 #include "pc_bswap.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 extern aNPC_draw_data_c npc_draw_data_tbl[];
 

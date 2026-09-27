@@ -42,6 +42,10 @@ extern void mPlib_DMA_player_Part_Table(s8* part_table_p, int idx);
 extern void mPlib_change_player_cloth_info(mPr_cloth_c* cloth_p, mActor_name_t item);
 extern void mPlib_change_player_cloth_info_lv2(Private_c* priv, mActor_name_t item);
 extern void mPlib_Load_PlayerTexAndPallet(void* tex_p, void* pal_p, int idx);
+#ifdef VITA_MP
+extern void mPlib_Get_FaceRom_forLook(int sex, int face_type, int swell, int decoy, int sunburn_rank, u32* tex_rom,
+                                      u32* pal_rom);
+#endif
 extern mPlayer_change_data_from_submenu_c* mPlib_Get_change_data_from_submenu_p(void);
 extern void mPlib_Clear_change_data_from_submenu(void);
 extern void mPlib_request_main_give_from_submenu(mActor_name_t item, int after_mode, int present_flag,

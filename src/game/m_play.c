@@ -43,6 +43,9 @@
 #include "pc_diag.h"
 #include "pc_platform.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define Game_play_HYRAL_SIZE 0x3E800 // 256,000 bytes
 #define Game_play_IS_PAUSED(play) (ZURUMODE2_ENABLED() ? (!Pause_proc(&(play)->pause, &(play)->game.pads[PAD1])) : FALSE)
@@ -398,6 +401,10 @@ extern void play_cleanup(GAME* game) {
     }
 
     zelda_CleanupArena();
+#ifdef VITA_MP
+    // the actors are gone: nothing multiplayer keeps points at them any more
+    pc_mp_play_gone(game_get_next_game_init(game) == famicom_emu_init);
+#endif
 }
 
 static void VR_Box_ct(GAME_PLAY* play) {
@@ -508,12 +515,73 @@ extern void play_init(GAME* game) {
     mEv_2nd_init(&play->event);
     mTD_player_keydata_init(play);
     Balloon_init(play);
+#ifdef VITA_MP
+    // the host posts the board's automatic notices; a visitor holding the tourney's final record finds its prize
+    if (!mp_town_writer_allowed()) {
+        mFR_mp_visitor_prize();
+    } else
+#endif
     mNtc_set_auto_nwrite_data();
     banti_ct();
     watch_my_step_ct();
     event_title_flag_off();
     mEA_GetCardDLProgram();
 }
+
+#ifdef VITA_MP
+static ClObj_c* s_mp_wait_oc[Cl_COLLIDER_NUM];
+static int s_mp_wait_oc_n;
+static unsigned int s_mp_run_frame; // g_mp_frame of the last run-on frame: the list is only this menu's
+
+// the event characters this game runs for everyone go on behind its menu while the others watch them, the
+// other players' and their villagers' copies follow them, and what's falling lands; the menu has had the
+// buttons, and everything else, this game's own player too, waits where it stands and still stands in the way
+static void Game_play_mp_run_on(GAME_PLAY* play) {
+    GAME* game = (GAME*)play;
+    CollisionCheck_c* cc = &play->collision_check;
+    pad_t pads[MAXCONTROLLERS];
+    int i;
+
+    if (g_mp_frame != s_mp_run_frame + 1) {
+        s_mp_wait_oc_n = 0;
+        for (i = 0; i < cc->collider_num; i++) {
+            if (cc->collider_table[i] != NULL) {
+                s_mp_wait_oc[s_mp_wait_oc_n++] = cc->collider_table[i];
+            }
+        }
+    }
+    CollisionCheck_OC(game, cc);
+    CollisionCheck_clear(game, cc);
+    for (i = 0; i < s_mp_wait_oc_n; i++) {
+        ACTOR* owner = s_mp_wait_oc[i]->owner_actor;
+
+        if (owner != NULL) {
+            if (pc_mp_menu_runs(owner)) {
+                continue;
+            }
+            owner->status_data.collision_vec.x = 0.0f;
+            owner->status_data.collision_vec.y = 0.0f;
+            owner->status_data.collision_vec.z = 0.0f;
+        }
+        CollisionCheck_setOC(game, cc, s_mp_wait_oc[i]);
+    }
+    memcpy(pads, game->pads, sizeof(pads));
+    bzero(game->pads, sizeof(game->pads));
+    play->game_frame++;
+    pc_mp_menu_pre(play);
+    pc_mp_menu_run(TRUE);
+    Actor_info_call_actor_mp_menu(play, &play->actor_info);
+    bIT_mp_menu_move();
+    if (mp_is_host()) {
+        aWeather_mp_menu_roll();
+    }
+    pc_mp_menu_post(play);
+    pc_mp_menu_run(FALSE);
+    memcpy(game->pads, pads, sizeof(pads));
+    mTRC_mp_menu_move(game);
+    s_mp_run_frame = g_mp_frame;
+}
+#endif
 
 static void Game_play_move_fbdemo_not_move(GAME* game) {
     GAME_PLAY* play = (GAME_PLAY*)game;
@@ -548,7 +616,13 @@ static void Game_play_move_fbdemo_not_move(GAME* game) {
         game->doing_point = 9;
         game->doing_point = 0;
         game->doing_point_specific = 0x90;
+#ifdef VITA_MP
+        pc_mp_play_pre(play);
+#endif
         Actor_info_call_actor(play, &play->actor_info);
+#ifdef VITA_MP
+        pc_mp_play_post(play);
+#endif
         game->doing_point = 0;
         game->doing_point_specific = 0x91;
         game->doing_point = 1;
@@ -557,6 +631,13 @@ static void Game_play_move_fbdemo_not_move(GAME* game) {
         mMsg_Main(game);
     } else {
         mVibctl_set_force_stop(2);
+#ifdef VITA_MP
+        if (pc_mp_runs_on()) {
+            Game_play_mp_run_on(play);
+        } else if (mp_train_menu_guest()) {
+            mTRC_mp_menu_move(game);
+        }
+#endif
     }
 
     fbdemo_fade_move(&play->color_fade, game_GameFrame);
@@ -566,6 +647,9 @@ static void Game_play_move(GAME* game) {
     GAME_PLAY* play = (GAME_PLAY*)game;
     int pause;
 
+#ifdef VITA_MP
+    pc_mp_play_frame(play);
+#endif
     game->doing_point = 0;
     game->doing_point_specific = 0x8D;
     game->doing_point = 1;
@@ -599,7 +683,12 @@ static void Game_play_move(GAME* game) {
         game->doing_point = 1;
         Game_play_camera_proc(play);
         game->doing_point = 2;
+#ifdef VITA_MP
+        // Pete comes by for whichever player is at the houses (a visitor too while the host is elsewhere)
+        pc_mp_mail_proc(play);
+#else
         mPO_business_proc(play);
+#endif
         game->doing_point = 3;
         mTRC_move(game);
         game->doing_point = 4;
@@ -836,6 +925,9 @@ static int makeBumpTexture(GAME_PLAY* play, GRAPH* graph1, GRAPH* graph2) {
         Actor_info_draw_actor(play, &play->actor_info);
         PC_DIAG(3, "makeBumpTexture: Actor draw done, Camera2...\n");
         Camera2_draw(play);
+#ifdef VITA_MP
+        pc_mp_chat_draw(play); // (under the talk windows)
+#endif
         mMsg_Draw((GAME*)play);
     }
 
@@ -908,6 +1000,9 @@ static void Game_play_draw(GAME_PLAY* play) {
             watch_my_step_draw(play);
             banti_draw(play);
             mSM_submenu_draw(&play->submenu, (GAME*)play);
+#ifdef VITA_MP
+            pc_mp_chat_draw_over(play);
+#endif
         }
     }
     if (zurumode_flag != 0) {

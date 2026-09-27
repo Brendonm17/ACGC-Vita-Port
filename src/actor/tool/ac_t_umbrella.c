@@ -5,6 +5,9 @@
 #include "m_lib.h"
 #include "m_rcp.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aTUMB_ACTION_TAKEOUT_BEFORE,
@@ -255,6 +258,9 @@ static void aTUMB_actor_move(ACTOR* actor, GAME* game) {
 
     umbrella = (UMBRELLA_ACTOR*)actor;
     action = umbrella->tools_class.work0;
+#ifdef VITA_MP
+    pc_mp_fx_capture(actor->parent_actor != NULL && actor->parent_actor->part == ACTOR_PART_PLAYER);
+#endif
 
     if (action != umbrella->action) {
         aTUMB_setupAction(umbrella, action);
@@ -265,7 +271,31 @@ static void aTUMB_actor_move(ACTOR* actor, GAME* game) {
     }
 
     umbrella->action_proc(actor);
+#ifdef VITA_MP
+    pc_mp_fx_capture(FALSE);
+#endif
 }
+
+#ifdef VITA_MP
+// a remote player's umbrella: the same opening and closing shapes, stepped as aTUMB_anime_proc does
+void aTUMB_mp_scales(int action, f32* frame, xyz_t* scale_e, xyz_t* scale_kasa) {
+    static f32 max_anm[6] = { 0.0f, 26.0f, 30.0f, 30.0f, 26.0f, 0.0f };
+    UMBRELLA_ACTOR umb;
+
+    if (action < aTUMB_ACTION_TAKEOUT_BEFORE || action > aTUMB_ACTION_DELETED3) {
+        action = aTUMB_ACTION_DELETED3;
+        *frame = 26.0f;
+    }
+    *frame += 0.5f;
+    if (*frame >= max_anm[action]) {
+        *frame = max_anm[action];
+    }
+    umb.action = action;
+    umb.frame = *frame;
+    aTUMB_calc_model_scale_sub(scale_e, &umb, 0);
+    aTUMB_calc_model_scale_sub(scale_kasa, &umb, 1);
+}
+#endif
 
 static void aTUMB_actor_draw(ACTOR* actor, GAME* game) {
     static UMBRELLA_MODEL draw_dt[40] = {

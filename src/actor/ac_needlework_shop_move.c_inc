@@ -219,10 +219,22 @@ static void aNW_wait(STRUCTURE_ACTOR* shop, GAME_PLAY* play) {
     ACTOR* actor;
     int request_type;
     int check_open;
+#ifdef VITA_MP
+    int out;
+#endif
 
     actor = (ACTOR*)shop;
     request_type = shop->request_type;
 
+#ifdef VITA_MP
+    // another player through this door: it opens and shuts behind them
+    if (request_type == 0 && mDemo_Check(mDemo_TYPE_DOOR, actor) == FALSE && mp_door_take(shop, &out)) {
+        shop->request_type = out ? 2 : 1;
+        aNW_setup_animation(shop, 0.5f);
+        aNW_setup_action(shop, aNW_ACTION_OPEN_DOOR);
+        return;
+    }
+#endif
     if (mDemo_Check(mDemo_TYPE_DOOR, actor) != FALSE) {
         if (request_type == 4) {
             aNW_setup_animation(shop, 0.5f);

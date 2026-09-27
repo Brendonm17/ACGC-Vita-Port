@@ -4,6 +4,7 @@
 #ifdef TARGET_VITA
 
 #include "vita_design_fs.h"
+#include "pc_platform.h"
 
 #include <dirent.h>
 #include <string.h>
@@ -44,7 +45,7 @@ void design_fs_scan(void) {
     g_count = 0;
     DIR* dir = opendir(DESIGN_DIR);
     if (!dir) {
-        fprintf(stderr, "[VITA] design_fs_scan: cannot open %s (errno=%d)\n", DESIGN_DIR, errno);
+        pc_log_error("[VITA] design_fs_scan: cannot open %s (errno=%d)\n", DESIGN_DIR, errno);
         return;
     }
     struct dirent* ent;
@@ -87,7 +88,7 @@ int design_fs_import(int i, int dither, vdc_design_t* out, char* name_ascii, int
     int w, h, ch;
     unsigned char* data = stbi_load(path, &w, &h, &ch, 4);
     if (!data) {
-        fprintf(stderr, "[VITA] design_fs_import: decode failed %s: %s\n", path, stbi_failure_reason());
+        pc_log_error("[VITA] design_fs_import: decode failed %s: %s\n", path, stbi_failure_reason());
         return -2;
     }
     int r = vdc_rgba_to_design(data, w, h, dither, out, score);
@@ -136,7 +137,7 @@ int design_fs_export(const uint8_t* tex, int palette, const char* name_ascii) {
 
     FILE* f = fopen(path, "wb");
     if (!f) {
-        fprintf(stderr, "[VITA] design_fs_export: cannot write %s (errno=%d)\n", path, errno);
+        pc_log_error("[VITA] design_fs_export: cannot write %s (errno=%d)\n", path, errno);
         return -5;
     }
     fwrite(png, 1, (size_t)len, f);

@@ -1,4 +1,7 @@
 #include "ac_ins_hitodama.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #include "m_field_info.h"
 #include "m_name_table.h"
@@ -59,6 +62,10 @@ extern void aIHD_actor_init(ACTOR* actorx, GAME* game) {
         mFI_BkNum2WposXZ(&aIHD_MAX_X(insect), &aIHD_MAX_Z(insect), actorx->block_x, actorx->block_z);
         aIHD_MAX_X(insect) += aIHD_RANGE;
         aIHD_MAX_Z(insect) += aIHD_RANGE;
+#ifdef VITA_MP
+        // a shared spirit's acre is the host's record, taken when it was rolled
+        if (mp_town_writer_allowed() && !pc_mp_cr_listed(actorx))
+#endif
         aIHD_unregist_set_block_table(actorx);
         act = aIHD_ACTION_FLY;
     }

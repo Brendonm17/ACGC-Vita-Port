@@ -7,6 +7,9 @@
 #include "libultra/libultra.h"
 #include "m_field_assessment.h"
 #include "m_field_make.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #include "m_common_data.h"
 #include "m_play.h"
 #include "m_event.h"
@@ -1638,6 +1641,14 @@ static int aSOG_gyoei_make(aSOG_set_data_c* set_data, int* block_xz, GAME* game)
     init_data.extra_data = set_data->extra_data;
     init_data.game = game;
 
+#ifdef VITA_MP
+    if (mp_cr_remote_roll()) {
+      // another player's step: only the others hear of it
+      pc_mp_cr_remote_spawn(MP_CR_FISH, init_data.fish_type, &init_data.position, init_data.extra_data);
+      set_data->should_spawn = FALSE;
+      return TRUE;
+    }
+#endif
     /* send fish off to fish actor to spawn actual actor */
     res = (*Common_Get(clip.gyo_clip)->make_gyoei_proc)(&init_data);
     set_data->should_spawn = FALSE;
@@ -2166,6 +2177,13 @@ extern int aSOG_gyoei_set(SET_MANAGER* set_manager, GAME_PLAY* play) {
   int res;
 
   res = FALSE;
+#ifdef VITA_MP
+  // a visitor's steps are rolled by the host; an acre already out comes from its list
+  if (mp_cr_guest_step(set_manager->player_pos.next_bx, set_manager->player_pos.next_bz, MP_CR_FISH) ||
+      mp_cr_host_step(play, set_manager->player_pos.next_bx, set_manager->player_pos.next_bz, MP_CR_FISH)) {
+    return FALSE;
+  }
+#endif
   block_kind = mFI_BkNum2BlockKind(set_manager->player_pos.next_bx, set_manager->player_pos.next_bz);
 
   /* check if there's any condition preventing a fish from spawning in the next acre, and spawn one if not */

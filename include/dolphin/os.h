@@ -33,6 +33,9 @@ extern void __OSCacheInit();
 void OSPanic(const char* file, int line, const char* message, ...);
 void OSVReport(const char* fmt, va_list list);
 void OSReport(const char* fmt, ...);
+#ifdef TARGET_PC
+void pc_log_error(const char* fmt, ...); // pc_os.c: errors only, into the port's one log
+#endif
 
 extern void __OSPSInit();
 extern void __OSCacheInit();

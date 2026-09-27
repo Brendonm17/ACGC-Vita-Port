@@ -19,6 +19,9 @@
 #ifdef TARGET_PC
 #include "pc_bswap.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define aNPC_UNIT_RIGHT (1 << 0)
 #define aNPC_UNIT_LEFT (1 << 1)

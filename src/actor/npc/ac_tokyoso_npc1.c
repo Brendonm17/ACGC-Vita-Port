@@ -7,6 +7,9 @@
 #include "m_msg.h"
 #include "m_soncho.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // TODO: coordinate enum types with ac_tokyoso_control
 
@@ -150,6 +153,15 @@ static void aTKN1_actor_move(ACTOR* actorx, GAME* game) {
     aEv_tokyoso_c* tokyoso = (aEv_tokyoso_c*)mEv_get_save_area(mEv_EVENT_SPORTS_FAIR_FOOT_RACE, 8);
 
     NPC_CLIP->move_proc(actorx, game);
+#ifdef VITA_MP
+    // in a shared town this screen's runners go with its own first runner, not the record
+    if (pc_mp_ev_torn(mEv_EVENT_SPORTS_FAIR_FOOT_RACE) >= 0) {
+        if (pc_mp_ev_torn(mEv_EVENT_SPORTS_FAIR_FOOT_RACE)) {
+            Actor_delete(actorx);
+        }
+        tokyoso = NULL;
+    }
+#endif
     if (tokyoso != NULL) {
         if (tokyoso->_00 == 3) {
             if ((tokyoso->flags & aTKC_NPCIDX2DELETEFLG(actorx->npc_id)) == 0) {

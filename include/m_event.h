@@ -429,6 +429,10 @@ typedef struct ghost_spirit_block_data_s {
 
 #define mEv_GHOST_FLAG_ACTIVE 0x4000 // TODO: do these live in the ghost actor itself?
 #define mEv_GHOST_FLAG_RETURNED_SPIRITS 0x8000
+#ifdef VITA_MP
+// a visitor in multiplayer slot 1..3 met Wisp tonight (bits 8..10; bit 4 is what ghost_start reads for player 4)
+#define mEv_GHOST_FLAG_MP_GUEST(slot) (1 << (7 + (slot)))
+#endif
 
 #define mEv_GHOST_COMMON_SPAWNED_SPIRITS 0x8000
 

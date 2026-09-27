@@ -374,11 +374,19 @@ static void aEGH_select_wait(EV_GHOST_ACTOR* ghost, GAME_PLAY* play) {
   mEv_gst_c* ghost_data = (mEv_gst_c*)mEv_get_save_area(mEv_EVENT_GHOST, 54);
 
   if (order == 1 && mMsg_Check_MainNormalContinue(mMsg_Get_base_window_p())) {
+    int choice = mChoice_Get_ChoseNum(mChoice_Get_base_window_p());
+
+#ifdef VITA_MP
+    // a visitor's menu has no roof in it (it has none here to paint): its second choice is the item
+    if (mp_visitor_rights() && choice == mChoice_CHOICE1) {
+      choice = mChoice_CHOICE2;
+    }
+#endif
     ghost->after_talk_think_act = 1;
     ghost_data->flags |= mEv_GHOST_FLAG_RETURNED_SPIRITS;
     mDemo_Set_OrderValue(mDemo_ORDER_NPC0, 9, 0);
 
-    switch (mChoice_Get_ChoseNum(mChoice_Get_base_window_p())) {
+    switch (choice) {
       case mChoice_CHOICE0: /* Clear weeds */
       {
         u32 num_weeds = mFI_GetItemNumField(GRASS_A, GRASS_C);
@@ -590,6 +598,20 @@ static int aEGH_talk_init(ACTOR* actorx, GAME* game) {
 
 typedef void (*aEGH_TALK_PROC)(EV_GHOST_ACTOR*, GAME_PLAY*);
 
+#ifdef VITA_MP
+// a visitor who met Wisp is noted in the town's record by its slot, inside the talk so it rides the talk's result;
+// the host brings spirits out for it
+static void aEGH_mp_note_guest(void) {
+  mEv_gst_c* ghost_save = (mEv_gst_c*)mEv_get_save_area(mEv_EVENT_GHOST, 54);
+  int slot = mp_lobby_self_slot();
+
+  if (Common_Get(player_no) == mPr_FOREIGNER && ghost_save != NULL && slot >= 1 && slot < MP_MAX_PEERS &&
+      aEGH_bitcheck_func(aEGH_BIT_FOUND_GHOST) != 0) {
+    ghost_save->flags |= mEv_GHOST_FLAG_MP_GUEST(slot);
+  }
+}
+#endif
+
 static int aEGH_talk_end_chk(ACTOR* actorx, GAME* game) {
   static aEGH_TALK_PROC proc[aEGH_TALK_NUM] = {
     (aEGH_TALK_PROC)&none_proc1,
@@ -605,6 +627,9 @@ static int aEGH_talk_end_chk(ACTOR* actorx, GAME* game) {
   int res = FALSE;
 
   (*proc[ghost->talk_act])(ghost, play);
+#ifdef VITA_MP
+  aEGH_mp_note_guest();
+#endif
 
   if (mDemo_Check(mDemo_TYPE_SPEAK, actorx) == FALSE && mDemo_Check(mDemo_TYPE_TALK, actorx) == FALSE) {
     if (ghost->talk_act == aEGH_TALK_CLEAR_GRASS) {

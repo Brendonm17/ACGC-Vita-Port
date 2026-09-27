@@ -7,6 +7,9 @@
 #include "m_font.h"
 #include "m_common_data.h"
 #include "m_debug.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static u8 mLE_player_title[16] = "Enter your name.";
 static u8 mLE_country_title[18] = "Enter Destination.";
@@ -102,6 +105,24 @@ static mLE_win_data_c mLE_win_data[] = {
         mISL_ISLAND_NAME_LEN, 80, { 175, 70, 40, 255 },
         shi_win_mode, shi_win_model,
     },
+#ifdef VITA_MP
+    // travel ticket: the town-name window, into a caller buffer
+    {
+        { 118.0f, 74.0f }, 1.0f,
+        { 134.0f, 43.0f }, 0.875f,
+        mLE_country_title, sizeof(mLE_country_title),
+        8, 80, { 215, 15, 0, 255 },
+        mra_win_mode, mra_win_model,
+    },
+    // chat: 32 letters in the chat balloon's size; drawn as a speech balloon (mLE_set_dl), not a window
+    {
+        { 0.0f, 0.0f }, 0.875f,
+        { 0.0f, 0.0f }, 1.0f,
+        NULL, 0,
+        32, 182, { 45, 45, 35, 255 },
+        NULL, NULL,
+    },
+#endif
 };
 // clang-format on
 
@@ -182,6 +203,24 @@ static void mLE_set_dl(Submenu* submenu, GAME* game, mSM_MenuInfo_c* menu_info) 
     int tex_y;
     f32 text_pos_x;
     f32 text_pos_y;
+
+#ifdef VITA_MP
+    // chat: the text sits in a speech balloon like the one the others will see
+    if (menu_info->data0 == mLE_TYPE_MP_CHAT) {
+        pc_mp_chat_field_art(graph, pos_x, pos_y);
+        if (editor_ovl != NULL) {
+            text_pos_x = MP_CHAT_FIELD_TEXT_X + pos_x;
+            text_pos_y = MP_CHAT_FIELD_Y - 7.0f - pos_y;
+            submenu->overlay->set_char_matrix_proc(graph);
+            mFont_SetLineStrings(game, editor_ovl->input_str, editor_ovl->input_length, text_pos_x, text_pos_y,
+                                 data_p->edit_color.r, data_p->edit_color.g, data_p->edit_color.b, 255, FALSE, TRUE,
+                                 data_p->edit_scale, data_p->edit_scale, mFont_MODE_POLY);
+            text_pos_x += ((f32)(int)GETREG(TAKREG, 10) - 7.0f) + (f32)(int)editor_ovl->_26 * data_p->edit_scale;
+            submenu->overlay->editor_ovl->cursol_draw(submenu, game, text_pos_x, text_pos_y);
+        }
+        return;
+    }
+#endif
 
     Matrix_scale(16.0f, 16.0f, 1.0f, MTX_LOAD);
     Matrix_translate(pos_x, pos_y, 140.0f, MTX_MULT);

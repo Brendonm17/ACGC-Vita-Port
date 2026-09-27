@@ -39,6 +39,9 @@ static void aWIN_set_bgOffset(STRUCTURE_ACTOR* windmill, int idx) {
 
 static void aWIN_actor_move(ACTOR* actor, GAME* game) {
     STRUCTURE_ACTOR* windmill = (STRUCTURE_ACTOR*)actor;
+#ifdef VITA_MP
+    pc_mp_kf_phase(&windmill->keyframe.frame_control); // (turning alike on every screen)
+#endif
     windmill->keyframe_state = cKF_SkeletonInfo_R_play(&windmill->keyframe);
     (*windmill->action_proc)(windmill, (GAME_PLAY*)game);
 }

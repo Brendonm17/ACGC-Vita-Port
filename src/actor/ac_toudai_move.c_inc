@@ -177,6 +177,12 @@ static void aTOU_actor_move(ACTOR* actor, GAME* game){
     GAME_PLAY* play = (GAME_PLAY*)game;
     TOUDAI_ACTOR* light = (TOUDAI_ACTOR*)actor; 
 
+#ifdef VITA_MP
+    // (the beam sweeps alike on every screen)
+    if (light->current_proc == 2) {
+        pc_mp_kf_phase(&light->keyframe.frame_control);
+    }
+#endif
     light->keyframe_state = cKF_SkeletonInfo_R_play(&light->keyframe);
     light->current_frame = light->keyframe.frame_control.current_frame;
 

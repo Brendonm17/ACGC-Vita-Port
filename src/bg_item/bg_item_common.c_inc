@@ -84,6 +84,228 @@ static int mFI_search_unit_around_high(xyz_t* pos, mActor_name_t item, xyz_t* cu
     return res;
 }
 
+#ifdef VITA_MP
+// what the local player sets moving is shown on the other screens; theirs shows here without touching the town
+#define bIT_DROP_MP_OWN    0x4000 // the local player's: what it leads to is sent as well
+#define bIT_DROP_MP_VISUAL 0x8000 // another player's: never writes the town
+
+static u8 bIT_mp_own_hole[bIT_HOLE_NUM];
+static u8 bIT_mp_vis_hole[bIT_HOLE_NUM];
+static u8 bIT_mp_vis_pit[bIT_PIT_NUM];
+static u8 bIT_mp_vis_ten_coin[bIT_TEN_COIN_NUM];
+static s16 bIT_mp_rock_paid[bIT_TEN_COIN_NUM]; // a money rock's frames left at its last payout
+static u8 bIT_mp_rock_mine[bIT_TEN_COIN_NUM];  // that payout was this player's
+static int bIT_mp_owner;     // an entry of the local player's is moving
+static int bIT_mp_replaying; // entries made now show another player's doing
+static u16 bIT_mp_drop_flags;
+static mActor_name_t bIT_mp_drop_display;
+static mActor_name_t bIT_mp_drop_target_fg;
+
+static void bIT_actor_hole_effect_move_main(bg_item_hole_c* hole);
+
+static int bIT_mp_mine(void) {
+    return !bIT_mp_replaying && (bIT_mp_owner > 0 || mp_vfx_recording());
+}
+
+static int bIT_mp_w16(u8* p, int v) {
+    p[0] = (u8)v;
+    p[1] = (u8)(v >> 8);
+    return 2;
+}
+
+static int bIT_mp_wf(u8* p, f32 v) {
+    const u8* s = (const u8*)&v;
+
+    p[0] = s[0];
+    p[1] = s[1];
+    p[2] = s[2];
+    p[3] = s[3];
+    return 4;
+}
+
+static int bIT_mp_wpos(u8* p, const xyz_t* v) {
+    bIT_mp_wf(p, v->x);
+    bIT_mp_wf(p + 4, v->y);
+    bIT_mp_wf(p + 8, v->z);
+    return 12;
+}
+
+static int bIT_mp_r16(const u8* p) {
+    return (s16)(p[0] | (p[1] << 8));
+}
+
+static f32 bIT_mp_rf(const u8* p) {
+    f32 v;
+    u8* d = (u8*)&v;
+
+    d[0] = p[0];
+    d[1] = p[1];
+    d[2] = p[2];
+    d[3] = p[3];
+    return v;
+}
+
+static void bIT_mp_rpos(xyz_t* v, const u8* p) {
+    v->x = bIT_mp_rf(p);
+    v->y = bIT_mp_rf(p + 4);
+    v->z = bIT_mp_rf(p + 8);
+}
+
+// a local entry never waits on a replay: those only show, so one can end early
+static void bIT_mp_drop_room(bg_item_drop_table_c* drop_info) {
+    bg_item_drop_c* drop = drop_info->drop_p;
+    int i;
+
+    if (bIT_mp_replaying) {
+        return;
+    }
+    for (i = 0; i < drop_info->count; i++) {
+        if (drop[i].move_proc == NULL) {
+            return;
+        }
+    }
+    for (i = 0; i < drop_info->count; i++) {
+        if (drop[i].flags & bIT_DROP_MP_VISUAL) {
+            drop[i].move_proc = NULL;
+            drop[i].draw_proc = NULL;
+            drop[i].dt_proc = NULL;
+            return;
+        }
+    }
+}
+
+static void bIT_mp_drop_made(bg_item_drop_table_c* drop_info, bg_item_drop_c* drop, bg_item_drop_c* src) {
+    u8 body[64];
+    int n = 0;
+
+    if (bIT_mp_replaying) {
+        // what the sender's game worked out for it, and nothing written from here
+        drop->flags = bIT_mp_drop_flags | bIT_DROP_MP_VISUAL;
+        drop->display_fg_item = bIT_mp_drop_display;
+        drop->target_pos_fg_item = bIT_mp_drop_target_fg;
+        return;
+    }
+    drop->flags &= ~(bIT_DROP_MP_OWN | bIT_DROP_MP_VISUAL);
+    if (!bIT_mp_mine()) {
+        return;
+    }
+    drop->flags |= bIT_DROP_MP_OWN;
+    body[n++] = MP_VFX_DROP;
+    body[n++] = drop_info != &bIT_CLIP->bg_item_common_p->drop_info;
+    n += bIT_mp_w16(body + n, drop->fg_item);
+    n += bIT_mp_w16(body + n, drop->display_fg_item);
+    n += bIT_mp_w16(body + n, drop->target_pos_fg_item);
+    n += bIT_mp_w16(body + n, drop->flags & ~bIT_DROP_MP_OWN);
+    n += bIT_mp_w16(body + n, src->layer);
+    n += bIT_mp_w16(body + n, src->wait_counter);
+    n += bIT_mp_w16(body + n, src->drop_speed);
+    n += bIT_mp_w16(body + n, src->_6E);
+    n += bIT_mp_w16(body + n, src->_8A);
+    n += bIT_mp_w16(body + n, src->_78);
+    n += bIT_mp_w16(body + n, src->_70);
+    n += bIT_mp_wpos(body + n, &src->position);
+    n += bIT_mp_wpos(body + n, &src->target_position);
+    n += bIT_mp_wf(body + n, src->_7C);
+    n += bIT_mp_wf(body + n, src->acceleration_y);
+    n += bIT_mp_wf(body + n, src->velocity_xz);
+    n += bIT_mp_wf(body + n, src->velocity_y);
+    mp_vfx_send(body, n);
+}
+
+static void bIT_mp_hole_room(bg_item_hole_c* hole) {
+    int i;
+
+    if (bIT_mp_replaying) {
+        return;
+    }
+    for (i = 0; i < bIT_HOLE_NUM; i++) {
+        if (hole[i].mode == 0) {
+            return;
+        }
+    }
+    for (i = 0; i < bIT_HOLE_NUM; i++) {
+        if (bIT_mp_vis_hole[i]) {
+            hole[i].mode = 0;
+            bIT_mp_vis_hole[i] = FALSE;
+            return;
+        }
+    }
+}
+
+static void bIT_mp_hole_made(int i, bg_item_hole_c* hole) {
+    u8 body[32];
+    int n = 0;
+
+    bIT_mp_vis_hole[i] = bIT_mp_replaying;
+    bIT_mp_own_hole[i] = bIT_mp_mine();
+    if (!bIT_mp_own_hole[i]) {
+        return;
+    }
+    body[n++] = MP_VFX_HOLE;
+    body[n++] = (u8)hole->mode;
+    n += bIT_mp_w16(body + n, hole->fg_item);
+    n += bIT_mp_w16(body + n, hole->hole_fg_item);
+    n += bIT_mp_w16(body + n, hole->max_counter);
+    n += bIT_mp_w16(body + n, hole->wait_counter);
+    n += bIT_mp_w16(body + n, hole->wait_type);
+    n += bIT_mp_wpos(body + n, &hole->position);
+    mp_vfx_send(body, n);
+}
+
+static void bIT_mp_pit_made(int i, bg_item_pit_c* pit) {
+    u8 body[32];
+    int n = 0;
+
+    bIT_mp_vis_pit[i] = bIT_mp_replaying;
+    if (!bIT_mp_mine()) {
+        return;
+    }
+    body[n++] = MP_VFX_PIT;
+    body[n++] = (u8)pit->mode;
+    n += bIT_mp_w16(body + n, pit->hole_fg_item);
+    n += bIT_mp_w16(body + n, pit->fg_item_in_pit);
+    n += bIT_mp_wpos(body + n, &pit->position);
+    mp_vfx_send(body, n);
+}
+
+#define bIT_MP_ROCK_GAP 58 // frames between one player's rock hits at the fastest (a shovel's)
+
+// with others at the same money rock it pays out no faster than one player alone could hit it
+static int bIT_mp_rock_pays(bg_item_ten_coin_c* ten_coin, int is_new) {
+    int i = ten_coin - bIT_CLIP->bg_item_common_p->ten_coin;
+
+    if (!is_new && mp_active() && !bIT_mp_rock_mine[i] &&
+        bIT_mp_rock_paid[i] - ten_coin->left_frames < bIT_MP_ROCK_GAP) {
+        return FALSE;
+    }
+    bIT_mp_rock_paid[i] = (s16)ten_coin->left_frames;
+    bIT_mp_rock_mine[i] = TRUE;
+    return TRUE;
+}
+
+static void bIT_mp_ten_coin_made(bg_item_ten_coin_c* ten_coin, int is_new, int paid) {
+    u8 body[32];
+    int n = 0;
+
+    // a rock this screen hit itself writes itself back, even in a slot a replay had
+    if (is_new) {
+        bIT_mp_vis_ten_coin[ten_coin - bIT_CLIP->bg_item_common_p->ten_coin] = FALSE;
+    }
+    if (!bIT_mp_mine()) {
+        return;
+    }
+    body[n++] = MP_VFX_TEN_COIN;
+    body[n++] = (u8)((is_new ? 1 : 0) | (paid ? 2 : 0));
+    n += bIT_mp_w16(body + n, ten_coin->fg_item);
+    n += bIT_mp_w16(body + n, ten_coin->angle);
+    n += bIT_mp_w16(body + n, ten_coin->left_frames);
+    n += bIT_mp_w16(body + n, ten_coin->total_frames);
+    n += bIT_mp_w16(body + n, ten_coin->hit_count);
+    n += bIT_mp_wpos(body + n, &ten_coin->position);
+    mp_vfx_send(body, n);
+}
+#endif
+
 static int bIT_actor_fade_entry(mActor_name_t fg_name, xyz_t* pos) {
     bg_item_fade_c* bg_item_fade = bIT_CLIP->bg_item_common_p->fade;
     u8 min_alpha = 255;
@@ -107,6 +329,17 @@ static int bIT_actor_fade_entry(mActor_name_t fg_name, xyz_t* pos) {
         mFI_Wpos2UtCenterWpos(&selected_fade->position, *pos);
         selected_fade->position.y = mCoBG_GetBgY_OnlyCenter_FromWpos2(selected_fade->position, -1.0f);
         selected_fade->_10 = 0;
+#ifdef VITA_MP
+        if (bIT_mp_mine()) {
+            u8 body[16];
+            int n = 0;
+
+            body[n++] = MP_VFX_FADE;
+            n += bIT_mp_w16(body + n, fg_name);
+            n += bIT_mp_wpos(body + n, &selected_fade->position);
+            mp_vfx_send(body, n);
+        }
+#endif
         mFI_SetFG_common(EMPTY_NO, selected_fade->position, TRUE);
         return TRUE;
     }
@@ -150,6 +383,9 @@ static int bIT_actor_ten_coin_entryR(bg_item_ten_coin_c* ten_coin, mActor_name_t
     xyz_t set_pos;
     xyz_t target_pos;
     int i;
+#ifdef VITA_MP
+    int paid = TRUE;
+#endif
 
     money_stone_flag = FALSE;
     mode = 0;
@@ -216,8 +452,20 @@ static int bIT_actor_ten_coin_entryR(bg_item_ten_coin_c* ten_coin, mActor_name_t
             sel_ten_coin->hit_count = 0;
             mFI_SetFG_common(MONEY_FLOWER_SEED, target_pos, TRUE);
         } else {
+#ifdef VITA_MP
+            if (!bIT_mp_rock_pays(sel_ten_coin, FALSE)) {
+                set_pos_valid = FALSE; // (it shakes, nothing comes out: as a hemmed-in rock does)
+                paid = FALSE;
+            } else
+#endif
             sel_ten_coin->hit_count++;
         }
+#ifdef VITA_MP
+        if (mode != 2) {
+            bIT_mp_rock_pays(sel_ten_coin, TRUE);
+        }
+        bIT_mp_ten_coin_made(sel_ten_coin, mode != 2, paid);
+#endif
 
         /* There must be a valid place to drop the item */
         if (set_pos_valid) {
@@ -310,6 +558,11 @@ static void bIT_actor_ten_coin_move(GAME* game, bg_item_ten_coin_c* ten_coin) {
 
             /* Check if we should reset the money rock to a normal rock */
             if (ten_coin->left_frames <= 0 && ten_coin->_4C == 2) {
+#ifdef VITA_MP
+                if (bIT_mp_vis_ten_coin[i]) {
+                    bIT_mp_vis_ten_coin[i] = FALSE;
+                } else
+#endif
                 mFI_SetFG_common(ten_coin->fg_item - 7, ten_coin->position, TRUE);
                 ten_coin->_4C = 0;
             }
@@ -373,6 +626,11 @@ static void bIT_actor_ten_coin_destruct(bg_item_ten_coin_c* ten_coin) {
 
     for (i = 0; i < bIT_TEN_COIN_NUM; i++, ten_coin++) {
         if (ten_coin->_4C != 0) {
+#ifdef VITA_MP
+            if (bIT_mp_vis_ten_coin[i]) {
+                bIT_mp_vis_ten_coin[i] = FALSE;
+            } else
+#endif
             mFI_SetFG_common(ten_coin->fg_item - 7, ten_coin->position, TRUE);
             ten_coin->_4C = 0;
         }
@@ -535,6 +793,9 @@ static int bIT_actor_shin_effect_move(GAME* game, bg_item_shin_c* shin) {
 
 static void bIT_actor_drop_move_plant_destruct(bg_item_drop_c* drop) {
     if (drop->move_proc != NULL) {
+#ifdef VITA_MP
+        if (!(drop->flags & bIT_DROP_MP_VISUAL))
+#endif
         mFI_SetFG_common(drop->fg_item, drop->position, TRUE);
         drop->move_proc = NULL;
         drop->draw_proc = NULL;
@@ -679,7 +940,11 @@ static void bIT_common_hole_throw(mActor_name_t fg_item, mActor_name_t fg_hole_i
 
 static void bIT_actor_drop_move_fly_destruct(bg_item_drop_c* drop) {
     if (drop->move_proc != NULL) {
+#ifdef VITA_MP
+        if ((drop->flags & 4) == 0 && !(drop->flags & bIT_DROP_MP_VISUAL)) {
+#else
         if ((drop->flags & 4) == 0) {
+#endif
             mActor_name_t* fg_item_p = mFI_GetUnitFG(drop->target_position);
 
             if (fg_item_p != NULL && ((*fg_item_p >= HOLE00 && *fg_item_p <= HOLE24) || *fg_item_p == HOLE_SHINE)) {
@@ -716,6 +981,10 @@ static int bIT_actor_drop_entry_main(bg_item_drop_table_c* drop_info, bg_item_dr
     bg_item_drop_c* drop = drop_info->drop_p;
     int res = FALSE;
     int i;
+
+#ifdef VITA_MP
+    bIT_mp_drop_room(drop_info);
+#endif
 
     for (i = 0; i < drop_info->count; i++, drop++) {
         if (drop->move_proc == NULL) {
@@ -784,6 +1053,9 @@ static int bIT_actor_drop_entry_main(bg_item_drop_table_c* drop_info, bg_item_dr
                 drop->last_velocity_xz = src_drop->velocity_xz;
                 drop->last_velocity_y = src_drop->velocity_y;
             }
+#ifdef VITA_MP
+            bIT_mp_drop_made(drop_info, drop, src_drop);
+#endif
 
             res = TRUE;
             break;
@@ -1081,6 +1353,18 @@ static int BIT_actor_tree_cutcount_check(GAME* game, int ut_x, int ut_z) {
                 common_p->block_info_table.info_tbl[i].info[idx] = res - 1;
                 res--;
             }
+#ifdef VITA_MP
+            // everyone's hits count toward the tree coming down
+            if (bIT_mp_mine()) {
+                u8 body[8];
+                int n = 0;
+
+                body[n++] = MP_VFX_CUT;
+                n += bIT_mp_w16(body + n, ut_x);
+                n += bIT_mp_w16(body + n, ut_z);
+                mp_vfx_send(body, n);
+            }
+#endif
 
             break;
         }
@@ -1140,6 +1424,9 @@ static int bIT_actor_hole_effect_entry(bg_item_hole_c* hole, mActor_name_t fg_it
 
     res = FALSE;
     hole_no = -1;
+#ifdef VITA_MP
+    bIT_mp_hole_room(hole);
+#endif
 
     switch (mode) {
         case 1:
@@ -1194,6 +1481,9 @@ static int bIT_actor_hole_effect_entry(bg_item_hole_c* hole, mActor_name_t fg_it
                     hole->max_counter = frames;
                     hole->wait_counter = wait_frames + 1;
                     hole->wait_type = wait_type;
+#ifdef VITA_MP
+                    bIT_mp_hole_made(i, hole);
+#endif
                 }
             }
         }
@@ -1203,6 +1493,13 @@ static int bIT_actor_hole_effect_entry(bg_item_hole_c* hole, mActor_name_t fg_it
 }
 
 static void bIT_actor_hole_effect_destruct(bg_item_hole_c* hole) {
+#ifdef VITA_MP
+    if (bIT_mp_vis_hole[0]) {
+        bIT_mp_vis_hole[0] = FALSE;
+        hole->mode = 0;
+        return;
+    }
+#endif
     switch (hole->mode) {
         case 1:
             mFI_SetFG_common(hole->hole_fg_item, hole->position, TRUE);
@@ -1222,6 +1519,36 @@ static void bIT_actor_hole_effect_destruct(bg_item_hole_c* hole) {
 }
 
 static void bIT_actor_hole_effect_move(bg_item_hole_c* hole) {
+#ifdef VITA_MP
+    // another player's hole: the same growing and shrinking, nothing written
+    if (bIT_mp_vis_hole[0]) {
+        if (hole->wait_counter != 0) {
+            hole->wait_counter--;
+        }
+        if (hole->wait_counter == 0 && hole->mode != 0) {
+            hole->scale = (f32)hole->counter / (f32)hole->max_counter;
+            if (hole->mode == 2) {
+                hole->scale = 1.0f - hole->scale;
+            }
+            hole->counter++;
+            if (hole->counter > hole->max_counter) {
+                hole->mode = 0;
+                bIT_mp_vis_hole[0] = FALSE;
+            }
+        }
+        return;
+    }
+    // what a hole of the local player's ends in (a sapling planted) is sent too
+    bIT_mp_owner += bIT_mp_own_hole[0];
+    bIT_actor_hole_effect_move_main(hole);
+    bIT_mp_owner -= bIT_mp_own_hole[0];
+    if (hole->mode == 0) {
+        bIT_mp_own_hole[0] = FALSE;
+    }
+}
+
+static void bIT_actor_hole_effect_move_main(bg_item_hole_c* hole) {
+#endif
     if (hole->wait_counter != 0) {
         hole->wait_counter--;
     }
@@ -1455,8 +1782,18 @@ static void bIT_actor_drop_move(bg_item_drop_table_c* drop_info) {
                 sAdo_OngenTrgStart(0x2A, &drop->position);
             }
         } else if (drop->move_proc != NULL) {
+#ifdef VITA_MP
+            // what an item of the local player's lands into (a hole it fills) is sent too
+            int own = (drop->flags & bIT_DROP_MP_OWN) != 0;
+
+            bIT_mp_owner += own;
             xyz_t_move(&drop->offset, &ZeroVec);
             drop->move_proc(drop);
+            bIT_mp_owner -= own;
+#else
+            xyz_t_move(&drop->offset, &ZeroVec);
+            drop->move_proc(drop);
+#endif
         }
     }
 }
@@ -1509,6 +1846,9 @@ static void bIT_actor_drop_move_plant(bg_item_drop_c* drop) {
             eEC_CLIP->effect_make_proc(eEC_EFFECT_KIGAE_LIGHT, effect_pos, 2, 0, gamePT, RSV_NO, -1, 0);
         }
 
+#ifdef VITA_MP
+        if (!(drop->flags & bIT_DROP_MP_VISUAL))
+#endif
         mFI_SetFG_common(drop->fg_item, drop->position, TRUE);
         drop->move_proc = NULL;
         drop->draw_proc = NULL;
@@ -1540,6 +1880,10 @@ static void bIT_actor_drop_move_bury_change(bg_item_drop_c* drop) {
     drop->scale.x = 1.0f;
     drop->scale.y = 1.0f;
     drop->scale.z = 1.0f;
+#ifdef VITA_MP
+    // the sender's own hole comes over by itself
+    if (!(drop->flags & bIT_DROP_MP_VISUAL))
+#endif
     bIT_actor_bury_hole_effect_entry(drop->fg_item, &drop->target_position, 46);
     drop->velocity_xz = 0.0f;
     drop->velocity_y = 0.0f;
@@ -1688,7 +2032,11 @@ static void bIT_actor_drop_move_fly(bg_item_drop_c* drop) {
             drop->move_proc = NULL;
             drop->draw_proc = NULL;
 
+#ifdef VITA_MP
+            if ((drop->flags & 4) == 0 && !(drop->flags & bIT_DROP_MP_VISUAL)) {
+#else
             if ((drop->flags & 4) == 0) {
+#endif
                 mFI_SetFG_common(drop->fg_item, drop->target_position, TRUE);
             }
         }
@@ -2314,6 +2662,11 @@ static int bIT_actor_pit_entry(bg_item_pit_c* pit, s16 mode, mActor_name_t fg_no
                     res = TRUE;
                     break;
             }
+#ifdef VITA_MP
+            if (res) {
+                bIT_mp_pit_made(i, pit);
+            }
+#endif
         }
     }
 
@@ -2333,6 +2686,9 @@ static void bIT_actor_pit_move(GAME* game, bg_item_pit_c* pit) {
                 if (pit->hole_timer > 0) {
                     pit->hole_timer--;
                 } else {
+#ifdef VITA_MP
+                    if (!bIT_mp_vis_pit[i])
+#endif
                     mFI_SetFG_common(RSV_NO, pit->position, FALSE);
                     pit->mode = 2;
                     pit->hole_timer = 17;
@@ -2362,6 +2718,11 @@ static void bIT_actor_pit_move(GAME* game, bg_item_pit_c* pit) {
                 }
 
                 if (pit->scale >= 1.0f) {
+#ifdef VITA_MP
+                    if (bIT_mp_vis_pit[i]) {
+                        bIT_mp_vis_pit[i] = FALSE;
+                    } else
+#endif
                     mFI_SetFG_common(pit->hole_fg_item, pit->position, TRUE);
                     pit->mode = 0;
                 }
@@ -2380,6 +2741,11 @@ static void bIT_actor_pit_move(GAME* game, bg_item_pit_c* pit) {
                 }
 
                 if (pit->scale <= 0.0f) {
+#ifdef VITA_MP
+                    if (bIT_mp_vis_pit[i]) {
+                        bIT_mp_vis_pit[i] = FALSE;
+                    } else
+#endif
                     mFI_SetFG_common(EMPTY_NO, pit->position, TRUE);
                     pit->mode = 0;
                 }
@@ -2396,6 +2762,11 @@ static void bIT_actor_pit_destruct(bg_item_pit_c* pit) {
 
     for (i = 0; i < bIT_PIT_NUM; i++, pit++) {
         if (pit->mode != 0) {
+#ifdef VITA_MP
+            if (bIT_mp_vis_pit[i]) {
+                bIT_mp_vis_pit[i] = FALSE;
+            } else
+#endif
             mFI_SetFG_common(EMPTY_NO, pit->position, FALSE);
             pit->mode = 0;
         }
@@ -2849,6 +3220,20 @@ static void bg_item_common_draw_check(GAME_PLAY* play, bg_item_common_c* common,
     }
 }
 
+#ifdef VITA_MP
+// behind this game's menu: what's falling still lands, so the town's cells change on time for everyone
+// (each season's bg item has its own copy of this code, reached through the one clip it sets up)
+static void bIT_mp_menu_move_common(void) {
+    bg_item_common_c* common;
+
+    if (bIT_CLIP == NULL || (common = bIT_CLIP->bg_item_common_p) == NULL) {
+        return;
+    }
+    bIT_actor_drop_move(&common->drop_info);
+    bIT_actor_drop_move(&common->fruit_drop_info);
+}
+#endif
+
 static void bg_item_common_move(GAME_PLAY* play, ACTOR* actorx, bg_item_common_c* common) {
     int flags;
     int i;
@@ -2888,10 +3273,24 @@ static int bIT_actor_pit_entry_del(bg_item_pit_c* pit, int param_2, int param_3,
     int res = FALSE;
     int i;
 
+#ifdef VITA_MP
+    if (bIT_mp_mine()) {
+        u8 body[16];
+        int n = 0;
+
+        body[n++] = MP_VFX_PIT_DEL;
+        n += bIT_mp_w16(body + n, fg_item_in_pit);
+        n += bIT_mp_wpos(body + n, pos);
+        mp_vfx_send(body, n);
+    }
+#endif
     for (i = 0; i < bIT_PIT_NUM; i++, pit++) {
         if (fg_item_in_pit == pit->fg_item_in_pit && pos->x == pit->position.x && pos->y == pit->position.y &&
             pos->z == pit->position.z) {
             pit->mode = 0;
+#ifdef VITA_MP
+            bIT_mp_vis_pit[i] = FALSE;
+#endif
             res = TRUE;
             break;
         }
@@ -3139,4 +3538,223 @@ static void bg_item_common_construct(GAME* game, bg_item_common_c* common) {
     common->drop_info.count = bIT_DROP_NUM;
     common->fruit_drop_info.drop_p = common->fruit_drop;
     common->fruit_drop_info.count = bIT_FRUIT_DROP_NUM;
+#ifdef VITA_MP
+    bzero(bIT_mp_own_hole, sizeof(bIT_mp_own_hole));
+    bzero(bIT_mp_vis_hole, sizeof(bIT_mp_vis_hole));
+    bzero(bIT_mp_vis_pit, sizeof(bIT_mp_vis_pit));
+    bzero(bIT_mp_vis_ten_coin, sizeof(bIT_mp_vis_ten_coin));
+    bIT_mp_owner = 0;
+    bIT_mp_replaying = FALSE;
+#endif
 }
+
+#ifdef VITA_MP
+static void bIT_mp_replay_drop(bg_item_common_c* common, const u8* b, int len) {
+    bg_item_drop_c src;
+    int n = 2;
+
+    if (len < 64) {
+        return;
+    }
+    bzero(&src, sizeof(src));
+    src.fg_item = (mActor_name_t)bIT_mp_r16(b + n);
+    bIT_mp_drop_display = (mActor_name_t)bIT_mp_r16(b + n + 2);
+    bIT_mp_drop_target_fg = (mActor_name_t)bIT_mp_r16(b + n + 4);
+    bIT_mp_drop_flags = (u16)bIT_mp_r16(b + n + 6) & ~(bIT_DROP_MP_OWN | bIT_DROP_MP_VISUAL);
+    src.layer = bIT_mp_r16(b + n + 8);
+    src.wait_counter = bIT_mp_r16(b + n + 10);
+    src.drop_speed = bIT_mp_r16(b + n + 12);
+    src._6E = bIT_mp_r16(b + n + 14);
+    src._8A = bIT_mp_r16(b + n + 16);
+    src._78 = (u16)bIT_mp_r16(b + n + 18);
+    src._70 = bIT_mp_r16(b + n + 20);
+    n += 22;
+    bIT_mp_rpos(&src.position, b + n);
+    bIT_mp_rpos(&src.target_position, b + n + 12);
+    n += 24;
+    src._7C = bIT_mp_rf(b + n);
+    src.acceleration_y = bIT_mp_rf(b + n + 4);
+    src.velocity_xz = bIT_mp_rf(b + n + 8);
+    src.velocity_y = bIT_mp_rf(b + n + 12);
+    // the town isn't read for it: the sender already worked out where it lands
+    src.flags = bIT_mp_drop_flags | 4;
+    bIT_actor_drop_entry_main(b[1] ? &common->fruit_drop_info : &common->drop_info, &src);
+}
+
+static void bIT_mp_replay_hole(bg_item_common_c* common, const u8* b, int len) {
+    bg_item_hole_c* hole = common->hole;
+    int i;
+
+    if (len < 24) {
+        return;
+    }
+    for (i = 0; i < bIT_HOLE_NUM; i++, hole++) {
+        if (hole->mode == 0) {
+            hole->mode = b[1];
+            hole->fg_item = (mActor_name_t)bIT_mp_r16(b + 2);
+            hole->hole_fg_item = (mActor_name_t)bIT_mp_r16(b + 4);
+            hole->max_counter = (u16)bIT_mp_r16(b + 6);
+            hole->wait_counter = (u16)bIT_mp_r16(b + 8);
+            hole->wait_type = bIT_mp_r16(b + 10);
+            bIT_mp_rpos(&hole->position, b + 12);
+            hole->counter = 0;
+            hole->scale = hole->mode == 2 ? 1.0f : 0.0f;
+            bIT_mp_hole_made(i, hole);
+            return;
+        }
+    }
+}
+
+static void bIT_mp_replay_pit(bg_item_common_c* common, const u8* b, int len) {
+    bg_item_pit_c* pit = common->pit;
+    int i;
+
+    if (len < 18 || (b[1] != 1 && b[1] != 4)) {
+        return;
+    }
+    for (i = 0; i < bIT_PIT_NUM; i++, pit++) {
+        if (pit->mode == 0) {
+            pit->mode = b[1];
+            pit->hole_fg_item = (mActor_name_t)bIT_mp_r16(b + 2);
+            pit->fg_item_in_pit = (mActor_name_t)bIT_mp_r16(b + 4);
+            bIT_mp_rpos(&pit->position, b + 6);
+            pit->wait_counter = 0;
+            pit->scale = pit->mode == 4 ? 1.0f : 0.0f;
+            pit->hole_timer = pit->mode == 4 ? 0 : 1;
+            bIT_mp_pit_made(i, pit);
+            return;
+        }
+    }
+}
+
+static void bIT_mp_replay_pit_del(bg_item_common_c* common, const u8* b, int len) {
+    xyz_t pos;
+
+    if (len < 15) {
+        return;
+    }
+    bIT_mp_rpos(&pos, b + 3);
+    bIT_actor_pit_entry_del(common->pit, 3, HOLE00, &pos, (mActor_name_t)bIT_mp_r16(b + 1));
+}
+
+static void bIT_mp_replay_ten_coin(bg_item_common_c* common, const u8* b, int len) {
+    bg_item_ten_coin_c* ten_coin = common->ten_coin;
+    bg_item_ten_coin_c* sel = NULL;
+    int sel_i = -1;
+    xyz_t pos;
+    int i;
+
+    if (len < 24) {
+        return;
+    }
+    bIT_mp_rpos(&pos, b + 12);
+    for (i = 0; i < bIT_TEN_COIN_NUM; i++) {
+        if (ten_coin[i]._4C != 0 && ten_coin[i].position.x == pos.x && ten_coin[i].position.z == pos.z &&
+            ten_coin[i].left_frames > 0) {
+            sel = &ten_coin[i];
+            sel_i = i;
+            break;
+        }
+        if (sel == NULL && ten_coin[i]._4C == 0) {
+            sel = &ten_coin[i];
+            sel_i = i;
+        }
+    }
+    if (sel == NULL) {
+        return;
+    }
+    if (sel->_4C == 0) {
+        if (!(b[1] & 1)) {
+            return; // a later hit on a rock this screen never saw start
+        }
+        xyz_t_move(&sel->position, &pos);
+        sel->scale = 15.0f;
+        sel->fg_item = (mActor_name_t)bIT_mp_r16(b + 2);
+        sel->left_frames = bIT_mp_r16(b + 6);
+        sel->total_frames = bIT_mp_r16(b + 8);
+        sel->hit_count = 0;
+        bIT_mp_vis_ten_coin[sel_i] = TRUE;
+        bIT_mp_rock_paid[sel_i] = (s16)sel->left_frames;
+        bIT_mp_rock_mine[sel_i] = FALSE;
+    }
+    // everyone's hits shake the same rock
+    if (bIT_mp_r16(b + 10) > sel->hit_count) {
+        sel->hit_count = bIT_mp_r16(b + 10);
+    }
+    if (b[1] & 2) {
+        bIT_mp_rock_paid[sel_i] = (s16)sel->left_frames;
+        bIT_mp_rock_mine[sel_i] = FALSE;
+    }
+    sel->_44 = 0;
+    sel->_4E = 10;
+    sel->_50 = sel->_4E;
+    sel->_46 = 0;
+    sel->_48 = (int)(32767.0f / ((f32)(int)sel->_4E));
+    sel->angle = bIT_mp_r16(b + 4);
+    sel->_4C = 1;
+}
+
+static void bIT_mp_replay_fade(bg_item_common_c* common, const u8* b, int len) {
+    bg_item_fade_c* fade = common->fade;
+    bg_item_fade_c* sel = NULL;
+    u8 min_alpha = 255;
+    int i;
+
+    if (len < 15) {
+        return;
+    }
+    for (i = 0; i < bIT_FADE_NUM; i++, fade++) {
+        if (fade->mode == 0) {
+            sel = fade;
+            break;
+        } else if (fade->mode == 1 && fade->alpha < min_alpha) {
+            min_alpha = fade->alpha;
+            sel = fade;
+        }
+    }
+    if (sel != NULL) {
+        sel->mode = 1;
+        sel->fg_item = (mActor_name_t)bIT_mp_r16(b + 1);
+        sel->alpha = 255;
+        bIT_mp_rpos(&sel->position, b + 3);
+        sel->_10 = 0;
+    }
+}
+
+// another player's doing, shown here; the town's cells come separately from the host
+static void bIT_mp_replay(const u8* body, int len) {
+    bg_item_common_c* common;
+
+    if (bIT_CLIP == NULL || bIT_CLIP->bg_item_common_p == NULL || len < 1) {
+        return;
+    }
+    common = bIT_CLIP->bg_item_common_p;
+    bIT_mp_replaying = TRUE;
+    switch (body[0]) {
+        case MP_VFX_DROP:
+            bIT_mp_replay_drop(common, body, len);
+            break;
+        case MP_VFX_HOLE:
+            bIT_mp_replay_hole(common, body, len);
+            break;
+        case MP_VFX_PIT:
+            bIT_mp_replay_pit(common, body, len);
+            break;
+        case MP_VFX_PIT_DEL:
+            bIT_mp_replay_pit_del(common, body, len);
+            break;
+        case MP_VFX_TEN_COIN:
+            bIT_mp_replay_ten_coin(common, body, len);
+            break;
+        case MP_VFX_FADE:
+            bIT_mp_replay_fade(common, body, len);
+            break;
+        case MP_VFX_CUT:
+            if (len >= 5) {
+                BIT_actor_tree_cutcount_check(gamePT, bIT_mp_r16(body + 1), bIT_mp_r16(body + 3));
+            }
+            break;
+    }
+    bIT_mp_replaying = FALSE;
+}
+#endif

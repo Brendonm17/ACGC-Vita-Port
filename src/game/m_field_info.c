@@ -12,6 +12,9 @@
 #ifdef TARGET_VITA
 #include "pc_settings.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static mCoBG_Collision_u l_edge_ut = { { 0, 31, 31, 31, 31, 31, mCoBG_ATTRIBUTE_GRASS0 } };
 
@@ -2458,6 +2461,12 @@ static void mFI_ClearHoleBlock_sub(mActor_name_t* fg_items_p) {
 }
 
 extern void mFI_ClearHoleBlock(int bx, int bz) {
+#ifdef VITA_MP
+    // visitors leave the host's holes alone; the host keeps them while a visitor is near
+    if (!mp_town_writer_allowed() || mp_host_block_watched(bx, bz)) {
+        return;
+    }
+#endif
     mFI_ClearHoleBlock_sub(mFI_BkNumtoUtFGTop(bx, bz));
 }
 
@@ -2465,6 +2474,11 @@ extern void mFI_ClearBeecomb(int bx, int bz) {
     mActor_name_t* fg_items_p = mFI_BkNumtoUtFGTop(bx, bz);
     int i;
 
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed() || mp_host_block_watched(bx, bz)) {
+        return;
+    }
+#endif
     if (fg_items_p != NULL) {
         for (i = 0; i < UT_TOTAL_NUM; i++) {
             if (*fg_items_p == HONEYCOMB) {
@@ -2490,10 +2504,20 @@ static void mFI_SetFGStructureKeep(mActor_name_t* item_p, mActor_name_t replace_
 
 static mActor_name_t l_set_fg_table[3 * 3];
 
+#ifdef TARGET_VITA
+// set while a structure is lifted out of a save copy; the live town is left alone
+static int l_struct_copy_only;
+#endif
+
 static int mFI_SetStructure11(mActor_name_t* fg_items_p, mActor_name_t replace_item, mActor_name_t fill_item, int bx,
                               int bz, int ut_x, int ut_z, int destroy_item) {
     fg_items_p += mFI_GetUtNum(ut_x, ut_z);
     mFI_SetFGStructureKeep(fg_items_p, replace_item, destroy_item);
+#ifdef TARGET_VITA
+    if (l_struct_copy_only) {
+        return TRUE;
+    }
+#endif
     mFI_BkUtNum2DepositOFF(bx, bz, ut_x, ut_z);
     mCoBG_Ut2SetDefaultOffset(ut_x + bx * UT_X_NUM, ut_z + bz * UT_Z_NUM);
     return TRUE;
@@ -2684,6 +2708,12 @@ extern int mFI_SetFGStructure_common(mActor_name_t structure_name, int bx, int b
     int keep_status = keep_status_table[set_type];
     int res = FALSE;
 
+#ifdef VITA_MP
+    // a visitor's town gets its tents and stands from the host
+    if (!mp_town_writer_allowed()) {
+        return TRUE;
+    }
+#endif
     if (mFI_CheckFieldData() == TRUE) {
         if (mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_FG) {
             if (mFI_BlockCheck(bx, bz) == TRUE && ITEM_NAME_GET_TYPE(structure_name) == NAME_TYPE_STRUCT) {
@@ -2732,6 +2762,66 @@ extern int mFI_SetFGStructure_common(mActor_name_t structure_name, int bx, int b
 
     return res;
 }
+
+#ifdef TARGET_VITA
+// a mid-play save lifts event structures out of its copy of the town, as a scene exit does
+extern int mFI_RemoveFGStructure_copy(Save_t* save, mActor_name_t structure_name, int bx, int bz, int ut_x, int ut_z) {
+    static mFI_SET_STRUCTURE_PROC remove_structure[12] = {
+        &mFI_SetStructure11,          &mFI_SetStructure21, &mFI_SetStructure22,           &mFI_SetStructure23,
+        &mFI_SetStructure32,          &mFI_SetStructure33, &mFI_SetStructure33_main_back,
+
+        &mFI_SetStructure11,          &mFI_SetStructure22, &mFI_SetStructure23,           &mFI_SetStructure33,
+        &mFI_SetStructure33_main_back
+    };
+    int fg_bx = bx - 1;
+    int fg_bz = bz - 1;
+    u8 structure_type;
+    int res;
+
+    if (ITEM_NAME_GET_TYPE(structure_name) != NAME_TYPE_STRUCT || fg_bx < 0 || fg_bx >= FG_BLOCK_X_NUM || fg_bz < 0 ||
+        fg_bz >= FG_BLOCK_Z_NUM) {
+        return FALSE;
+    }
+    structure_type = l_structure_set_type[(int)(structure_name - STRUCTURE_START)];
+    if (structure_type >= 0xC) {
+        return FALSE;
+    }
+    l_struct_copy_only = TRUE;
+    res = (*remove_structure[structure_type])(save->fg[fg_bz][fg_bx].items[0],
+                                              structure_type >= 7 ? mFM_GetReseveName(bx, bz) : EMPTY_NO, EMPTY_NO,
+                                              bx, bz, ut_x, ut_z, TRUE);
+    l_struct_copy_only = FALSE;
+    return res;
+}
+#endif
+
+#ifdef VITA_MP
+// an event's structure written into a copy of one block's cells (nothing it covers goes to the lost & found)
+extern int mFI_SetFGStructure_cells(mActor_name_t* fg_items, mActor_name_t structure_name, int bx, int bz, int ut_x,
+                                    int ut_z) {
+    static mFI_SET_STRUCTURE_PROC set_structure[12] = {
+        &mFI_SetStructure11,          &mFI_SetStructure21, &mFI_SetStructure22,           &mFI_SetStructure23,
+        &mFI_SetStructure32,          &mFI_SetStructure33, &mFI_SetStructure33_main_back,
+
+        &mFI_SetStructure11,          &mFI_SetStructure22, &mFI_SetStructure23,           &mFI_SetStructure33,
+        &mFI_SetStructure33_main_back
+    };
+    u8 structure_type;
+    int res;
+
+    if (ITEM_NAME_GET_TYPE(structure_name) != NAME_TYPE_STRUCT || structure_name >= STRUCTURE_END) {
+        return FALSE;
+    }
+    structure_type = l_structure_set_type[(int)(structure_name - STRUCTURE_START)];
+    if (structure_type >= 0xC) {
+        return FALSE;
+    }
+    l_struct_copy_only = TRUE;
+    res = (*set_structure[structure_type])(fg_items, structure_name, RSV_NO, bx, bz, ut_x, ut_z, TRUE);
+    l_struct_copy_only = FALSE;
+    return res;
+}
+#endif
 
 extern int mFI_CheckStructureArea(int ut_x, int ut_z, mActor_name_t structure_name, int structure_ut_x,
                                   int structure_ut_z) {
@@ -3072,7 +3162,12 @@ static void mFI_ResearchShell(u8* can_set_ut_num, u8* on_shell_num, int* total_s
         int bx = l_sandy_beach_bx[i];
         int bz = l_sandy_beach_bz[i];
         /* Don't refresh shells if the player is in the acre */
+#ifdef VITA_MP
+        // (nor where another player stands)
+        if ((bx != player_bx || bz != player_bz) && !mp_others_in_block(bx, bz)) {
+#else
         if (bx != player_bx || bz != player_bz) {
+#endif
             u8 can_set_num;
 
             can_set_ut_num[0] = mFI_GetCanSetShellNum(on_shell_num, bx, bz);
@@ -3327,6 +3422,10 @@ static void mFI_SetShell(xyz_t player_pos) {
         mActor_name_t field_id = mFI_GetFieldId();
 
         if (Save_Get(scene_no) == SCENE_FG && mFI_GET_TYPE(field_id) == mFI_FIELD_FG && l_reserve_set_shell > 0) {
+#ifdef VITA_MP
+            // (the host's game washes the shells up, for everyone)
+            if (mp_town_writer_allowed())
+#endif
             mFI_SetShellWave(l_reserve_set_shell, player_pos);
             l_reserve_set_shell = 0;
         }

@@ -4,6 +4,9 @@
 #include "m_player_lib.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aANT_ACT_WAIT,
@@ -57,6 +60,9 @@ static void aANT_calc_scale(ANT_ACTOR* ant, f32 step, f32 target_scale) {
 
 static void aANT_wait(ANT_ACTOR* ant, GAME* game) {
     if (ant->below_fg_p == NULL || (*ant->below_fg_p != ITM_FOOD_CANDY && *ant->below_fg_p != ITM_KABU_SPOILED)) {
+#ifdef VITA_MP
+        pc_mp_cr_ant_gone(ant);
+#endif
         aANT_setupAction(ant, aANT_ACT_DISAPPEAR);
     } else {
         u32 catch_label = mPlib_Get_item_net_catch_label();
@@ -101,6 +107,9 @@ static void aANT_disappear(ANT_ACTOR* ant, GAME* game) {
     ant->alpha -= 15;
     if (ant->alpha < 0) {
         ant->alpha = 0;
+#ifdef VITA_MP
+        pc_mp_cr_unbind(ant);
+#endif
         Actor_delete((ACTOR*)ant);
     } else {
         aANT_calc_scale(ant, 0.1f, 0.01f);
@@ -136,12 +145,27 @@ static void aANT_setupAction(ANT_ACTOR* ant, int action) {
     (*init_proc[action])(ant);
 }
 
+#ifdef VITA_MP
+// netted on another screen, or its candy gone there: these ants go too
+void aANT_mp_vanish(void* actorx) {
+    ANT_ACTOR* ant = (ANT_ACTOR*)actorx;
+
+    if (ant->action != aANT_ACT_DISAPPEAR) {
+        aANT_setupAction(ant, aANT_ACT_DISAPPEAR);
+    }
+}
+#endif
+
 static void aANT_actor_move(ACTOR* actorx, GAME* game) {
     ANT_ACTOR* ant = (ANT_ACTOR*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
     if ((actorx->state_bitfield & ACTOR_STATE_NO_CULL) == 0 &&
         (actorx->block_x != play->block_table.block_x || actorx->block_z != play->block_table.block_z)) {
+#ifdef VITA_MP
+        // out of this player's acre; still out for the others
+        pc_mp_cr_unbind(actorx);
+#endif
         Actor_delete(actorx);
     } else {
         if (actorx->world.position.x < 0.0f && actorx->world.position.z < 0.0f) {

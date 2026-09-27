@@ -52,8 +52,31 @@ static int aHNW_set_save_permission() {
     return res;
 }
 
+#ifdef VITA_MP
+// the gyroid turns and dances for whoever is closest, not only this screen's player
+static f32 aHNW_mp_near(HANIWA_ACTOR* haniwa, s16* angle) {
+    ACTOR* actorx = (ACTOR*)haniwa;
+    xyz_t near;
+
+    if (!mp_active()) {
+        *angle = actorx->player_angle_y;
+        return actorx->player_distance_xz;
+    }
+    mp_nearest_player_pos(&actorx->world.position, &near);
+    *angle = search_position_angleY(&actorx->world.position, &near);
+    return search_position_distanceXZ(&actorx->world.position, &near);
+}
+#endif
+
 static void aHNW_search_player(HANIWA_ACTOR* haniwa) {
+#ifdef VITA_MP
+    s16 angle;
+
+    aHNW_mp_near(haniwa, &angle);
+    chase_angle(&((ACTOR*)haniwa)->shape_info.rotation.y, angle, 0x0600);
+#else
     chase_angle(&((ACTOR*)haniwa)->shape_info.rotation.y, ((ACTOR*)haniwa)->player_angle_y, 0x0600);
+#endif
 }
 
 static void aHNW_search_front(HANIWA_ACTOR* haniwa, int house_idx) {
@@ -149,7 +172,13 @@ static int aHNW_check_house_door(ACTOR* actor, GAME_PLAY* play) {
 }
 
 static void aHNW_wait(HANIWA_ACTOR* haniwa, GAME* game) {
+#ifdef VITA_MP
+    s16 angle;
+
+    if (aHNW_mp_near(haniwa, &angle) < 80.0f) {
+#else
     if (haniwa->common_actor_class.actor_class.player_distance_xz < 80.0f) {
+#endif
         aHNW_setupAction(haniwa, game, aHNW_ACTION_DANCE);
     }
 }
@@ -259,8 +288,13 @@ static void aHNW_dance(HANIWA_ACTOR* haniwa, GAME* game) {
     };
 
     ACTOR* actorx = (ACTOR*)haniwa;
+#ifdef VITA_MP
+    s16 angle;
 
+    if (aHNW_mp_near(haniwa, &angle) > 90.0f) {
+#else
     if (((ACTOR*)haniwa)->player_distance_xz > 90.0f) {
+#endif
         aHNW_setupAction(haniwa, game, aHNW_ACTION_WAIT);
     } else {
         if (mDemo_Check(mDemo_TYPE_TALK, actorx) == TRUE && mDemo_Check_ListenAble() == FALSE) {

@@ -378,9 +378,56 @@ static int aCR_get_msg_no_after_talk() {
     return msg_no[idx];
 }
 
+#ifdef VITA_MP
+enum {
+    aCR_MP_NONE,
+    aCR_MP_MINE,
+    aCR_MP_OTHER,
+    aCR_MP_FORMER,
+};
+
+// a piece kept as a former resident's: a visitor's the host noted reads as theirs (this player's own, or with their
+// name set), and a visitor never takes a former resident's for its own
+static int aCR_mp_donor(int cat, int idx, int donator) {
+    u8 name[PLAYER_NAME_LEN];
+
+    if (donator != mMmd_DONATOR_DELETED_PLAYER) {
+        return aCR_MP_NONE;
+    }
+    if (pc_mp_museum_mine(cat, idx)) {
+        return aCR_MP_MINE;
+    }
+    if (pc_mp_museum_donor(cat, idx, name)) {
+        mMsg_Set_free_str(mMsg_Get_base_window_p(), mMsg_FREE_STR0, name, PLAYER_NAME_LEN);
+        return aCR_MP_OTHER;
+    }
+    return aCR_MP_FORMER;
+}
+
+#define aCR_FOSSIL_NO(item_no) \
+    (((item_no) >= FTR_DINO_START && (item_no) <= FTR_DINO_END) ? FTR_IDX_2_NO((item_no - FTR_DINO_START)) : 0)
+#define aCR_ART_NO(item_no)                                                                            \
+    (((item_no) >= FTR_START(FTR_SUM_ART01) && (item_no) <= FTR_END(FTR_SUM_ART15))                  \
+         ? FTR_IDX_2_NO((item_no - FTR_START(FTR_SUM_ART01)))                                          \
+         : 0)
+#define aCR_INSECT_NO(item_no) \
+    (((item_no) >= ITM_INSECT_START && (item_no) < ITM_INSECT_END) ? (item_no - ITM_INSECT_START) : 0)
+#define aCR_FISH_NO(item_no) (((item_no) >= ITM_FISH_START && (item_no) <= ITM_FISH_END) ? (item_no - ITM_FISH_START) : 0)
+#endif
+
 static int aCR_get_idx_to_donate_fossil(mActor_name_t item) {
     int donator = aCR_GetFossilPartDonator(item);
 
+#ifdef VITA_MP
+    switch (aCR_mp_donor(mMmd_CATEGORY_FOSSIL, aCR_FOSSIL_NO(item), donator)) {
+        case aCR_MP_MINE:
+            return 4;
+        case aCR_MP_OTHER:
+            return 8;
+        case aCR_MP_FORMER:
+            return 12;
+    }
+#endif
     if (donator == (Common_Get(player_no) + 1)) {
         return 4;
     }
@@ -420,6 +467,16 @@ static int aCR_get_idx_to_donate_art(mActor_name_t item) {
             return 1;
     }
 
+#ifdef VITA_MP
+    switch (aCR_mp_donor(mMmd_CATEGORY_ART, aCR_ART_NO(item), donator)) {
+        case aCR_MP_MINE:
+            return 5;
+        case aCR_MP_OTHER:
+            return 9;
+        case aCR_MP_FORMER:
+            return 13;
+    }
+#endif
     if (donator == (Common_Get(player_no) + 1)) {
         return 5;
     }
@@ -439,6 +496,16 @@ static int aCR_get_idx_to_donate_insect(mActor_name_t item) {
     int donator = aCR_GetInsectDonator(item);
     int res;
 
+#ifdef VITA_MP
+    switch (aCR_mp_donor(mMmd_CATEGORY_INSECT, aCR_INSECT_NO(item), donator)) {
+        case aCR_MP_MINE:
+            return 7;
+        case aCR_MP_OTHER:
+            return 11;
+        case aCR_MP_FORMER:
+            return 15;
+    }
+#endif
     if (donator == (Common_Get(player_no) + 1)) {
         res = 7;
     } else {
@@ -470,6 +537,16 @@ static int aCR_get_idx_to_donate_insect(mActor_name_t item) {
 static int aCR_get_idx_to_donate_fish(mActor_name_t item) {
     int donator = aCR_GetFishDonator(item);
 
+#ifdef VITA_MP
+    switch (aCR_mp_donor(mMmd_CATEGORY_FISH, aCR_FISH_NO(item), donator)) {
+        case aCR_MP_MINE:
+            return 6;
+        case aCR_MP_OTHER:
+            return 10;
+        case aCR_MP_FORMER:
+            return 14;
+    }
+#endif
     if (donator == (Common_Get(player_no) + 1)) {
         return 6;
     }
@@ -951,6 +1028,12 @@ static void aCR_set_talk_info(ACTOR* actorx) {
         if (mLd_PlayerManKindCheck() == FALSE) {
             not_foreigner = TRUE;
         }
+#ifdef VITA_MP
+        // a visitor the host lets do what residents do: appraisals and donations too
+        if (mp_visitor_rights()) {
+            not_foreigner = TRUE;
+        }
+#endif
 
         if (aNPC_SPNPC_BIT_GET(Common_Get(spnpc_first_talk_flags), aNPC_SPNPC_BIT_CURATOR)) {
             not_first_talk = TRUE;

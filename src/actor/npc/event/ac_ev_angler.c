@@ -8,6 +8,9 @@
 #include "m_msg.h"
 #include "m_font.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aEANG_TYPE_BASS,

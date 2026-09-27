@@ -61,9 +61,190 @@ static void aSTM_look_player(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play) {
     }
 }
 
+#ifdef VITA_MP
+#define aSTM_MP_PRIO 5 // above every request the NPC core makes (4 at most), so nothing turns him off his way
+
+static int aSTM_mp_spot_ok; // he waits at his usual spot, which is where a visitor gets off the train
+static xyz_t aSTM_mp_spot;
+static int aSTM_mp_mode;       // 0 at his spot, 1 aside where he greets arrivals, 2 going back to his spot
+static f32 aSTM_mp_goal_x;
+static f32 aSTM_mp_goal_z;
+static int aSTM_mp_kick;       // a new goal: walk there now
+static int aSTM_mp_there;      // (at the goal)
+static unsigned int aSTM_mp_ms; // when the mode began
+static unsigned int aSTM_mp_ask_ms;
+static int aSTM_mp_want = -1;  // where the visitor's own Porter goes: 0 greeting them, 1 back after, 2 aside for boarding
+static f32 aSTM_mp_want_x;
+static f32 aSTM_mp_want_z;
+static unsigned int aSTM_mp_want_ms;
+static int aSTM_mp_told;       // (this screen's visitor: its greeting spot went out)
+static int aSTM_mp_early;      // a visitor's train is pulling in: off the spot they land on before they're off
+static unsigned int aSTM_mp_early_ms;
+static unsigned int aSTM_mp_free_ms; // aside: when a visitor last stood on his spot
+static int aSTM_mp_board;            // ...aside for a visitor boarding, not an arrival
+
+void aSTM_mp_arriving(void) {
+    aSTM_mp_early = TRUE;
+    aSTM_mp_early_ms = pc_mp_now_ms();
+}
+
+void aSTM_mp_replay(int what, int x, int z) {
+    aSTM_mp_want = what;
+    aSTM_mp_want_x = (f32)x;
+    aSTM_mp_want_z = (f32)z;
+    aSTM_mp_want_ms = pc_mp_now_ms();
+}
+
+static void aSTM_mp_reset(void) {
+    aSTM_mp_spot_ok = FALSE;
+    aSTM_mp_mode = 0;
+    aSTM_mp_board = FALSE;
+    aSTM_mp_kick = FALSE;
+    aSTM_mp_there = FALSE;
+    aSTM_mp_told = FALSE;
+}
+
+// a visitor at his spot, the one arrivals land on and leavers board from
+static int aSTM_mp_spot_taken(f32 r) {
+    ACTOR* pups[MP_MAX_PEERS];
+    int n = mp_puppets((void**)pups, MP_MAX_PEERS);
+    int k;
+
+    for (k = 0; k < n; k++) {
+        f32 dx = pups[k]->world.position.x - aSTM_mp_spot.x;
+        f32 dz = pups[k]->world.position.z - aSTM_mp_spot.z;
+
+        if (dx * dx + dz * dz < r * r) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// this screen's own Porter, meeting or seeing off its visitor: the other screens' go where it goes
+static void aSTM_mp_tell(NPC_STATION_MASTER_ACTOR* actor, int what, f32 x, f32 z) {
+    u8 vfx[6];
+    int ix = (int)x;
+    int iz = (int)z;
+
+    vfx[0] = MP_VFX_PORTER;
+    vfx[1] = (u8)what;
+    vfx[2] = (u8)ix;
+    vfx[3] = (u8)(ix >> 8);
+    vfx[4] = (u8)iz;
+    vfx[5] = (u8)(iz >> 8);
+    mp_vfx_send(vfx, 6);
+}
+
+static void aSTM_mp_go(int mode, f32 x, f32 z) {
+    aSTM_mp_mode = mode;
+    aSTM_mp_goal_x = x;
+    aSTM_mp_goal_z = z;
+    aSTM_mp_kick = TRUE;
+    aSTM_mp_there = FALSE;
+    aSTM_mp_ms = pc_mp_now_ms();
+    aSTM_mp_free_ms = aSTM_mp_ms;
+}
+
+// every frame: a visitor's arrival moves him off their landing spot to where he greets arrivals (as their train pulls
+// in), a visitor boarding moves him aside as their own Porter steps, and he's back once they're off his spot. The walk
+// is asked again until he's there.
+static void aSTM_mp_frame(NPC_STATION_MASTER_ACTOR* actor) {
+    NPC_ACTOR* nactorx = &actor->npc_class;
+    ACTOR* actorx = &nactorx->actor_class;
+    unsigned int now = pc_mp_now_ms();
+    ACTOR* pups[MP_MAX_PEERS];
+    f32 dx;
+    f32 dz;
+
+    // (news from before this Porter was set up waits for him; old news is dropped)
+    if (!aSTM_mp_spot_ok) {
+        return;
+    }
+    if (aSTM_mp_early) {
+        aSTM_mp_early = FALSE;
+        if (now - aSTM_mp_early_ms < 15000) {
+            aSTM_mp_go(1, aSTM_mp_spot.x - mFI_UT_WORLDSIZE_X_F, aSTM_mp_spot.z);
+            aSTM_mp_board = FALSE;
+        }
+    }
+    if (aSTM_mp_want >= 0) {
+        if (now - aSTM_mp_want_ms < 15000) {
+            aSTM_mp_go(aSTM_mp_want == 1 ? 2 : 1, aSTM_mp_want_x, aSTM_mp_want_z);
+            aSTM_mp_board = aSTM_mp_want == 2;
+        }
+        aSTM_mp_want = -1;
+    }
+    if (aSTM_mp_mode == 0) {
+        return;
+    }
+    // (aside: back once his spot has been free a moment, for a boarder only once their train is on its way; an
+    // arrival's own Porter says when, else a long while)
+    if (aSTM_mp_mode == 1) {
+        u8 a = Common_Get(train_action);
+
+        if (aSTM_mp_spot_taken(80.0f)) {
+            aSTM_mp_free_ms = now;
+        }
+        if (now - aSTM_mp_free_ms > 2000 &&
+            (aSTM_mp_board ? now - aSTM_mp_ms > 5000 && (a == mTRC_ACTION_NONE || a >= mTRC_ACTION_SIGNAL_STARTING)
+                           : now - aSTM_mp_ms > 30000)) {
+            aSTM_mp_go(2, aSTM_mp_spot.x, aSTM_mp_spot.z);
+        }
+    }
+    // (not back onto the visitor while they still stand there)
+    if (aSTM_mp_mode == 2 && now - aSTM_mp_ms < 8000) {
+        int n = mp_puppets((void**)pups, MP_MAX_PEERS);
+        int k;
+
+        for (k = 0; k < n; k++) {
+            dx = pups[k]->world.position.x - aSTM_mp_goal_x;
+            dz = pups[k]->world.position.z - aSTM_mp_goal_z;
+            if (dx * dx + dz * dz < 30.0f * 30.0f) {
+                return;
+            }
+        }
+    }
+    dx = aSTM_mp_goal_x - actorx->world.position.x;
+    dz = aSTM_mp_goal_z - actorx->world.position.z;
+    if (dx * dx + dz * dz <= 10.0f * 10.0f) {
+        aSTM_mp_there = TRUE;
+        if (aSTM_mp_mode == 2) {
+            aSTM_mp_mode = 0;
+        }
+        nactorx->condition_info.demo_flg &= ~(aNPC_COND_DEMO_SKIP_FORWARD_CHECK | aNPC_COND_DEMO_SKIP_OBJ_COL_CHECK);
+        return;
+    }
+    aSTM_mp_there = FALSE;
+    // (never walking off in the middle of a talk)
+    if (mDemo_Check(mDemo_TYPE_TALK, actorx) || mDemo_Check(mDemo_TYPE_SPEAK, actorx)) {
+        return;
+    }
+    nactorx->condition_info.demo_flg |= aNPC_COND_DEMO_SKIP_FORWARD_CHECK | aNPC_COND_DEMO_SKIP_OBJ_COL_CHECK;
+    if (aSTM_mp_kick || ((nactorx->action.idx != aNPC_ACT_WALK || nactorx->action.step == aNPC_ACTION_END_STEP) &&
+                         now - aSTM_mp_ask_ms > 300)) {
+        if (aSTM_set_request_act(actor, aSTM_MP_PRIO, aNPC_ACT_WALK, aNPC_ACT_TYPE_TO_POINT, aNPC_ACT_OBJ_DEFAULT,
+                                 aSTM_mp_goal_x, aSTM_mp_goal_z)) {
+            aSTM_mp_kick = FALSE;
+            aSTM_mp_ask_ms = now;
+        }
+    }
+}
+
+// his own idle steps wait while a visitor's arrival has him walking
+static int aSTM_mp_walking(void) {
+    return aSTM_mp_spot_ok && aSTM_mp_mode != 0 && !aSTM_mp_there;
+}
+#endif
+
 static void aSTM_talk_wait(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play) {
     ACTOR* playerx = GET_PLAYER_ACTOR_ACTOR(play);
 
+#ifdef VITA_MP
+    if (aSTM_mp_walking()) {
+        return;
+    }
+#endif
     aSTM_look_player(actor, play);
 
     if (actor->happening_sound == BGM_INTRO_ARRIVE || actor->happening_sound == BGM_INTRO_NEW_TOWN) {
@@ -90,6 +271,13 @@ static f32 player_x_drt(NPC_STATION_MASTER_ACTOR* actor) {
 
 static void aSTM_get_off_wait(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play) {
     aSTM_look_player(actor, play);
+#ifdef VITA_MP
+    if (!aSTM_mp_told && mp_travel_state() == MP_TRAVEL_VISITING) {
+        aSTM_mp_told = TRUE;
+        aSTM_mp_tell(actor, 0, actor->npc_class.actor_class.world.position.x,
+                     actor->npc_class.actor_class.world.position.z);
+    }
+#endif
 
     if (CLIP(demo_clip) != NULL) {
         ACTOR* demox = (ACTOR*)CLIP(demo_clip)->demo_class;
@@ -273,6 +461,9 @@ static void aSTM_think_init_proc(NPC_ACTOR* nactorx, GAME_PLAY* play) {
     u8 think_idx;
     ACTOR* actorx = (ACTOR*)actor;
 
+#ifdef VITA_MP
+    aSTM_mp_reset();
+#endif
     if (mEv_CheckFirstIntro() == TRUE || Actor_info_name_search(&play->actor_info, mAc_PROFILE_RIDE_OFF_DEMO, ACTOR_PART_CONTROL) != NULL) {
         think_idx = aSTM_THINK_GET_OFF_WAIT;
         actorx->shape_info.rotation.y += DEG2SHORT_ANGLE2(-90.0f);
@@ -282,6 +473,10 @@ static void aSTM_think_init_proc(NPC_ACTOR* nactorx, GAME_PLAY* play) {
     } else {
         if (mEv_IsNotTitleDemo()) {
             actorx->world.position.x += mFI_UT_WORLDSIZE_X_F;
+#ifdef VITA_MP
+            aSTM_mp_spot = actorx->world.position;
+            aSTM_mp_spot_ok = TRUE;
+#endif
         }
 
         if (Common_Get(player_no) < mPr_FOREIGNER) {
@@ -314,6 +509,12 @@ static void aSTM_interrupt_turn_init(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY*
 }
 
 static void aSTM_interrupt_move_init(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play) {
+#ifdef VITA_MP
+    if (mp_travel_state() == MP_TRAVEL_VISITING) {
+        aSTM_mp_tell(actor, 1, actor->npc_class.actor_class.world.position.x + mFI_UT_WORLDSIZE_X_F,
+                     actor->npc_class.actor_class.world.position.z);
+    }
+#endif
     actor->npc_class.condition_info.demo_flg = aNPC_COND_DEMO_SKIP_FORWARD_CHECK | aNPC_COND_DEMO_SKIP_OBJ_COL_CHECK;
     aSTM_set_request_act(actor, 4, aNPC_ACT_WALK, aNPC_ACT_TYPE_TO_POINT, aNPC_ACT_OBJ_DEFAULT, actor->npc_class.actor_class.world.position.x + mFI_UT_WORLDSIZE_X_F, actor->npc_class.actor_class.world.position.z);
     actor->npc_class.condition_info.demo_flg &= ~aNPC_COND_DEMO_SKIP_FOOTSTEPS; // @unnecessary
@@ -339,6 +540,12 @@ static void aSTM_move_turn_init(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play
 }
 
 static void aSTM_move_init(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play) {
+#ifdef VITA_MP
+    // (a visitor boarding home: every Porter steps off the spot they board from)
+    if (mp_travel_state() == MP_TRAVEL_RETURNING) {
+        aSTM_mp_tell(actor, 2, actor->npc_class.movement.avoid_pos_x, actor->npc_class.movement.avoid_pos_z);
+    }
+#endif
     aSTM_set_request_act(actor, 4, aNPC_ACT_WALK, aNPC_ACT_TYPE_TO_POINT, aNPC_ACT_OBJ_DEFAULT, actor->npc_class.movement.avoid_pos_x, actor->npc_class.movement.avoid_pos_z);
     actor->npc_class.condition_info.demo_flg &= ~aNPC_COND_DEMO_SKIP_FOOTSTEPS;
 }

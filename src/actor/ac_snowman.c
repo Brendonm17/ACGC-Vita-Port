@@ -11,6 +11,10 @@
 
 #ifdef VITA_TROPHIES
 #include "vita_trophy.h"
+#ifdef VITA_MP
+#include "m_snowman.h"
+#include "pc_mp.h"
+#endif
 #endif
 
 enum {
@@ -79,6 +83,41 @@ static int aSMAN_process_air(ACTOR* actorx, GAME* game);
 static int aSMAN_process_hole(ACTOR* actorx, GAME* game);
 static int aSMAN_process_combine_head(ACTOR* actorx, GAME* game);
 
+#ifdef VITA_MP
+// the player rolling a snowball owns it; the other screens follow its state
+static u8 aSMAN_mp_mine[MP_SNOW_MAX];
+static u8 aSMAN_mp_tail[MP_SNOW_MAX];     // frames still reported after it came to rest
+static u8 aSMAN_mp_followed[MP_SNOW_MAX]; // this screen's copy was built by another player
+
+static aSMAN_PROC aSMAN_mp_procs[] = {
+    aSMAN_process_normal,       aSMAN_process_player_push,        aSMAN_process_player_push_scroll,
+    aSMAN_process_combine_body, aSMAN_process_combine_head_jump, aSMAN_process_swim,
+    aSMAN_process_air,          aSMAN_process_hole,               aSMAN_process_combine_head,
+};
+
+static int aSMAN_mp_proc_no(aSMAN_PROC proc) {
+    int i;
+
+    for (i = 0; i < (int)ARRAY_COUNT(aSMAN_mp_procs); i++) {
+        if (aSMAN_mp_procs[i] == proc) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+static SNOWMAN_ACTOR* aSMAN_mp_find(GAME_PLAY* play, int part) {
+    ACTOR* actorx;
+
+    for (actorx = play->actor_info.list[ACTOR_PART_BG].actor; actorx != NULL; actorx = actorx->next_actor) {
+        if (actorx->id == mAc_PROFILE_SNOWMAN && ((SNOWMAN_ACTOR*)actorx)->snowman_part == part) {
+            return (SNOWMAN_ACTOR*)actorx;
+        }
+    }
+    return NULL;
+}
+#endif
+
 static void aSMAN_actor_ct(ACTOR* actorx, GAME* game) {
     static int part_tbl[] = { aSMAN_PART0, aSMAN_PART1 };
     SNOWMAN_ACTOR* actor = (SNOWMAN_ACTOR*)actorx;
@@ -124,6 +163,44 @@ static void aSMAN_actor_ct(ACTOR* actorx, GAME* game) {
 
 static void aSNOWMAN_Set_PSnowman_info(SNOWMAN_ACTOR* actor) {
     mSN_snowman_info_c sman_info;
+
+#ifdef VITA_MP
+    if (mp_is_guest()) {
+        // a snowman this guest built goes to the host; the town's record is the host's to write
+        if (!aSMAN_mp_followed[actor->snowman_part] && (actor->flags & aSMAN_FLAG_DELETE) == 0) {
+            u8 body[20];
+            u8 data[4];
+            int i;
+
+            data[0] = TRUE;
+            data[1] = (u8)(actor->normalized_scale * 255);
+            data[2] = (u8)(actor->body_scale * 255);
+            data[3] = (u8)actor->result;
+            body[0] = MP_VFX_SNOW_DONE;
+            for (i = 0; i < 4; i++) {
+                body[1 + i] = data[i];
+            }
+            for (i = 0; i < 12; i++) {
+                body[5 + i] = ((const u8*)&actor->fg_pos)[i];
+            }
+            body[17] = Common_Get(time.rtc_time.month);
+            body[18] = Common_Get(time.rtc_time.day);
+            body[19] = Common_Get(time.rtc_time.hour);
+            mp_vfx_send(body, sizeof(body));
+        }
+        mCoBG_SetPlussOffset(actor->actor_class.world.position, 0, mCoBG_ATTRIBUTE_NONE);
+        return;
+    }
+    {
+        // a guest's word already put it in the town
+        mActor_name_t* fg_p = mFI_GetUnitFG(actor->fg_pos);
+
+        if (fg_p != NULL && *fg_p >= SNOWMAN0 && *fg_p < SNOWMAN0 + mSN_SAVE_COUNT * mSN_SAVE_COUNT) {
+            mCoBG_SetPlussOffset(actor->actor_class.world.position, 0, mCoBG_ATTRIBUTE_NONE);
+            return;
+        }
+    }
+#endif
 
     xyz_t_move(&sman_info.pos, &actor->fg_pos);
     sman_info.data.exists = TRUE;
@@ -247,6 +324,14 @@ static void aSMAN_SendPresentMail(void) {
         aSMAN_GetSnowmanPresentMail(mail);
         mPO_receipt_proc(mail, mPO_SENDTYPE_MAIL);
     }
+#ifdef VITA_MP
+    // a visitor has no mailbox here: the prize letter comes into its pouch
+    else if (mail != NULL && mp_visitor_rights()) {
+        mMl_clear_mail(mail);
+        aSMAN_GetSnowmanPresentMail(mail);
+        pc_mp_prize_mail(mail, -1, 0);
+    }
+#endif
 
     zelda_free(mail);
 }
@@ -920,6 +1005,12 @@ static void aSMAN_process_player_push_init(ACTOR* actorx, GAME* game) {
 
     actor->timer = 0;
     actor->process = aSMAN_process_player_push;
+#ifdef VITA_MP
+    aSMAN_mp_mine[actor->snowman_part] = TRUE;
+    aSMAN_mp_followed[actor->snowman_part] = FALSE;
+    // the ball it rolls into becomes part of the same snowman on this screen
+    aSMAN_mp_mine[actor->snowman_part == aSMAN_PART0 ? aSMAN_PART1 : aSMAN_PART0] = TRUE;
+#endif
 }
 
 static int aSMAN_process_player_push(ACTOR* actorx, GAME* game) {
@@ -1338,6 +1429,14 @@ static int aSMAN_process_combine_head(ACTOR* actorx, GAME* game) {
         actor->flags |= aSMAN_FLAG_DELETE;
         parent->flags |= aSMAN_FLAG_DELETE;
         aSMAN_MakeBreakEffect(actor, game);
+#ifdef VITA_MP
+        {
+            u8 body[1];
+
+            body[0] = MP_VFX_SNOW_BREAK;
+            mp_vfx_send(body, sizeof(body));
+        }
+#endif
         mQst_BackSnowman(actorx->world.position);
         Actor_delete(actorx);
         return FALSE;
@@ -1388,9 +1487,170 @@ static int aSMAN_process_combine_body(ACTOR* actorx, GAME* game) {
     return TRUE;
 }
 
+#ifdef VITA_MP
+// another player rolls this one: its place, size, roll and snowman state, never its physics
+static void aSMAN_mp_follow(SNOWMAN_ACTOR* actor, const mp_snow_t* st, GAME_PLAY* play) {
+    ACTOR* actorx = (ACTOR*)actor;
+    u16 keep = aSMAN_FLAG_HEAD_JUMP | aSMAN_FLAG_COMBINED | aSMAN_FLAG_IN_HOLE | aSMAN_FLAG_NO_SPEAK | aSMAN_FLAG_MOVED;
+    f32 scale;
+    int proc = st->proc < ARRAY_COUNT(aSMAN_mp_procs) ? st->proc : 0;
+
+    if (st->flags & aSMAN_FLAG_DELETE) {
+        aSMAN_mp_followed[actor->snowman_part] = TRUE;
+        actor->flags |= aSMAN_FLAG_MOVED | aSMAN_FLAG_DELETE;
+        aSMAN_MakeBreakEffect(actor, (GAME*)play);
+        Actor_delete(actorx);
+        return;
+    }
+    {
+        f32 dx = (st->pos[0] - actorx->world.position.x) * 0.5f;
+        f32 dz = (st->pos[2] - actorx->world.position.z) * 0.5f;
+
+        actorx->world.position.x += dx;
+        actorx->world.position.y += (st->pos[1] - actorx->world.position.y) * 0.5f;
+        actorx->world.position.z += dz;
+        // (rolled along on the other screen: it rumbles here as it goes)
+        if (dx * dx + dz * dz > 1.0f && (st->flags & (aSMAN_FLAG_COMBINED | aSMAN_FLAG_HEAD_JUMP)) == 0) {
+            sAdo_OngenPos((u32)actorx, 52, &actorx->world.position);
+        }
+    }
+    actorx->shape_info.ofs_y = st->ofs_y;
+    actorx->speed = 0.0f;
+    actor->y_ofs = st->y_ofs;
+    actor->move_dist = st->move_dist;
+    actor->body_scale = st->body_scale;
+    actor->head_vec.x = st->head_vec[0];
+    actor->head_vec.y = st->head_vec[1];
+    actor->head_vec.z = st->head_vec[2];
+    actor->result = st->result;
+    actor->fg_pos.x = st->fg_x;
+    actor->fg_pos.z = st->fg_z;
+    actor->flags = (actor->flags & ~keep) | (st->flags & keep);
+    actor->process = aSMAN_mp_procs[proc];
+    actor->normalized_scale = actor->move_dist / aSMAN_MOVE_DIST_MAX;
+    scale = actor->normalized_scale * 0.02f + 0.01f;
+    actorx->scale.x = actorx->scale.y = actorx->scale.z = scale > 0.03f ? 0.03f : scale;
+    actorx->shape_info.shadow_size_x = actorx->shape_info.shadow_size_z = actor->normalized_scale * 20.0f + 10.0f;
+    actorx->shape_info.draw_shadow = (actor->flags & aSMAN_FLAG_HEAD_JUMP) == 0;
+    if (actor->flags & aSMAN_FLAG_COMBINED) {
+        aSMAN_mp_followed[actor->snowman_part] = TRUE;
+    }
+    // a head sits on the other ball, as combine_head_jump_init links them
+    if ((actor->flags & aSMAN_FLAG_HEAD_JUMP) && actorx->parent_actor == NULL) {
+        actorx->parent_actor = (ACTOR*)aSMAN_mp_find(play, actor->snowman_part == aSMAN_PART0 ? aSMAN_PART1
+                                                                                            : aSMAN_PART0);
+    }
+    aSMAN_calc_objChkRange(actorx);
+    if ((actor->flags & aSMAN_FLAG_COMBINED) == 0) {
+        CollisionCheck_Uty_ActorWorldPosSetPipeC(actorx, &actor->col_pipe);
+        CollisionCheck_setOC((GAME*)play, &play->collision_check, &actor->col_pipe.collision_obj);
+    }
+}
+
+static void aSMAN_mp_report(SNOWMAN_ACTOR* actor) {
+    ACTOR* actorx = (ACTOR*)actor;
+    int part = actor->snowman_part;
+    mp_snow_t st;
+
+    if (actorx->speed != 0.0f || actor->process != aSMAN_process_normal) {
+        aSMAN_mp_tail[part] = 15;
+    } else if (aSMAN_mp_tail[part] == 0) {
+        return;
+    } else {
+        aSMAN_mp_tail[part]--;
+    }
+    st.part = (u8)part;
+    st.proc = (u8)aSMAN_mp_proc_no(actor->process);
+    st.flags = (u16)actor->flags;
+    st.pos[0] = actorx->world.position.x;
+    st.pos[1] = actorx->world.position.y;
+    st.pos[2] = actorx->world.position.z;
+    st.y_ofs = actor->y_ofs;
+    st.ofs_y = actorx->shape_info.ofs_y;
+    st.move_dist = actor->move_dist;
+    st.body_scale = actor->body_scale;
+    st.head_vec[0] = actor->head_vec.x;
+    st.head_vec[1] = actor->head_vec.y;
+    st.head_vec[2] = actor->head_vec.z;
+    st.result = (short)actor->result;
+    st.fg_x = actor->fg_pos.x;
+    st.fg_z = actor->fg_pos.z;
+    pc_mp_snow_report(&st);
+}
+
+// a snowman knocked over on another screen falls here too; the host writes a guest's finished one
+void aSMAN_mp_replay(struct game_play_s* play_s, const u8* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_s;
+    int part;
+
+    if (body[0] == MP_VFX_SNOW_DONE) {
+        mSN_snowman_info_c info;
+        mActor_name_t* fg_p;
+        int i;
+
+        if (len < 20) {
+            return;
+        }
+        for (i = 0; i < 4; i++) {
+            ((u8*)&info.data)[i] = body[1 + i];
+        }
+        for (i = 0; i < 12; i++) {
+            ((u8*)&info.pos)[i] = body[5 + i];
+        }
+        fg_p = mFI_GetUnitFG(info.pos);
+        if (fg_p == NULL || (*fg_p >= SNOWMAN0 && *fg_p < SNOWMAN0 + mSN_SAVE_COUNT * mSN_SAVE_COUNT)) {
+            return; // already standing: the host's own copy wrote it
+        }
+        for (part = 0; part < MP_SNOW_MAX; part++) {
+            SNOWMAN_ACTOR* live = aSMAN_mp_find(play, part);
+
+            if (live != NULL && (live->flags & aSMAN_FLAG_COMBINED)) {
+                return; // still standing here: its own copy writes it when it goes
+            }
+        }
+        mSN_regist_snowman_society(&info);
+        Save_Set(snowman_year, Common_Get(time.rtc_time.year) % 100);
+        Save_Set(snowman_month, body[17]);
+        Save_Set(snowman_day, body[18]);
+        Save_Set(snowman_hour, body[19]);
+        for (part = 0; part < MP_SNOW_MAX; part++) {
+            mEv_clear_common_place(mEv_EVENT_SNOWMAN_SEASON, 100 + part);
+            mEv_clear_common_area(mEv_EVENT_SNOWMAN_SEASON, part);
+        }
+        return;
+    }
+    for (part = 0; part < MP_SNOW_MAX; part++) {
+        SNOWMAN_ACTOR* actor = aSMAN_mp_find(play, part);
+
+        if (actor != NULL && (actor->flags & aSMAN_FLAG_COMBINED) && (actor->flags & aSMAN_FLAG_DELETE) == 0) {
+            aSMAN_mp_followed[part] = TRUE;
+            actor->flags |= aSMAN_FLAG_MOVED | aSMAN_FLAG_DELETE;
+            aSMAN_MakeBreakEffect(actor, (GAME*)play);
+            Actor_delete((ACTOR*)actor);
+        }
+    }
+}
+#endif
+
 static void aSMAN_actor_move(ACTOR* actorx, GAME* game) {
     SNOWMAN_ACTOR* actor = (SNOWMAN_ACTOR*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)game;
+
+#ifdef VITA_MP
+    if (mp_active()) {
+        mp_snow_t st;
+        int part = actor->snowman_part;
+
+        // someone else rolls it; this screen keeps it only while its own player is pushing
+        if (mp_snow_remote(part, &st) && actor->process != aSMAN_process_player_push &&
+            actor->process != aSMAN_process_player_push_scroll) {
+            aSMAN_mp_mine[part] = FALSE;
+            aSMAN_mp_tail[part] = 0;
+            aSMAN_mp_follow(actor, &st, play);
+            return;
+        }
+    }
+#endif
 
     if ((actorx->state_bitfield & ACTOR_STATE_NO_CULL) == 0) {
         if ((actor->flags & aSMAN_FLAG_COMBINED) != 0 && (actor->flags & aSMAN_FLAG_HEAD_JUMP) != 0 &&
@@ -1416,6 +1676,11 @@ static void aSMAN_actor_move(ACTOR* actorx, GAME* game) {
         CollisionCheck_Uty_ActorWorldPosSetPipeC(actorx, &actor->col_pipe);
         CollisionCheck_setOC(game, &play->collision_check, &actor->col_pipe.collision_obj);
     }
+#ifdef VITA_MP
+    if (mp_active() && aSMAN_mp_mine[actor->snowman_part]) {
+        aSMAN_mp_report(actor);
+    }
+#endif
 }
 
 extern Gfx act_darumaA_model[];

@@ -96,6 +96,9 @@ static void aHOI_actor_draw(ACTOR* actorx, GAME* game) {
 
       SET_POLY_OPA_DISP(gfx);
       CLOSE_DISP(graph);
+#ifdef VITA_MP
+      pc_mp_attach(MP_ATT_HOI, handOverItem->gyo_type, TRUE, NULL, get_Matrix_now());
+#endif
     }
     else {
       Matrix_scale(scale, scale, scale, MTX_MULT);
@@ -108,6 +111,34 @@ static void aHOI_actor_draw(ACTOR* actorx, GAME* game) {
 
       SET_POLY_OPA_DISP(gfx);
       CLOSE_DISP(graph);
+#ifdef VITA_MP
+      pc_mp_attach(MP_ATT_HOI, handOverItem->draw_type, FALSE, NULL, get_Matrix_now());
+#endif
     }
   }
 }
+
+#ifdef VITA_MP
+// a remote player's handed item, with the current matrix
+void aHOI_mp_draw(GRAPH* graph, int type, int is_fish) {
+  Gfx* gfx;
+
+  if (is_fish ? (type < 0 || type >= (int)ARRAY_COUNT(aGYO_displayList))
+              : (type <= mNT_ITEM_TYPE_NONE || type >= mNT_ITEM_TYPE_NUM)) {
+    return;
+  }
+  _texture_z_light_fog_prim(graph);
+  OPEN_DISP(graph);
+  gfx = NOW_POLY_OPA_DISP;
+  if (is_fish) {
+    gSPMatrix(gfx++, _Matrix_to_Mtx_new(graph), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(gfx++, aGYO_displayList[type]->dl_a);
+  } else {
+    gSPDisplayList(gfx++, mode_DL_table[type]);
+    gSPMatrix(gfx++, _Matrix_to_Mtx_new(graph), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+    gSPDisplayList(gfx++, vtx_DL_table[type]);
+  }
+  SET_POLY_OPA_DISP(gfx);
+  CLOSE_DISP(graph);
+}
+#endif

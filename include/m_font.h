@@ -529,6 +529,7 @@ typedef void (*mFont_ControlCodeSentenceFunc)(mFontSentence*, Gfx**);
 extern void mFont_ct();
 extern int mFont_UnintToString(u8* str, int figure, u32 num, int figure_start, int left_cut, int fill_zero, int separator);
 extern int mFont_char_save_data_check(u8 c);
+extern void mFont_clean_save_text(u8* str, int len);
 extern u8 mFont_small_to_capital(u8 small);
 extern int mFont_GetCodeWidth(u8 c, int cut);
 extern int mFont_GetStringWidth(u8* str, int len, int cut);

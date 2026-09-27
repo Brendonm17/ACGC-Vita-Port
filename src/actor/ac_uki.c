@@ -9,6 +9,9 @@
 #include "m_player_lib.h"
 #include "sys_matrix.h"
 #include "m_actor_shadow.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aUKI_PROC_CARRY,

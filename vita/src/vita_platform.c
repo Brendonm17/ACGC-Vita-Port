@@ -7,6 +7,7 @@
 #include "vita_shared.h"
 #include "vita_gx_cmdbuf.h"
 #include "vita_trophy.h"
+#include "pc_mp.h"
 
 #include <psp2/power.h>
 #include <psp2/appmgr.h>
@@ -17,6 +18,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/message_dialog.h>
 #include <psp2/common_dialog.h>
+#include <psp2/touch.h>
 #include <vitaGL.h>
 #include <string.h>
 #include <time.h>
@@ -72,14 +74,27 @@ static volatile int s_power_cb_running = 1;
     SCE_POWER_CB_BUTTON_POWER_PRESS | \
     SCE_POWER_CB_BUTTON_POWER_HOLD)
 
+#ifdef VITA_MP
+static volatile int s_pc_woke; // the system reported a resume: an ad hoc session is over
+#endif
+
 static int vita_power_callback(int notifyId, int notifyCount, int powerInfo, void *userData) {
     (void)notifyId; (void)notifyCount; (void)userData;
     if (powerInfo & PC_POWER_SAVE_MASK) {
         extern int pc_auto_save_force(void);
+#ifdef VITA_MP
+        if (g_pc_settings.auto_save || mp_travel_net_trip()) {
+#else
         if (g_pc_settings.auto_save) {
+#endif
             pc_auto_save_force();
         }
     }
+#ifdef VITA_MP
+    if (powerInfo & (SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_APP_RESUME)) {
+        s_pc_woke = 1;
+    }
+#endif
     return 0;
 }
 
@@ -134,11 +149,11 @@ void pc_crash_protection_init(void) {
     static int installed = 0;
     if (!installed) {
         if (signal(SIGSEGV, vita_signal_handler) == SIG_ERR)
-            fprintf(stderr, "[VITA] WARNING: Failed to install SIGSEGV handler\n");
+            pc_log_error("[VITA] Failed to install SIGSEGV handler\n");
         if (signal(SIGILL, vita_signal_handler) == SIG_ERR)
-            fprintf(stderr, "[VITA] WARNING: Failed to install SIGILL handler\n");
+            pc_log_error("[VITA] Failed to install SIGILL handler\n");
         if (signal(SIGFPE, vita_signal_handler) == SIG_ERR)
-            fprintf(stderr, "[VITA] WARNING: Failed to install SIGFPE handler\n");
+            pc_log_error("[VITA] Failed to install SIGFPE handler\n");
         installed = 1;
     }
 }
@@ -170,8 +185,7 @@ const char* vita_get_early_fatal(void) {
 // caller must have vitaGL initialized; the system overlay composites on top
 // of whatever the app last drew, so we swap a black frame each loop.
 void vita_fatal_dialog_and_exit(const char* msg) {
-    fprintf(stderr, "[VITA] FATAL: %s\n", msg ? msg : "(no message)");
-    fflush(stderr);
+    pc_log_error("[VITA] FATAL: %s\n", msg ? msg : "(no message)");
 
     if (!msg) sceKernelExitProcess(1);
 
@@ -212,13 +226,6 @@ static int vita_ensure_dir(const char* path) {
 
 void vita_init(void) {
     int ret;
-    ret = scePowerSetArmClockFrequency(444);
-    if (ret < 0) fprintf(stderr, "[VITA] WARNING: ARM overclock failed: 0x%08X\n", ret);
-    ret = scePowerSetGpuClockFrequency(222);
-    if (ret < 0) fprintf(stderr, "[VITA] WARNING: GPU overclock failed: 0x%08X\n", ret);
-    ret = scePowerSetBusClockFrequency(222);
-    if (ret < 0) fprintf(stderr, "[VITA] WARNING: Bus overclock failed: 0x%08X\n", ret);
-
     {
         int err = vita_ensure_dir("ux0:data/AnimalCrossing");
         if (err < 0) {
@@ -228,11 +235,27 @@ void vita_init(void) {
                 "ux0:data/AnimalCrossing\nError 0x%08X\n\n"
                 "Your memory card may be read-only or corrupted. Try a filesystem\n"
                 "check (chkdsk/fsck) from a PC, or a different card.", (unsigned)err);
-            fprintf(stderr, "[VITA] FATAL: mkdir data dir: 0x%08X\n", (unsigned)err);
             vita_record_early_fatal(buf);
             return;
         }
     }
+
+    // error.log starts over each launch; stderr and pc_log_error both append to it
+    {
+        FILE* f = fopen("ux0:data/AnimalCrossing/error.log", "w");
+        if (f) fclose(f);
+    }
+    if (!freopen("ux0:data/AnimalCrossing/error.log", "a", stderr))
+        stderr = stdout;  // fallback to psp2link
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    ret = scePowerSetArmClockFrequency(444);
+    if (ret < 0) pc_log_error("[VITA] ARM overclock failed: 0x%08X\n", ret);
+    ret = scePowerSetGpuClockFrequency(222);
+    if (ret < 0) pc_log_error("[VITA] GPU overclock failed: 0x%08X\n", ret);
+    ret = scePowerSetBusClockFrequency(222);
+    if (ret < 0) pc_log_error("[VITA] Bus overclock failed: 0x%08X\n", ret);
+
     {
         int err = vita_ensure_dir("ux0:data/AnimalCrossing/saves");
         if (err < 0) {
@@ -242,7 +265,7 @@ void vita_init(void) {
                 "ux0:data/AnimalCrossing/saves\nError 0x%08X\n\n"
                 "Your memory card may be read-only or corrupted. Try a filesystem\n"
                 "check (chkdsk/fsck) from a PC, or a different card.", (unsigned)err);
-            fprintf(stderr, "[VITA] FATAL: mkdir saves dir: 0x%08X\n", (unsigned)err);
+            pc_log_error("[VITA] FATAL: mkdir saves dir: 0x%08X\n", (unsigned)err);
             vita_record_early_fatal(buf);
             return;
         }
@@ -256,7 +279,7 @@ void vita_init(void) {
                 "ux0:data/AnimalCrossing/rom\nError 0x%08X\n\n"
                 "Your memory card may be read-only or corrupted. Try a filesystem\n"
                 "check (chkdsk/fsck) from a PC, or a different card.", (unsigned)err);
-            fprintf(stderr, "[VITA] FATAL: mkdir rom dir: 0x%08X\n", (unsigned)err);
+            pc_log_error("[VITA] FATAL: mkdir rom dir: 0x%08X\n", (unsigned)err);
             vita_record_early_fatal(buf);
             return;
         }
@@ -264,7 +287,7 @@ void vita_init(void) {
     {
         int mk_ret4 = sceIoMkdir("ux0:data/AnimalCrossing/banners", 0777);
         if (mk_ret4 < 0 && mk_ret4 != VITA_EEXIST)
-            printf("[VITA] WARNING: banners dir failed: 0x%08X\n", mk_ret4);
+            pc_log_error("[VITA] banners dir failed: 0x%08X\n", mk_ret4);
     }
 #ifdef PC_DESIGN_IMPORT
     sceIoMkdir("ux0:data/AnimalCrossing/designs", 0777);
@@ -274,20 +297,10 @@ void vita_init(void) {
     {
         int mk_ret6 = sceIoMkdir("ux0:data/AnimalCrossing/texture_packs", 0777);
         if (mk_ret6 < 0 && mk_ret6 != VITA_EEXIST)
-            printf("[VITA] WARNING: texture_packs dir failed: 0x%08X\n", mk_ret6);
+            pc_log_error("[VITA] texture_packs dir failed: 0x%08X\n", mk_ret6);
     }
 
-    // truncate each launch; OSReport in pc_os.c opens the same file in
-    // append mode so everything from this session accumulates cleanly.
-    if (!freopen("ux0:data/AnimalCrossing/error.log", "w", stderr))
-        stderr = stdout;  // fallback to psp2link
-    setvbuf(stderr, NULL, _IONBF, 0);
-
-    // after stderr is redirected so any failures inside the callback init
-    // land in error.log
     vita_power_callback_init();
-
-    printf("[VITA] Main thread stack: %u KB\n", sceUserMainThreadStackSize / 1024);
 }
 
 static SceUID emu64_work_ready_sema = -1;
@@ -385,13 +398,12 @@ void vita_emu64_worker_init(void) {
     emu64_work_done_sema = sceKernelCreateSema("emu64_done", 0, 0, 1, NULL);
 
     if (emu64_work_ready_sema < 0 || emu64_work_done_sema < 0) {
-        fprintf(stderr, "[VITA] Failed to create emu64 semaphores: ready=0x%08X done=0x%08X\n",
-                emu64_work_ready_sema, emu64_work_done_sema);
+        pc_log_error("[VITA] Failed to create emu64 semaphores (ready=0x%08X done=0x%08X), running single-threaded\n",
+                     emu64_work_ready_sema, emu64_work_done_sema);
         if (emu64_work_ready_sema >= 0) sceKernelDeleteSema(emu64_work_ready_sema);
         if (emu64_work_done_sema >= 0) sceKernelDeleteSema(emu64_work_done_sema);
         emu64_work_ready_sema = -1;
         emu64_work_done_sema = -1;
-        fprintf(stderr, "[VITA] Falling back to single-threaded.\n");
         return;
     }
 
@@ -411,7 +423,7 @@ void vita_emu64_worker_init(void) {
     );
 
     if (emu64_worker_tid < 0) {
-        fprintf(stderr, "[VITA] Failed to create emu64 worker thread: 0x%08X\n", emu64_worker_tid);
+        pc_log_error("[VITA] Failed to create emu64 worker thread: 0x%08X\n", emu64_worker_tid);
         emu64_worker_running = 0;
         sceKernelDeleteSema(emu64_work_ready_sema);
         sceKernelDeleteSema(emu64_work_done_sema);
@@ -423,7 +435,7 @@ void vita_emu64_worker_init(void) {
     {
         int start_ret = sceKernelStartThread(emu64_worker_tid, 0, NULL);
         if (start_ret < 0) {
-            fprintf(stderr, "[VITA] Failed to start emu64 worker thread: 0x%08X\n", start_ret);
+            pc_log_error("[VITA] Failed to start emu64 worker thread: 0x%08X\n", start_ret);
             emu64_worker_running = 0;
             sceKernelDeleteThread(emu64_worker_tid);
             sceKernelDeleteSema(emu64_work_ready_sema);
@@ -434,7 +446,6 @@ void vita_emu64_worker_init(void) {
             return;
         }
     }
-    printf("[VITA] emu64 worker thread started on core 1 (tid=0x%08X)\n", emu64_worker_tid);
 
     // core 2 prededup thread: lightweight, runs prededup in parallel
     // with game logic so it's off the emu64 critical path.
@@ -448,7 +459,6 @@ void vita_emu64_worker_init(void) {
             SCE_KERNEL_CPU_MASK_USER_2, NULL);
         if (prededup_thread_tid >= 0) {
             sceKernelStartThread(prededup_thread_tid, 0, NULL);
-            printf("[VITA] prededup thread started on core 2 (tid=0x%08X)\n", prededup_thread_tid);
         } else {
             prededup_thread_running = 0;
         }
@@ -465,7 +475,6 @@ void vita_emu64_worker_shutdown(void) {
     sceKernelDeleteSema(emu64_work_ready_sema);
     sceKernelDeleteSema(emu64_work_done_sema);
     emu64_worker_tid = -1;
-    printf("[VITA] emu64 worker thread shut down.\n");
 }
 
 void vita_emu64_wait_done(void) {
@@ -504,7 +513,6 @@ static void vita_atexit_cleanup(void) {
 void vita_pin_hidden_threads(void) {
     SceKernelThreadInfo info;
     int misses_in_row = 0;
-    static int dump_done = 0;
 
     for (SceUID uid = 0x40010001; uid < 0x40020000 && misses_in_row < 500; uid++) {
         if (sceKernelGetThreadmgrUIDClass(uid) != SCE_KERNEL_TMID_Thread) {
@@ -543,8 +551,6 @@ void vita_pin_hidden_threads(void) {
             sceKernelChangeThreadCpuAffinityMask(uid, target);
         }
     }
-
-    dump_done = 1;
 }
 
 void pc_platform_init(void) {
@@ -556,7 +562,6 @@ void pc_platform_init(void) {
         else if (g_pc_settings.msaa == 2) msaa_mode = SCE_GXM_MULTISAMPLE_2X;
         vglInitExtended(256 * 1024, g_pc_settings.render_w, g_pc_settings.render_h,
                         32 * 1024 * 1024, msaa_mode);
-        printf("[VITA] MSAA: %s\n", g_pc_settings.msaa == 4 ? "4X" : g_pc_settings.msaa == 2 ? "2X" : "OFF");
     }
 
     vglUseVram(GL_TRUE);
@@ -577,9 +582,8 @@ void pc_platform_init(void) {
     g_pc_window_w = g_pc_settings.render_w;
     g_pc_window_h = g_pc_settings.render_h;
 
-    printf("[VITA] Render resolution: %dx%d\n", g_pc_settings.render_w, g_pc_settings.render_h);
     if (SDL_Init(SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) {
-        fprintf(stderr, "[VITA] FATAL: SDL_Init failed: %s\n", SDL_GetError());
+        pc_log_error("[VITA] SDL_Init failed: %s\n", SDL_GetError());
         vita_fatal_dialog_and_exit("Failed to initialize SDL (input and audio).\n\n"
             "Try rebooting your Vita and launching again.");
     }
@@ -601,6 +605,7 @@ void pc_platform_init(void) {
 extern void PADCleanup(void);
 
 void pc_platform_shutdown(void) {
+    pc_mp_on_app_exit();
     vita_emu64_worker_shutdown();
     pc_audio_shutdown();
     pc_audio_mq_shutdown();
@@ -619,7 +624,14 @@ void pc_platform_swap_buffers(void) {
 #ifdef VITA_DEBUG
     unsigned int t0 = sceKernelGetProcessTimeLow();
 #endif
+#ifdef VITA_MP
+    // the ad hoc connection dialog (and the chat keyboard) draw over the game while they're up
+    MP_CRUMB("swap");
+    vglSwapBuffers((vita_mp_dialog_active() || vita_ime_active()) ? GL_TRUE : GL_FALSE);
+    MP_CRUMB("frame");
+#else
     vglSwapBuffers(GL_FALSE);
+#endif
 #ifdef VITA_DEBUG
     vita_timing.swap_us = sceKernelGetProcessTimeLow() - t0;
 #endif
@@ -648,7 +660,9 @@ int pc_platform_poll_events(void) {
     int just_resumed = (s_pc_last_alive > 0) && (elapsed >= PC_SUSPEND_DETECT_SEC);
 
     if (just_resumed) {
-        OSReport("[PC] Resumed from suspend after %ld s\n", (long)elapsed);
+#ifdef VITA_MP
+        pc_mp_on_resume(0);
+#endif
 
         // memory is preserved across vita sleep, so writing on resume
         // captures the same state a pre-suspend save would have
@@ -659,13 +673,10 @@ int pc_platform_poll_events(void) {
             // and softlocks, so just resync the clock in place
             extern int mEv_CheckFirstIntro(void);
             if (elapsed >= PC_LONG_SUSPEND_SEC && !mEv_CheckFirstIntro()) {
-                OSReport("[PC] Long suspend, reloading app\n");
+                pc_mp_on_app_exit();
                 sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
                 // not reached
             } else {
-                if (elapsed >= PC_LONG_SUSPEND_SEC) {
-                    OSReport("[PC] Long suspend during intro, skipping reload\n");
-                }
                 pc_os_time_resync();
             }
         }
@@ -676,6 +687,35 @@ int pc_platform_poll_events(void) {
 
     // self-rate-limited; scans save state to award unlocked trophies.
     vita_trophy_poll();
+
+#ifdef VITA_MP
+    if (s_pc_woke) {
+        s_pc_woke = 0;
+        pc_mp_on_resume(1);
+    }
+    // session control + system dialogs; runs through loads and the title too
+    pc_mp_pump();
+    vita_ime_update();
+
+    // a new touch on the front panel, in the game's UI plane (its 4:3 band is centred in both display modes)
+    {
+        static int s_touch_down;
+        SceTouchData touch;
+
+        if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0) {
+            int down = touch.reportNum > 0;
+
+            if (down && !s_touch_down) {
+                float band = 544.0f * 4.0f / 3.0f;
+                float x = ((float)touch.report[0].x * 0.5f - (960.0f - band) * 0.5f) * 320.0f / band;
+                float y = (float)touch.report[0].y * 0.5f * 240.0f / 544.0f;
+
+                pc_mp_chat_tap((int)x, (int)y);
+            }
+            s_touch_down = down;
+        }
+    }
+#endif
 
     // these SDL lifecycle events rarely fire on vita (the power callback
     // above is the real hook), but wire them up anyway as belt-and-braces.

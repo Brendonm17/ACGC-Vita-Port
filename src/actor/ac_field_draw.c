@@ -8,6 +8,9 @@
 #include "m_common_data.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void Bg_Draw_Actor_ct(ACTOR* actorx, GAME* game);
 static void Bg_Draw_Actor_dt(ACTOR* actorx, GAME* game);
@@ -499,19 +502,31 @@ static void aFD_DrawBlock(aFD_block_c* block, ACTOR* actorx, GAME* game) {
     }
 }
 
+#ifdef VITA_MP
+// the surf, and where it reaches, keep the same time on every screen (in whole wave cycles and scroll turns)
+static u32 aFD_marin_frame(GAME_PLAY* play) {
+    u32 gf = pc_mp_world_frame(play->game_frame);
+
+    return gf != (u32)play->game_frame ? gf % 76800 : (u32)play->game_frame;
+}
+#define aFD_MARIN_FRAME(play) aFD_marin_frame(play)
+#else
+#define aFD_MARIN_FRAME(play) ((play)->game_frame)
+#endif
+
 static void aFD_MakeMarinScrollInfo(ACTOR* actorx, GAME* game) {
     FIELD_DRAW_ACTOR* field_draw = (FIELD_DRAW_ACTOR*)actorx;
     aFD_marin_info_c* marin_info = &field_draw->marin_info;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
-    int frame = play->game_frame % 300;
+    int frame = aFD_MARIN_FRAME(play) % 300;
     f32 frame_f = (f32)frame;
     f32 wave_radian = (frame_f / 300.0f) * F_PI * 2.0f;
     f32 wave_cos = cosf_table(wave_radian);
     f32 beach_cos = cosf_table((wave_radian - 1.2f) + (f32)GETREG(MYKREG, 53) * 0.01f);
 
     marin_info->frame = frame;
-    marin_info->tile0_scroll = (int)((f32)play->game_frame * -0.42666667f) - 7;
+    marin_info->tile0_scroll = (int)((f32)aFD_MARIN_FRAME(play) * -0.42666667f) - 7;
     marin_info->tile1_scroll = (int)(wave_cos * -32.0f - -32.0f);
 
     mCoBG_WaveCos2BgCheck(wave_cos);

@@ -10,6 +10,9 @@
 #include "m_room_type.h"
 #include "m_msg.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 typedef struct {
     s16 x;
@@ -95,6 +98,11 @@ static void Museum_Fossil_Actor_move(ACTOR* actorx, GAME* game) {
         for (i = 0; i < mMmd_FOSSIL_NUM; i++) {
             int donator = mMmd_FossilInfo(i);
             int res;
+#ifdef VITA_MP
+            u8 mp_name[PLAYER_NAME_LEN];
+            // a visitor's donation the host noted reads with their name, as a resident's does
+            int mp_named = donator == mMmd_DONATOR_DELETED_PLAYER && pc_mp_museum_donor(mMmd_CATEGORY_FOSSIL, i, mp_name);
+#endif
 
             pos.x = (aMF_fossil_data_table[i].pos.x & 0xF) * 40.0f + 20.0f;
             pos.z = (aMF_fossil_data_table[i].pos.z & 0xF) * 40.0f + 20.0f;
@@ -105,6 +113,11 @@ static void Museum_Fossil_Actor_move(ACTOR* actorx, GAME* game) {
                 museum_fossil->msg_no = (donator == mMmd_DONATOR_NONE)
                                             ? MSG_12193
                                             : ((donator == mMmd_DONATOR_DELETED_PLAYER) ? MSG_12192 : MSG_12191);
+#ifdef VITA_MP
+                if (mp_named) {
+                    museum_fossil->msg_no = MSG_12191;
+                }
+#endif
                 museum_fossil->target_angle = angle;
                 if (mDemo_Request(mDemo_TYPE_SPEAK, actorx, &aMF_SetTalkInfo)) {
                     if (mMmd_IS_DONATED(donator)) {
@@ -124,6 +137,11 @@ static void Museum_Fossil_Actor_move(ACTOR* actorx, GAME* game) {
                                 Save_Get(private_data[mMmd_DONATOR_PLR_IDX(donator)]).player_ID.player_name,
                                 PLAYER_NAME_LEN);
                         }
+#ifdef VITA_MP
+                        else if (mp_named) {
+                            mMsg_Set_free_str(mMsg_Get_base_window_p(), mMsg_FREE_STR0, mp_name, PLAYER_NAME_LEN);
+                        }
+#endif
                     }
 
                     break;

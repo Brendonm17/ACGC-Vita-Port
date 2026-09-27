@@ -5,6 +5,9 @@
 #include "pc_diag.h"
 extern int g_pc_model_viewer;
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #include "m_debug.h"
 #include "zurumode.h"
@@ -147,6 +150,10 @@ extern void game_main(GAME* this) {
     GRAPH_SET_DOING_POINT(graph, GAME_TIME);
     mTM_time();
     GRAPH_SET_DOING_POINT(graph, GAME_TIME_FINISHED);
+#ifdef VITA_MP
+    // session data plumbing runs even while a menu freezes the world
+    pc_mp_frame_begin();
+#endif
     PC_DIAG(5, "game_main: mTM_time done, calling exec=%p\n", (void*)this->exec);
     GRAPH_SET_DOING_POINT(graph, GAME_EXEC);
 #ifdef TARGET_PC
@@ -167,6 +174,9 @@ extern void game_main(GAME* this) {
     this->exec(this);
 #endif
     GRAPH_SET_DOING_POINT(graph, GAME_EXEC_FINISHED);
+#ifdef VITA_MP
+    pc_mp_frame_end();
+#endif
     GRAPH_SET_DOING_POINT(graph, GAME_BGM);
 #ifdef TARGET_PC
     if (!g_pc_model_viewer) {

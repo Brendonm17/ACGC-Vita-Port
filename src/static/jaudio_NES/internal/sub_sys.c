@@ -12,6 +12,9 @@
 static void __Nas_GroupFadeOut(s32 group, s32 fadeout_timer);
 static void __Nas_GroupFadeIn(s32 group, s32 fadein_timer);
 static s32 Nap_SilenceCheck_Inner(s32 flags);
+#ifdef VITA_MP
+volatile s32 Na_mp_aero_skip[AUDIO_GROUP_MAX]; // updates each group's next radio song start catches up
+#endif
 static void __SetGrpParam(group* group, AudioPort* port);
 static void __SetSubParam(sub* subtrack, AudioPort* port);
 
@@ -26,6 +29,18 @@ static void Nap_AudioSysProcess(AudioPort* port) {
         case AUDIOCMD_START_SEQ:
             Nas_StartMySeq(port->command.arg0, port->command.arg1, port->command.arg2);
             __Nas_GroupFadeIn(port->command.arg0, port->param.asS32);
+#ifdef VITA_MP
+            // the radio song picks up where the other players' is: it catches up silently over the next
+            // updates (track.c), its fade kept for after
+            if (port->command.arg1 == 0xDA && port->command.arg0 < AUDIO_GROUP_MAX) {
+                s32 skip = Na_mp_aero_skip[port->command.arg0];
+
+                Na_mp_aero_skip[port->command.arg0] = 0;
+                if (skip > 0 && group->flags.enabled && group->seq_id == 0xDA) {
+                    group->skip_ticks = skip;
+                }
+            }
+#endif
             break;
         case AUDIOCMD_START_SEQ_SKIP:
             Nas_StartSeq_Skip(port->command.arg0, port->command.arg1, port->param.asS32);

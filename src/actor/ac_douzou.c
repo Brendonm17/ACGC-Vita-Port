@@ -1,4 +1,7 @@
 #include "ac_douzou.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #include "m_time.h"
 #include "m_common_data.h"

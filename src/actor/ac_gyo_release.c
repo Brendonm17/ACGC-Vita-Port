@@ -7,6 +7,9 @@
 #include "m_rcp.h"
 #include "m_actor_shadow.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aGYR_actor_ct(ACTOR* actorx, GAME* game);
 static void aGYR_actor_dt(ACTOR* actorx, GAME* game);
@@ -91,7 +94,76 @@ static void aGYR_actor_ct(ACTOR* actorx, GAME* game) {
     gyo_release->shadow_scale = 1.0f;
     gyo_release->exist_flag = TRUE;
     gyo_release->_1B5 = FALSE;
+#ifdef VITA_MP
+    // the local player let it go: the other screens see it swim off too
+    if (mp_vfx_recording()) {
+        u8 body[31];
+        s16 home_angle = actorx->home.angle.y;
+        u16 item = (u16)actorx->actor_specific;
+        const u8* src;
+        int i;
+
+        body[0] = MP_VFX_FISH;
+        src = (const u8*)&item;
+        body[1] = src[0];
+        body[2] = src[1];
+        src = (const u8*)&home_angle;
+        body[3] = src[0];
+        body[4] = src[1];
+        src = (const u8*)&actorx->home.position;
+        for (i = 0; i < 12; i++) {
+            body[5 + i] = src[i];
+        }
+        src = (const u8*)&play->submenu.water_pos;
+        for (i = 0; i < 12; i++) {
+            body[17 + i] = src[i];
+        }
+        body[29] = 0;
+        body[30] = 0;
+        mp_vfx_send(body, sizeof(body));
+    }
+#endif
 }
+
+#ifdef VITA_MP
+void aGYR_mp_replay(struct game_play_s* play_s, const u8* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_s;
+    GYOEI_ACTOR* gyoei;
+    xyz_t keep_water;
+    xyz_t pos;
+    u16 item;
+    s16 angle;
+    u8* dst;
+    int i;
+
+    if (len < 29) {
+        return;
+    }
+    // it needs a free fish slot in the manager, as a real release does
+    gyoei = (GYOEI_ACTOR*)Actor_info_name_search(&play->actor_info, mAc_PROFILE_GYOEI, ACTOR_PART_CONTROL);
+    if (gyoei == NULL || (gyoei->segment_type[2] != aGYO_TYPE_INVALID && gyoei->segment_type[3] != aGYO_TYPE_INVALID)) {
+        return;
+    }
+    dst = (u8*)&item;
+    dst[0] = body[1];
+    dst[1] = body[2];
+    dst = (u8*)&angle;
+    dst[0] = body[3];
+    dst[1] = body[4];
+    dst = (u8*)&pos;
+    for (i = 0; i < 12; i++) {
+        dst[i] = body[5 + i];
+    }
+    keep_water = play->submenu.water_pos;
+    dst = (u8*)&play->submenu.water_pos;
+    for (i = 0; i < 12; i++) {
+        dst[i] = body[17 + i];
+    }
+    Actor_info_make_actor(&play->actor_info, (GAME*)play, mAc_PROFILE_GYO_RELEASE, pos.x, pos.y, pos.z, 0, angle, 0,
+                          play->block_table.block_x, play->block_table.block_z, -1, EMPTY_NO, (s16)item, -1, -1);
+    play->submenu.water_pos = keep_water;
+}
+#endif
 
 static void aGYR_actor_dt(ACTOR* actorx, GAME* game) {
     GYO_RELEASE_ACTOR* gyo_release = (GYO_RELEASE_ACTOR*)actorx;

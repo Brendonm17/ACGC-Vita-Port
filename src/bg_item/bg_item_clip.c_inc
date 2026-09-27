@@ -74,6 +74,10 @@ static int bIT_actor_rand_pos_get(xyz_t* pos, const xyz_t* check_pos);
 static int bg_item_ten_coin_entry_ex(xyz_t* pos, s16 angle);
 static int bIT_fruit_set(mActor_name_t fg_item, int ut_x, int ut_z, s16 count, int type);
 static int bIT_actor_fade_entry(mActor_name_t fg_name, xyz_t* pos);
+#ifdef VITA_MP
+static void bIT_mp_replay(const u8* body, int len);
+static void bIT_mp_menu_move_common(void);
+#endif
 
 static void bIT_clip_ct(ACTOR* actorx) {
     // BG_ITEM_ACTOR* bg_item = (BG_ITEM_ACTOR*)actorx;
@@ -96,6 +100,10 @@ static void bIT_clip_ct(ACTOR* actorx) {
         bIT_CLIP->ten_coin_entry_ex_proc = &bg_item_ten_coin_entry_ex;
         bIT_CLIP->fruit_set_proc = &bIT_fruit_set;
         bIT_CLIP->fade_entry_proc = &bIT_actor_fade_entry;
+#ifdef VITA_MP
+        bIT_CLIP->mp_replay_proc = &bIT_mp_replay;
+        bIT_CLIP->mp_menu_move_proc = &bIT_mp_menu_move_common;
+#endif
         bIT_CLIP->bg_item_common_p = bIT_GET_COMMON(actorx);
         bIT_CLIP->bg_item_actorx = actorx;
     }

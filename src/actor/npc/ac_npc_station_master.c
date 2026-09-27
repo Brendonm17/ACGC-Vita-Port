@@ -10,6 +10,9 @@
 #include "m_train_control.h"
 #include "ac_intro_demo.h"
 #include "ac_ride_off_demo.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aSTM_THINK_GET_OFF_WAIT,
@@ -50,6 +53,9 @@ static void aSTM_schedule_proc(NPC_ACTOR*, GAME_PLAY*, int);
 static void aSTM_talk_request(ACTOR* actorx, GAME* game);
 static int aSTM_change_talk_proc(NPC_STATION_MASTER_ACTOR*, u8);
 static void aSTM_setup_think_proc(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play, u8 think_idx);
+#ifdef VITA_MP
+static void aSTM_mp_reset(void);
+#endif
 
 // clang-format off
 ACTOR_PROFILE Npc_Station_Master_Profile = {
@@ -89,6 +95,9 @@ static void aSTM_actor_ct(ACTOR* actorx, GAME* game) {
         actor->happening_sound = 0;
         actor->melody_save = 0;
         actor->npc_class.palActorIgnoreTimer = -1;
+#ifdef VITA_MP
+        aSTM_mp_reset(); // (a new Porter: nothing left over from the last one)
+#endif
     }
 }
 

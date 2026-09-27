@@ -10,6 +10,9 @@
 #include "libultra/libultra.h"
 #include "m_lib.h"
 #include "libc64/qrand.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 /* 'zero' time (uninitialized time value for mushroom saved time) */
 static lbRTC_time_c l_mmsr_zeto_time = { 0, 0, 0, 0, 0, 0, 0 };
@@ -299,6 +302,17 @@ static void mMsr_ClearMushrooms(int clear_num, int block_x, int block_z) {
             bzero(candidate[bx], UT_Z_NUM * sizeof(u16));
         }
     }
+#ifdef VITA_MP
+    // (nor where another player stands)
+    for (i = 0; i < FG_BLOCK_TOTAL_NUM; i++) {
+        if (candidate_num[i] != 0 && mp_others_in_block(i % FG_BLOCK_X_NUM + 1, i / FG_BLOCK_X_NUM + 1)) {
+            total_candidate_num -= candidate_num[i];
+            candidate_blocks--;
+            candidate_num[i] = 0;
+            bzero(candidate[i], UT_Z_NUM * sizeof(u16));
+        }
+    }
+#endif
 
     if (total_candidate_num > 0) {
         if (total_candidate_num < clear_num) {
@@ -588,7 +602,12 @@ static void mMsr_SetMushroomNum(int mushroom_num, int player_bx, int player_bz) 
     for (bz = 0; bz < FG_BLOCK_Z_NUM; bz++) {
         for (bx = 0; bx < FG_BLOCK_X_NUM; bx++) {
             /* ensure we do not spawn a mushroom in the acre the player is currently in */
+#ifdef VITA_MP
+            // (nor one another player stands in)
+            if (bx != player_bx - 1 && bz != player_bz - 1 && !mp_others_in_block(bx + 1, bz + 1)) {
+#else
             if (bx != player_bx - 1 && bz != player_bz - 1) {
+#endif
                 *candidate_p = mMsr_GetBlockSetAbleMushroomTreeNum((mActor_name_t*)fg_block->items);
                 if (*candidate_p != 0 && ((possible_col_bitfield >> bx) & 1) == 0) {
                     possible_cols++;
@@ -677,6 +696,12 @@ extern void mMsr_SetMushroom(xyz_t player_pos) {
     }
 
     mFI_Wpos2BlockNum(&player_bx, &player_bz, player_pos);
+#ifdef VITA_MP
+    // (the host's game grows and clears them, for everyone)
+    if (!mp_town_writer_allowed()) {
+        return;
+    }
+#endif
     if (mFI_CheckFieldData() == TRUE) {
         mActor_name_t field_id = mFI_GetFieldId();
 

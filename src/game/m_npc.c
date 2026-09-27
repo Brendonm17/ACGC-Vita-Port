@@ -15,6 +15,11 @@
 #include "libultra/libultra.h"
 #include "jsyswrap.h"
 #include "ac_npc.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+static int mNpc_mp_quiet; // the islander's room changing for a trip's own bookkeeping: none of the host's doing
+#endif
 
 static int mNpc_CheckIslandAnimalID(AnmPersonalID_c* anm_id);
 
@@ -5342,6 +5347,12 @@ extern void mNpc_SetIslandGetFtr(mActor_name_t ftr) {
 
     n = 0;
     set = FALSE;
+#ifdef VITA_MP
+    // (handed over now: the host's islander has it at once, not only once this trip is over)
+    if (ftr != EMPTY_NO && ITEM_IS_FTR(ftr) && Common_Get(now_private) != NULL) {
+        mp_island_ftr(TRUE, &Common_Get(now_private)->player_ID, ftr);
+    }
+#endif
 
     if (ftr != EMPTY_NO && ITEM_IS_FTR(ftr) && island_room != NULL) {
         if (mNpc_CheckFtrIsIslandBestFtr(ftr) == TRUE) {
@@ -5425,6 +5436,9 @@ extern void mNpc_SetIslandGetFtrtoRoom() {
         Private_c* priv = Common_Get(now_private);
         int i;
 
+#ifdef VITA_MP
+        mNpc_mp_quiet = TRUE; // (the host had each as it was handed over)
+#endif
         for (i = 0; i < mNpc_ISLAND_FTR_NUM; i++) {
             if (*item_list != EMPTY_NO && ITEM_IS_FTR(*item_list)) {
                 mNpc_SetIslandFtr(&priv->player_ID, *item_list);
@@ -5432,6 +5446,9 @@ extern void mNpc_SetIslandGetFtrtoRoom() {
 
             item_list++;
         }
+#ifdef VITA_MP
+        mNpc_mp_quiet = FALSE;
+#endif
 
         mNpc_RestoreIslandPresentFtr();
         mNpc_ClearIslandPresentFtrInfo();
@@ -5764,6 +5781,11 @@ extern int mNpc_SetIslandFtr(PersonalID_c* pid, mActor_name_t ftr) {
     int slot;
     int mem_idx;
 
+#ifdef VITA_MP
+    if (!mNpc_mp_quiet) {
+        mp_island_ftr(TRUE, pid, ftr); // (a visitor's: the host's islander takes it too)
+    }
+#endif
     memory = Save_Get(island).animal.memories;
     island_room = mNpc_GetIslandRoomP(Save_Get(island).animal.id.npc_id);
     n = 0;
@@ -5869,6 +5891,11 @@ extern int mNpc_SetIslandFtr(PersonalID_c* pid, mActor_name_t ftr) {
     int set;
     int direct;
 
+#ifdef VITA_MP
+    if (!mNpc_mp_quiet) {
+        mp_island_ftr(TRUE, pid, ftr); // (a visitor's: the host's islander takes it too)
+    }
+#endif
     memory = Save_Get(island).animal.memories;
     animal = &Save_Get(island).animal;
     island_room = mNpc_GetIslandRoomP(animal->id.npc_id);
@@ -5974,6 +6001,11 @@ extern int mNpc_EraseIslandFtr(mActor_name_t ftr) {
     int variant;
     int set;
 
+#ifdef VITA_MP
+    if (!mNpc_mp_quiet) {
+        mp_island_ftr(FALSE, NULL, ftr); // (a visitor's: the host's islander gives it up too)
+    }
+#endif
     animal = &Save_Get(island).animal;
     island_room = mNpc_GetIslandRoomP(animal->id.npc_id);
     island_ftr = Save_Get(island).animal.anmuni.island_ftr;
@@ -6237,7 +6269,13 @@ extern void mNpc_SetIslandPresentFtr() {
     }
 
     if (mNpc_CheckIslandPresentFtrIs() == TRUE) {
+#ifdef VITA_MP
+        mNpc_mp_quiet = TRUE; // (put by for the trip; back at its end unless given away)
+#endif
         mNpc_EraseIslandFtr(mNpc_GetIslandPresentFtr());
+#ifdef VITA_MP
+        mNpc_mp_quiet = FALSE;
+#endif
     }
 }
 
@@ -6250,7 +6288,13 @@ extern void mNpc_RestoreIslandPresentFtr() {
         pid = mNpc_GetIslandPresentFtrPersonalID();
 
         if (present != EMPTY_NO && pid != NULL && mPr_NullCheckPersonalID(pid) == FALSE) {
+#ifdef VITA_MP
+            mNpc_mp_quiet = TRUE;
+#endif
             mNpc_SetIslandFtr(pid, present);
+#ifdef VITA_MP
+            mNpc_mp_quiet = FALSE;
+#endif
         }
     }
 }

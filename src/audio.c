@@ -10,6 +10,12 @@
 #include "sys_math.h"
 #include "jaudio_NES/kappa.h"
 #include "jaudio_NES/staff.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+
+static u8 s_mp_dash; // this player's pace, as the audio last heard it
+static f32 s_mp_speed;
+#endif
 
 int S_ongenpos_refuse_fg;
 
@@ -55,12 +61,25 @@ extern void sAdo_BgmStop(u16 id) {
     Na_BgmStop(id);
 }
 extern void sAdo_SysTrgStart(u16 id) {
+#ifdef VITA_MP
+    pc_mp_npc_sys_sound(id);
+    // the town behind this game's menu is as quiet as a paused one (the menu's own sounds come before)
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     Na_SysTrgStart(id);
 }
 
 extern void sAdo_PlyWalkSe(u16 walk, const xyz_t* pos) {
     f32 fcalc;
     u16 scalc;
+#ifdef VITA_MP
+    pc_mp_fx_sound(MP_SND_WALK, (u16)((walk & ~0x0C00) | ((u16)(s_mp_dash & 3) << 10)), pos);
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
 
     Na_PlyWalkSe(walk, scalc, fcalc);
@@ -69,6 +88,12 @@ extern void sAdo_PlyWalkSe(u16 walk, const xyz_t* pos) {
 extern void sAdo_PlyWalkSeRoom(u8 walk, const xyz_t* pos) {
     f32 fcalc;
     u16 scalc;
+#ifdef VITA_MP
+    pc_mp_fx_sound(MP_SND_WALK_ROOM, (u16)(walk | ((u16)(s_mp_dash & 3) << 14)), pos);
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
 
     Na_PlyWalkSeRoom(walk, scalc, fcalc);
@@ -77,6 +102,11 @@ extern void sAdo_PlyWalkSeRoom(u8 walk, const xyz_t* pos) {
 extern void sAdo_NpcWalkSe(u16 se_no, const xyz_t* pos) {
     f32 fcalc;
     u16 scalc;
+#ifdef VITA_MP
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
 
     Na_NpcWalkSe(se_no, scalc, fcalc);
@@ -85,14 +115,44 @@ extern void sAdo_NpcWalkSe(u16 se_no, const xyz_t* pos) {
 extern void sAdo_NpcWalkSeRoom(u8 se_no, const xyz_t* pos) {
     f32 fcalc;
     u16 scalc;
+#ifdef VITA_MP
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
 
     Na_NpcWalkSeRoom(se_no, scalc, fcalc);
 }
 
 extern void sAdo_PlayerStatusLevel(u8 dash, f32 speed) {
+#ifdef VITA_MP
+    s_mp_dash = dash;
+    s_mp_speed = speed;
+#endif
     Na_PlayerStatusLevel(dash, speed);
 }
+
+#ifdef VITA_MP
+// another player's step sounds at that player's pace, not this one's
+void sAdo_mp_walk_as(unsigned char dash, unsigned short walk, const void* pos_v, int room) {
+    const xyz_t* pos = (const xyz_t*)pos_v;
+    f32 fcalc;
+    u16 scalc;
+
+    if (pc_mp_menu_running()) {
+        return;
+    }
+    sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
+    Na_PlayerStatusLevel(dash, s_mp_speed);
+    if (room) {
+        Na_PlyWalkSeRoom((u8)walk, scalc, fcalc);
+    } else {
+        Na_PlyWalkSe(walk, scalc, fcalc);
+    }
+    Na_PlayerStatusLevel(s_mp_dash, s_mp_speed);
+}
+#endif
 
 extern void sAdo_VoiceSe(u8 num, u8 num2, u8 num3, s16 character_idx, u8 scale, u8 mode) {
     Na_VoiceSe(num, num2, num3, character_idx, scale, mode);
@@ -115,6 +175,11 @@ extern u8 sAdo_MessageSpeedGet() {
 }
 
 extern void sAdo_SysLevStart(u8 id) {
+#ifdef VITA_MP
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     Na_SysLevStart(id);
 }
 
@@ -123,9 +188,19 @@ extern void sAdo_SysLevStop(u8 id) {
 }
 
 extern void sAdo_OngenPos(u32 p1, u8 p2, const xyz_t* pos) {
+#ifdef VITA_MP
+    pc_mp_npc_level_sound(p2);
+    pc_mp_cr_level_sound(p1, p2);
+    pc_mp_fx_level(p2, pos);
+#endif
     u16 scalc;
     f32 fcalc;
 
+#ifdef VITA_MP
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     if (S_ongenpos_refuse_fg == 0) {
         sAdo_Calc_MicPosition_forLevel(&fcalc, &scalc, pos);
         Na_OngenPos(p1, p2, scalc, fcalc);
@@ -136,6 +211,12 @@ extern void sAdo_OngenTrgStart(u16 id, const xyz_t* pos) {
     u16 scalc;
     f32 fcalc;
 
+#ifdef VITA_MP
+    pc_mp_fx_sound(MP_SND_ONESHOT, id, pos);
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
     Na_OngenTrgStart(id, scalc, fcalc);
 }
@@ -158,6 +239,11 @@ extern void sAdo_FloorTrgStart(u8 id, const xyz_t* pos) {
     u16 scalc;
     f32 fcalc;
 
+#ifdef VITA_MP
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
     Na_FloorTrgStart(id, scalc, fcalc);
 }
@@ -279,6 +365,11 @@ extern void sAdo_OngenTrgStartSpeed(f32 speed, u16 s1, const xyz_t* pos) {
     f32 fcalc;
     u16 scalc;
 
+#ifdef VITA_MP
+    if (pc_mp_menu_running()) {
+        return;
+    }
+#endif
     sAdo_Calc_MicPosition_forTrig(&fcalc, &scalc, pos);
 
     Na_OngenTrgStartSpeed(s1, scalc, fcalc, speed);

@@ -131,6 +131,9 @@ static void aNTT_roll_init(NPC_TOTAKEKE_ACTOR* kk, GAME_PLAY* play) {
     kk_save->roll_flag = TRUE;
     mBGMPsComp_make_ps_quiet(0x168);
     staffroll_light_init(play);
+#ifdef VITA_MP
+    aMKBC_mp_tell(0, 0, 0);
+#endif
     kk->roll2_count = 180;
     
     if (CLIP(weather_clip) != NULL) {
@@ -150,6 +153,9 @@ static void aNTT_roll1_init(NPC_TOTAKEKE_ACTOR* kk, GAME_PLAY* play) {
 
     mBGMPsComp_make_ps_demo(bgm_no, 0x168);
     mBGMPsComp_delete_ps_quiet();
+#ifdef VITA_MP
+    aMKBC_mp_tell(1, kk->song, 0);
+#endif
     kk->npc_class.condition_info.demo_flg = aNPC_COND_DEMO_SKIP_KUTIPAKU | aNPC_COND_DEMO_SKIP_HEAD_LOOKAT;
     Camera2_request_main_staff_roll(play, GET_PLAYER_ACTOR_ACTOR(play), (ACTOR*)kk, 5);
     play->draw_chk_proc = &aNTT_draw_chk_proc;
@@ -170,6 +176,9 @@ static void aNTT_roll_end_init(NPC_TOTAKEKE_ACTOR* kk, GAME_PLAY* play) {
 
     mBGMPsComp_delete_ps_demo(bgm_no, 0x168);
     play->draw_chk_proc = (DRAW_CHK_PROC)&none_proc1;
+#ifdef VITA_MP
+    aMKBC_mp_tell(3, kk->song, 0);
+#endif
     
     if (CLIP(weather_clip) != NULL) {
         CLIP(weather_clip)->change_weather_instance(CLIP(weather_clip)->actor, mEnv_SAVE_GET_WEATHER_TYPE(Save_Get(weather)), mEnv_SAVE_GET_WEATHER_INTENSITY(Save_Get(weather)));

@@ -379,8 +379,41 @@ typedef enum {
     PC_PAGE_GAMEPLAY,
     PC_PAGE_SAVE,
     PC_PAGE_CONTROLS,
+#ifdef VITA_MP
+    PC_PAGE_ONLINE,
+#endif
     PC_PAGE_COUNT
 } PCOptionsPage;
+
+#ifdef VITA_MP
+#include <stddef.h>
+
+// Online page: chat, then the rules visitors to this town go by; each an on/off setting
+static const struct {
+    const char* label;
+    unsigned short field; // offset of its int in PCSettings
+    const char* off_txt;
+    const char* on_txt;
+} s_online_rows[] = {
+    { "Ask before visitors join", offsetof(PCSettings, mp_ask_join),        "No",       "Yes" },
+    { "Chat in my town",          offsetof(PCSettings, mp_chat),            "Off",      "On" },
+    { "Chat keyboard",            offsetof(PCSettings, mp_chat_keyboard),   "GameCube", "Vita" },
+    { "Visitors act as residents", offsetof(PCSettings, mp_visitor_rights), "No",       "Yes" },
+    { "Visitors pick up items",   offsetof(PCSettings, mp_visitor_items),   "No",       "Yes" },
+    { "Visitors dig holes",       offsetof(PCSettings, mp_visitor_dig),     "No",       "Yes" },
+    { "Visitors cut trees",       offsetof(PCSettings, mp_visitor_axe),     "No",       "Yes" },
+    { "Visitors change the tune", offsetof(PCSettings, mp_visitor_tune),    "No",       "Yes" },
+    { "Visitors post notes",      offsetof(PCSettings, mp_visitor_board),   "No",       "Yes" },
+    { "Visitors use the cottage", offsetof(PCSettings, mp_visitor_cottage), "No",       "Yes" },
+    { "Visitors change designs",  offsetof(PCSettings, mp_visitor_designs), "No",       "Yes" },
+};
+#define N_ONLINE_ROWS ((int)(sizeof(s_online_rows) / sizeof(s_online_rows[0])))
+#define PC_ONLINE_VISIBLE 10
+
+static int* aAL_pc_online_value(PCSettings* s, int row) {
+    return (int*)((char*)s + s_online_rows[row].field);
+}
+#endif
 
 // Controls page rows. HEADER exists but isn't used in the current tables
 // (kept so navigation can still skip headers if they come back).
@@ -488,6 +521,9 @@ static int aAL_pc_page_item_count(int page) {
         aAL_pc_controls_rows(&count);
         return count;
     }
+#ifdef VITA_MP
+    if (page == PC_PAGE_ONLINE) return N_ONLINE_ROWS;
+#endif
     return 0;
 }
 
@@ -839,6 +875,14 @@ static void aAL_pc_game_start_wait(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
             }
           }
         }
+#ifdef VITA_MP
+        else if (page == PC_PAGE_ONLINE) {
+          if (s >= 0 && s < N_ONLINE_ROWS && (do_right || do_left || do_a)) {
+            int* v = aAL_pc_online_value(&g_pc_settings, s);
+            *v = !*v;
+          }
+        }
+#endif
       }
     }
 #else
@@ -1411,6 +1455,9 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
       static u8 lbl_gameplay[] = { 'G', 'a', 'm', 'e', 'p', 'l', 'a', 'y' };
       static u8 lbl_save[]     = { 'S', 'a', 'v', 'e' };
       static u8 lbl_controls[] = { 'C', 'o', 'n', 't', 'r', 'o', 'l', 's' };
+#ifdef VITA_MP
+      static u8 lbl_online[]   = { 'O', 'n', 'l', 'i', 'n', 'e' };
+#endif
       static u8 lcursor[] = { '<' };
       static u8 rcursor[] = { '>' };
 
@@ -1419,15 +1466,24 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
         { lbl_gameplay, sizeof(lbl_gameplay) },
         { lbl_save,     sizeof(lbl_save) },
         { lbl_controls, sizeof(lbl_controls) },
+#ifdef VITA_MP
+        { lbl_online,   sizeof(lbl_online) },
+#endif
       };
 
       f32 widths[PC_PAGE_COUNT];
       f32 gap = 24.0f;
-      f32 total_w = gap * (PC_PAGE_COUNT - 1);
+      f32 total_w = 0.0f;
       for (int i = 0; i < PC_PAGE_COUNT; i++) {
         widths[i] = (f32)mFont_GetStringWidth(tabs[i].lbl, tabs[i].len, TRUE);
         total_w += widths[i];
       }
+      // (tighter gaps when the tabs would crowd the chevrons off the screen)
+      if (total_w + gap * (PC_PAGE_COUNT - 1) > 296.0f) {
+        gap = (296.0f - total_w) / (f32)(PC_PAGE_COUNT - 1);
+        if (gap < 10.0f) gap = 10.0f;
+      }
+      total_w += gap * (PC_PAGE_COUNT - 1);
 
       f32 tx = (SCREEN_WIDTH_F - total_w) * 0.5f;
       for (int i = 0; i < PC_PAGE_COUNT; i++) {
@@ -1755,6 +1811,48 @@ static void aAL_pc_options_draw(ANIMAL_LOGO_ACTOR* actor, GAME* game) {
           210, 210, 210, 230, FALSE, TRUE, dd_scale, dd_scale, mFont_MODE_FONT);
       }
     }
+#ifdef VITA_MP
+    else if (page == PC_PAGE_ONLINE) {
+      // scrolls as the Controls page does, the selected row kept in the middle
+      static u8 dots[] = { '.', '.', '.' };
+      f32 dots_scale = 0.7f;
+      f32 dots_w = (f32)mFont_GetStringWidth(dots, sizeof(dots), TRUE) * dots_scale;
+      f32 row_h = 12.5f;
+      int visible = PC_ONLINE_VISIBLE;
+      int scroll = sel - visible / 2;
+
+      if (scroll > N_ONLINE_ROWS - visible) scroll = N_ONLINE_ROWS - visible;
+      if (scroll < 0) scroll = 0;
+      if (scroll > 0) {
+        mFont_SetLineStrings(game, dots, sizeof(dots), (SCREEN_WIDTH_F - dots_w) * 0.5f, y - 6.0f,
+          210, 210, 210, 230, FALSE, TRUE, dots_scale, dots_scale, mFont_MODE_FONT);
+      }
+      for (int row = scroll; row < scroll + visible && row < N_ONLINE_ROWS; row++) {
+        int on = *aAL_pc_online_value(&g_pc_settings, row);
+        int dirty = on != *aAL_pc_online_value(B, row);
+        int is_sel = (sel == row) && list_active;
+        int bright = is_sel ? 255 : 180;
+        int alpha  = is_sel ? 255 : 160;
+
+        if (dirty) {
+          static u8 mark[] = { '*' };
+          mFont_SetLineStrings(game, mark, 1, x - 8.0f, y,
+            255, 220, 80, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        }
+        mFont_SetLineStrings(game, (u8*)s_online_rows[row].label, (int)strlen(s_online_rows[row].label), x, y,
+          bright, bright, bright, alpha, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        len = sprintf(buf, "< %s >", on ? s_online_rows[row].on_txt : s_online_rows[row].off_txt);
+        DRAW_VALUE_RIGHT(buf, len, bright, bright, bright, alpha, y);
+        if (is_sel) mFont_SetLineStrings(game, str_arrow, 1, x - 18.0f, y,
+          255, 255, 255, 255, FALSE, TRUE, 1.0f, 1.0f, mFont_MODE_FONT);
+        item++; y += row_h;
+      }
+      if (scroll + visible < N_ONLINE_ROWS) {
+        mFont_SetLineStrings(game, dots, sizeof(dots), (SCREEN_WIDTH_F - dots_w) * 0.5f, y - 4.0f,
+          210, 210, 210, 230, FALSE, TRUE, dots_scale, dots_scale, mFont_MODE_FONT);
+      }
+    }
+#endif
 
     // footer pinned to the bottom so different-length pages still line up.
     // hidden behind the delete-town modal.

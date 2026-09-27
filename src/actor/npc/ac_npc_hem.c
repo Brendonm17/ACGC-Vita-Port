@@ -6,6 +6,10 @@
 #include "m_msg.h"
 #include "m_soncho.h"
 #include "ac_shrine.h"
+#ifdef VITA_MP
+#include "m_play.h"
+#include "pc_mp.h"
+#endif
 
 enum {
     aNHM_ACT_APPEAR_WAIT,
@@ -34,6 +38,11 @@ typedef struct npc_hem_actor_s {
     u8 disappear_flag;
     u8 trans_flag;
     s16 talk_timer;
+#ifdef VITA_MP
+    u8 mp_remote; // risen for another player's well visit: shown only while that game shows it
+    u8 mp_idle;
+    u8 mp_seen; // followed its owner's fairy at least once
+#endif
 } NPC_HEM_ACTOR;
 
 static void aNHM_actor_ct(ACTOR* actorx, GAME* game);

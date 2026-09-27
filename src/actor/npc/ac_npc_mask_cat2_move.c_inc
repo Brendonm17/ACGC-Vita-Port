@@ -419,6 +419,14 @@ static void aNM2_announce_end_wait(ACTOR* actorx, GAME* game) {
     GAME_PLAY* play = (GAME_PLAY*)game;
     int action_idx;
     if (mDemo_Check(mDemo_TYPE_SPEAK, actorx) == FALSE) {
+#ifdef VITA_MP
+        if (aNM2_mp_quiet) {
+            // straight to the arrival; the conductor's walk-through keeps the delay it has after the cat sits
+            mask_cat2_actor->unkRotation = 0xe10;
+            aNM2_setupAction(actorx, game, aNM2_MOVE_TALK_END_WAIT);
+            return;
+        }
+#endif
         aNM2_setupAction(actorx, game,
                          (mask_cat2_actor->action == aNM2_MOVE_ANNOUNCE_END_WAIT) ? aNM2_MOVE_WALK_DECK
                                                                                   : aNM2_MOVE_KEITAI_OFF_START_WAIT);

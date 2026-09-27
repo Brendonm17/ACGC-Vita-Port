@@ -11,6 +11,14 @@
 #include "m_needlework.h"
 #include "m_needlework_ovl.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "pc_mp_text_data.h"
+#endif
+
+#ifdef VITA_MP
+static int aFLAG_mp_remote; // another player is changing the flag: nothing here waits on a window or a menu
+#endif
 
 enum {
     aFLAG_ACTION_WAIT,
@@ -59,6 +67,9 @@ extern u8 hakushi_tex[];
 extern u16 hakushi_pal[];
 
 static void aFLAG_setup_action(STRUCTURE_ACTOR* flag, int action);
+#ifdef VITA_MP
+static void aFLAG_mp_hold(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play);
+#endif
 
 static void aFLAG_actor_ct(ACTOR* actor, GAME* game) {
     static cKF_Skeleton_R_c* skl[] = { &cKF_bs_r_obj_s_frag, &cKF_bs_r_obj_w_frag };
@@ -87,7 +98,12 @@ static void aFLAG_actor_dt(ACTOR* actor, GAME* game) {
 static void aFLAG_set_talk_info(ACTOR* actor) {
     rgba_t window_color;
 
+#ifdef VITA_MP
+    // (the host keeps its island's flag: the visitor only thinks about it)
+    mDemo_Set_msg_num(mp_visitor_may(MP_RULE_DESIGNS) ? MSG_12390 : MP_MSG_V_FLAG_KEEP);
+#else
     mDemo_Set_msg_num(MSG_12390);
+#endif
     mDemo_Set_talk_display_name(FALSE);
     mDemo_Set_ListenAble();
 
@@ -117,6 +133,9 @@ static void aFLAG_talk(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play) {
     s_xyz target_rot;
 
     msg_p = mMsg_Get_base_window_p();
+#ifdef VITA_MP
+    aFLAG_mp_remote = FALSE;
+#endif
     if (mDemo_Check(mDemo_TYPE_TALK, (ACTOR*)flag) != FALSE) {
         player_actor = get_player_actor_withoutCheck(game_play);
 
@@ -183,6 +202,9 @@ static void aFLAG_menu_end_wait(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play) {
             sAdo_OngenTrgStart(0x461, &flag->actor_class.world.position);
 
             mISL_SetNowPlayerAction(4);
+#ifdef VITA_MP
+            mp_world_design(MP_DESIGN_FLAG);
+#endif
         }
 
         sAdo_OngenTrgStart(0x163, &flag->actor_class.world.position);
@@ -263,6 +285,11 @@ static void aFLAG_up(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play) {
     flag->arg1 += 1;
     if (flag->arg1 >= ending_frame) {
         flag->arg1 = 0;
+#ifdef VITA_MP
+        if (aFLAG_mp_remote) {
+            aFLAG_mp_remote = FALSE;
+        } else
+#endif
         mMsg_request_main_forceoff();
         aFLAG_setup_action(flag, aFLAG_ACTION_WAIT);
     }
@@ -276,7 +303,11 @@ static void aFLAG_down(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play) {
     f32 ending_frame;
     f32 midpoint_frame;
 
+#ifdef VITA_MP
+    if (aFLAG_mp_remote || mMsg_Check_main_wait(mMsg_Get_base_window_p()) != FALSE) {
+#else
     if (mMsg_Check_main_wait(mMsg_Get_base_window_p()) != FALSE) {
+#endif
         // Flag moves down in a smooth motion from top to bottom
         starting_x = 72.5;
         ending_x = 132.5;
@@ -317,6 +348,13 @@ static void aFLAG_down(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play) {
         flag->arg1 += 1;
         if (flag->arg1 >= ending_frame) {
             flag->arg1 = 0;
+#ifdef VITA_MP
+            // down on another screen's say-so: it stays down until that player picks a pattern
+            if (aFLAG_mp_remote) {
+                flag->action_proc = &aFLAG_mp_hold;
+                return;
+            }
+#endif
             aFLAG_setup_action(flag, aFLAG_ACTION_OPEN_WAIT);
         }
     }
@@ -328,7 +366,37 @@ static void aFLAG_setup_action(STRUCTURE_ACTOR* flag, int action) {
     };
 
     flag->action_proc = process[action];
+#ifdef VITA_MP
+    if ((action == aFLAG_ACTION_DOWN || action == aFLAG_ACTION_UP) && !aFLAG_mp_remote) {
+        u8 body[2];
+
+        body[0] = MP_VFX_FLAG;
+        body[1] = (u8)action;
+        mp_vfx_send(body, sizeof(body));
+    }
+#endif
 }
+
+#ifdef VITA_MP
+static void aFLAG_mp_hold(STRUCTURE_ACTOR* flag, GAME_PLAY* game_play) {
+}
+
+void aFLAG_mp_replay(struct game_play_s* play_s, const u8* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_s;
+    STRUCTURE_ACTOR* flag = (STRUCTURE_ACTOR*)Actor_info_name_search(&play->actor_info, mAc_PROFILE_FLAG, ACTOR_PART_ITEM);
+
+    if (flag == NULL || len < 2 || (body[1] != aFLAG_ACTION_DOWN && body[1] != aFLAG_ACTION_UP)) {
+        return;
+    }
+    // only a flag nobody here is talking to follows another screen
+    if (flag->action_proc != &aFLAG_wait && flag->action_proc != &aFLAG_mp_hold) {
+        return;
+    }
+    aFLAG_mp_remote = TRUE;
+    flag->arg1 = 0;
+    aFLAG_setup_action(flag, body[1]);
+}
+#endif
 
 static void aFLAG_actor_move(ACTOR* actor, GAME* game) {
     STRUCTURE_ACTOR* flag;

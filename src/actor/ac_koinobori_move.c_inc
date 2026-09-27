@@ -15,6 +15,9 @@ static void aKOI_actor_move(ACTOR* actor, GAME* game) {
     KOINOBORI_ACTOR* koinobori = (KOINOBORI_ACTOR*)actor;
 
     GET_PLAYER_ACTOR(game_play);
+#ifdef VITA_MP
+    pc_mp_kf_phase(&koinobori->structure_class.keyframe.frame_control); // (flapping alike on every screen)
+#endif
     cKF_SkeletonInfo_R_play(&koinobori->structure_class.keyframe);
     koinobori->structure_class.action_proc(&koinobori->structure_class, game_play);
 

@@ -250,6 +250,11 @@ static int Player_actor_CatchSomethingCheck_common(ACTOR* actor, f32 frame) {
             if (Player_actor_CheckCapture_forNet(actor, &label, &type)) {
                 player->item_net_catch_label = label;
                 player->item_net_catch_type = type;
+#ifdef VITA_MP
+                if (label != 0) {
+                    pc_mp_cr_netted((void*)label);
+                }
+#endif
 
                 if (type == 0 && label != 0) {
                     player->item_net_catch_insect_idx = ((aINS_INSECT_ACTOR*)label)->type;

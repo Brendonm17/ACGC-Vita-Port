@@ -359,6 +359,16 @@ static int aMHS_light_ctrl(STRUCTURE_ACTOR* my_house) {
 }
 
 static void aMHS_wait(STRUCTURE_ACTOR* my_house, GAME_PLAY* play) {
+#ifdef VITA_MP
+    // another player through this door: it opens and shuts as when someone comes home
+    if (my_house->request_type == 0 && mp_door_take(my_house, NULL)) {
+        my_house->request_type = 5;
+        my_house->arg2_f = mSc_DIRECT_EAST;
+        aMHS_setup_animation(my_house, 0.5f);
+        aMHS_setup_action(my_house, aMHS_ACTION_OPEN_DOOR);
+        return;
+    }
+#endif
     switch (aMHS_check_player(my_house, play)) {
         case 1:
             aMHS_setup_action(my_house, aMHS_ACTION_OPEN_DOOR_WAIT);

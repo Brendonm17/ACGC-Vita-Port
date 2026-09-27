@@ -20,6 +20,11 @@ static void Player_actor_Refuse_pickup_demo_ct(ACTOR* actor) {
     if (player->refuse_pickup_knife_fork_flag != FALSE) {
         msg = 0x3B59;
     }
+#ifdef VITA_MP
+    if (player->refuse_pickup_knife_fork_flag == Player_actor_MP_REFUSE_HOST) {
+        msg = MP_MSG_V_ITEM_KEEP;
+    }
+#endif
 
     mDemo_Set_msg_num(msg);
     mDemo_Set_talk_display_name(0);

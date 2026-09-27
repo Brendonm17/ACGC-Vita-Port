@@ -352,47 +352,55 @@ void __OSCacheInit(void) {}
 
 u32 OSGetConsoleType(void) { return 0x10000004; /* OS_CONSOLE_DEVHW1 */ }
 
-// vita's stderr goes to the psp2link debug uart which isn't readable
-// anywhere. freopen on stderr+ux0 doesn't stick through newlib, so OSReport
-// output was silently dropping. route through our own FILE* opened once on
-// first use. fflush after each line so even a hard kill keeps the latest
-// output on disk.
+// error.log is the game's one log on the Vita: errors only (OSReport joins it in VITA_DEBUG builds).
+// any thread; flushed per line so a hard kill keeps it
 #ifdef TARGET_VITA
 static FILE* g_pc_log = NULL;
-static void pc_log_open(void) {
+static volatile int g_pc_log_lock = 0;
+
+static void pc_log_vwrite(const char* fmt, va_list args) {
+    while (__atomic_test_and_set(&g_pc_log_lock, __ATOMIC_ACQUIRE)) {
+        sceKernelDelayThread(100);
+    }
     if (g_pc_log == NULL) {
         g_pc_log = fopen("ux0:data/AnimalCrossing/error.log", "a");
-        if (g_pc_log) {
-            fprintf(g_pc_log, "\n--- launch %ld ---\n", (long)time(NULL));
-            fflush(g_pc_log);
-        }
     }
+    if (g_pc_log != NULL) {
+        vfprintf(g_pc_log, fmt, args);
+        fflush(g_pc_log);
+    }
+    __atomic_clear(&g_pc_log_lock, __ATOMIC_RELEASE);
 }
-#define PC_LOG_STREAM (g_pc_log ? g_pc_log : stderr)
 #else
-#define PC_LOG_STREAM stderr
+static void pc_log_vwrite(const char* fmt, va_list args) {
+    vfprintf(stderr, fmt, args);
+    fflush(stderr);
+}
 #endif
 
-void OSPanic(const char* file, int line, const char* msg, ...) {
+void pc_log_error(const char* fmt, ...) {
     va_list args;
-#ifdef TARGET_VITA
-    pc_log_open();
-#endif
-    fprintf(PC_LOG_STREAM, "OSPanic at %s:%d: ", file, line);
-    va_start(args, msg);
-    vfprintf(PC_LOG_STREAM, msg, args);
+    va_start(args, fmt);
+    pc_log_vwrite(fmt, args);
     va_end(args);
-    fprintf(PC_LOG_STREAM, "\n");
-    fflush(PC_LOG_STREAM);
+}
+
+void OSPanic(const char* file, int line, const char* msg, ...) {
+    char text[256];
+    va_list args;
+    va_start(args, msg);
+    vsnprintf(text, sizeof(text), msg, args);
+    va_end(args);
+    pc_log_error("OSPanic at %s:%d: %s\n", file, line, text);
 }
 
 void OSReport(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
 #ifdef TARGET_VITA
-    pc_log_open();
-    vfprintf(PC_LOG_STREAM, fmt, args);
-    fflush(PC_LOG_STREAM);
+#ifdef VITA_DEBUG
+    pc_log_vwrite(fmt, args);
+#endif
 #else
     if (g_pc_verbose) {
         vprintf(fmt, args);
@@ -404,9 +412,9 @@ void OSReport(const char* fmt, ...) {
 
 void OSVReport(const char* fmt, va_list list) {
 #ifdef TARGET_VITA
-    pc_log_open();
-    vfprintf(PC_LOG_STREAM, fmt, list);
-    fflush(PC_LOG_STREAM);
+#ifdef VITA_DEBUG
+    pc_log_vwrite(fmt, list);
+#endif
 #else
     if (!g_pc_verbose) return;
     vprintf(fmt, list);

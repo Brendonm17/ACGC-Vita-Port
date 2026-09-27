@@ -579,6 +579,10 @@ static void aUKI_cast(ACTOR* actorx, GAME* game) {
     aUKI_parabola_move(actorx, 1);
     if (actorx->bg_collision_check.result.is_in_water) {
         uki->hit_water_flag = TRUE;
+#ifdef VITA_MP
+        // landing on a fish another game runs sends it off there too
+        pc_mp_cr_scare_near(&actorx->world.position, 22.0f);
+#endif
         aUKI_effect_sibuki(actorx, game, 3);
         mVibctl_simple_entry(50, mVibctl_VIB_PROG_FFF, 0, 1, 15, 0.0f);
         uki->status = aUKI_STATUS_FLOAT;
@@ -592,6 +596,9 @@ static void aUKI_wait(ACTOR* actorx, GAME* game) {
 
     uki->hit_water_flag = FALSE;
     uki->uki_pos = actorx->world.position;
+#ifdef VITA_MP
+    pc_mp_cr_claim_near(MP_CR_FISH, &actorx->world.position, 100.0f);
+#endif
     chase_f(&actorx->position_speed.y, actorx->max_velocity_y, actorx->gravity);
 
     if (aUKI_force_command(actorx, game) == FALSE) {
@@ -628,6 +635,9 @@ static void aUKI_hit(ACTOR* actorx, GAME* game) {
     UKI_ACTOR* uki = (UKI_ACTOR*)actorx;
     int timer;
 
+#ifdef VITA_MP
+    pc_mp_cr_claim_near(MP_CR_FISH, &actorx->world.position, 100.0f);
+#endif
     if (uki->frame_timer == 0) {
         timer = 0;
     } else {
@@ -651,6 +661,9 @@ static void aUKI_hit(ACTOR* actorx, GAME* game) {
 static void aUKI_touch(ACTOR* actorx, GAME* game) {
     UKI_ACTOR* uki = (UKI_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    pc_mp_cr_claim_near(MP_CR_FISH, &actorx->world.position, 100.0f);
+#endif
     chase_f(&actorx->position_speed.y, actorx->max_velocity_y, actorx->gravity);
     if (aUKI_force_command(actorx, game) == FALSE) {
         if (uki->gyo_command == 2) {
@@ -704,6 +717,9 @@ static void aUKI_bite(ACTOR* actorx, GAME* game) {
     };
     // clang-format on
 
+#ifdef VITA_MP
+    pc_mp_cr_claim_near(MP_CR_FISH, &actorx->world.position, 100.0f);
+#endif
     chase_f(&actorx->position_speed.y, actorx->max_velocity_y, actorx->gravity);
     if (aUKI_force_command(actorx, game) == FALSE) {
         if (uki->gyo_command == 2) {
@@ -953,6 +969,10 @@ typedef void (*aUKI_MOVE_PROC)(ACTOR*, GAME*);
 static void aUKI_actor_move(ACTOR* actorx, GAME* game) {
     UKI_ACTOR* uki = (UKI_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    // the float is only ever the local player's
+    pc_mp_fx_capture(uki->command != 0);
+#endif
     if (uki->command != 0) {
         // clang-format off
         static aUKI_MOVE_PROC Uki_move_proc[] = {
@@ -992,4 +1012,7 @@ static void aUKI_actor_move(ACTOR* actorx, GAME* game) {
     } else {
         actorx->dw_proc = NULL;
     }
+#ifdef VITA_MP
+    pc_mp_fx_capture(FALSE);
+#endif
 }

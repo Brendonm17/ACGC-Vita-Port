@@ -112,6 +112,13 @@ static mActor_name_t Player_actor_Get_TreeNoToStumpNo(ACTOR* actor, GAME* game, 
 
             int check = Common_Get(clip).bg_item_clip->tree_cutcount_check_proc(game, ut_x, ut_z);
 
+#ifdef VITA_MP
+            // the host keeps its trees standing: a visitor's axe only shakes them
+            if (!mp_visitor_may(MP_RULE_AXE)) {
+                check = 1;
+            }
+#endif
+
             if (!IS_ITEM_BEE_TREE(item)) {
                 Common_Get(clip).bg_item_clip->item_tree_fruit_drop_proc(item, ut_x, ut_z, &pos);
             } else if (mPlib_able_birth_bee() && flag == FALSE) {

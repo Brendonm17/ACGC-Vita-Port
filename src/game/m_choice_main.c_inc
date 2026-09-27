@@ -509,6 +509,31 @@ static int mChoice_Put_String(u8* data, int idx, int max_size, ACTOR* actor) {
 }
 
 static void mChoice_Change_ControlCode(u8* data, int max_size, ACTOR* actor) {
+#ifdef BUGFIXES
+    // (filled in a message-sized copy, so what's put in never runs past the choice's own bytes; a code with nothing
+    // to put in is stepped over)
+    u8 buf[mMsg_MSG_BUF_SIZE];
+    int len = max_size;
+    int idx = 0;
+
+    if (max_size <= 0 || max_size > mMsg_MSG_BUF_MAX) {
+        return;
+    }
+    memcpy(buf, data, max_size);
+    while (idx < len) {
+        if (buf[idx] == CHAR_CONTROL_CODE) {
+            int was = len;
+
+            len = mChoice_Put_String(buf, idx, len, actor);
+            if (len == was && buf[idx] == CHAR_CONTROL_CODE) {
+                idx += mFont_CodeSize_idx_get(buf, idx);
+            }
+        } else {
+            idx++;
+        }
+    }
+    memcpy(data, buf, max_size);
+#else
     u8* src_p = data;
     int new_max_size = max_size;
     int idx = 0;
@@ -524,9 +549,18 @@ static void mChoice_Change_ControlCode(u8* data, int max_size, ACTOR* actor) {
             src_p++;
         }
     }
+#endif
 }
 
 extern void mChoice_Load_ChoseStringFromRom(mChoice_c* choice, u8* str, int str_no, ACTOR* actor) {
+#ifdef VITA_MP
+    // multiplayer labels sit above the ROM table
+    if (pc_mp_text_is_choice(str_no)) {
+        pc_mp_text_load_choice(str, str_no);
+        mChoice_Change_ControlCode(str, mChoice_CHOICE_STRING_LEN, actor);
+        return;
+    }
+#endif
     if (str_no >= 0 && str_no < mChoice_SELECT_STR_NUM) {
         u32 addr;
         u32 size;

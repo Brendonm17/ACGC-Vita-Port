@@ -69,6 +69,28 @@ static void fish_save_area_ct(ACTOR* actorx) {
     aTRC_clip_random_topsize();
 }
 
+#ifdef VITA_MP
+// host: a visitor's game has Chip out where this one never built him: his record goes in the town's save as his
+// constructor sets it up, at his spot on that screen, so every screen keeps the one record
+void aEANG_mp_record(int x, int z) {
+    aEANG_event_data_c* save_p = get_fish_save_area();
+
+    if (save_p != NULL) {
+        return;
+    }
+    if (Common_Get(time.rtc_time).month == lbRTC_JUNE) {
+        save_p = (aEANG_event_data_c*)mEv_reserve_save_area(mEv_EVENT_FISHING_TOURNEY_1, 0);
+    } else {
+        save_p = (aEANG_event_data_c*)mEv_reserve_save_area(mEv_EVENT_FISHING_TOURNEY_2, 0);
+    }
+    if (save_p != NULL) {
+        save_p->size = 0;
+        save_p->pos[0] = x;
+        save_p->pos[1] = z;
+    }
+}
+#endif
+
 static void fish_save_area_dt(ACTOR* actorx) {
     lbRTC_time_c rtc_time = Common_Get(time.rtc_time);
     aEANG_event_data_c* save_p = get_fish_save_area();
@@ -90,6 +112,12 @@ static int entry_check(void) {
     u8 b = 1 << player_no;
 
     if (player_no == mPr_FOREIGNER) {
+#ifdef VITA_MP
+        // a visitor's entry holds for the day in its passport, a return trip included
+        if (mp_mark_get(MP_MARK_TOURNEY) & MP_MARK_TOURNEY_ENTERED) {
+            return TRUE;
+        }
+#endif
         return common_p->foreigner;
     } else {
         return b & save_p->talk_flag;
@@ -104,6 +132,9 @@ static void entry_on(void) {
 
     if (player_no == mPr_FOREIGNER) {
         common_p->foreigner = TRUE;
+#ifdef VITA_MP
+        mp_mark_set(MP_MARK_TOURNEY, MP_MARK_TOURNEY_ENTERED);
+#endif
     } else {
         save_p->talk_flag |= b;
     }

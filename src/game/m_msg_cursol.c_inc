@@ -1097,6 +1097,9 @@ static int mMsg_Main_Cursol_Proc_ControlCursol(mMsg_Window_c* msg_p, int* idx_p)
     int type = data[(*idx_p) + 1];
 
     if (type < 0 || type >= mFont_CONT_CODE_NUM || proc[type] == NULL) {
+#ifdef BUGFIXES
+      (*idx_p) += mMsg_Set_SizeCode(msg_p, *idx_p);
+#endif
       return mMsg_RESULT_VOID;
     }
     else {
@@ -1160,7 +1163,16 @@ static int mMsg_Main_Cursol_ControlCursol(mMsg_Window_c* msg_p) {
 
   if ((*cursor_timer <= 0.0f) && choice_hidden) {
     while (TRUE) {
-      u8 code = msg_p->msg_data->text_buf.data[idx];
+      u8 code;
+
+#ifdef BUGFIXES
+      // (a message is never read past its end)
+      if (idx >= msg_p->msg_data->msg_len || idx >= mMsg_MSG_BUF_MAX) {
+        res = FALSE;
+        break;
+      }
+#endif
+      code = msg_p->msg_data->text_buf.data[idx];
 
       if (mMsg_Check_CancelOrder(msg_p)) {
         msg_p->cancel_flag = TRUE;

@@ -4,6 +4,9 @@
 #include "pc_keybindings.h"
 #include "pc_controls.h"
 #include <dolphin/pad.h>
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // latest raw vita button bitmap, exposed for the nes emulator
 uint8_t g_pc_vita_pressed[PCV_COUNT] = {0};
@@ -155,6 +158,15 @@ u32 PADRead(PADStatus* status) {
         status[0].triggerRight = rt;
     }
 
+#ifdef VITA_MP
+    // the system's ad hoc dialog, or the chat keyboard, owns the buttons while it's up
+    if (vita_mp_dialog_active() || vita_ime_active()) {
+        buttons = 0;
+        stickX = stickY = cstickX = cstickY = 0;
+        status[0].triggerLeft = status[0].triggerRight = 0;
+        memset(g_pc_vita_pressed, 0, sizeof(g_pc_vita_pressed));
+    }
+#endif
     status[0].button = buttons;
     status[0].stickX = stickX;
     status[0].stickY = stickY;

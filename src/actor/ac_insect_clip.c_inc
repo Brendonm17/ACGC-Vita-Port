@@ -9,6 +9,15 @@ static ACTOR* aINS_make_actor(GAME* game, int type, xyz_t* pos) {
     return aINS_CLIP->make_insect_proc(&init_data, aINS_MAKE_EXIST);
 }
 
+#ifdef VITA_MP
+static ACTOR* aINS_mp_initing; // the bug whose own setup runs right now
+static ACTOR* aINS_mp_fresh;   // the bug whose own setup ran this frame
+static int aINS_mp_lives_on;   // the copy going now is only this game's; the bug is still out elsewhere
+static u8 aINS_mp_followed[aINS_ACTOR_NUM]; // followed another game last frame
+static u8 aINS_mp_netted[aINS_ACTOR_NUM];   // in this player's net last frame
+static u8 aINS_mp_action[aINS_ACTOR_NUM];   // what that game had it doing
+#endif
+
 static int aINS_get_free_idx_set_block_table(mEv_gst_hitodama_block_c* block_table) {
     int res = -1;
 
@@ -26,7 +35,7 @@ static int aINS_get_free_idx_set_block_table(mEv_gst_hitodama_block_c* block_tab
     return res;
 }
 
-static void aINS_regist_set_block_table(ACTOR* actorx) {
+static void aINS_regist_set_block_table_bk(u8 now_bx, u8 now_bz) {
     mEv_gst_common_c* gst_common = (mEv_gst_common_c*)mEv_get_common_area(mEv_EVENT_GHOST, 55);
     int free_idx = aINS_get_free_idx_set_block_table(&gst_common->hitodama_block_data);
 
@@ -40,7 +49,7 @@ static void aINS_regist_set_block_table(ACTOR* actorx) {
             bx = (int)(1.0f + RANDOM_F(FG_BLOCK_X_NUM));
             bz = (int)(1.0f + RANDOM_F(FG_BLOCK_Z_NUM));
 
-            if (actorx->block_x != (u8)bx || actorx->block_z != (u8)bz) {
+            if (now_bx != (u8)bx || now_bz != (u8)bz) {
                 for (i = 0; i < mEv_GHOST_HITODAMA_NUM; i++) {
                     if (gst_common->hitodama_block_data.block_x[i] == (u8)bx &&
                         gst_common->hitodama_block_data.block_z[i] == (u8)bz) {
@@ -60,14 +69,58 @@ static void aINS_regist_set_block_table(ACTOR* actorx) {
     }
 }
 
+static void aINS_regist_set_block_table(ACTOR* actorx) {
+    aINS_regist_set_block_table_bk(actorx->block_x, actorx->block_z);
+}
+
+#ifdef VITA_MP
+// host: a spirit rolled for another player's step is out in that acre now
+void aINS_mp_spirit_taken(int bx, int bz) {
+    mEv_gst_common_c* gst_common = (mEv_gst_common_c*)mEv_get_common_area(mEv_EVENT_GHOST, 55);
+    int i;
+
+    for (i = 0; gst_common != NULL && i < mEv_GHOST_HITODAMA_NUM; i++) {
+        if (gst_common->hitodama_block_data.block_x[i] == (u8)bx && gst_common->hitodama_block_data.block_z[i] == (u8)bz) {
+            gst_common->hitodama_block_data.block_x[i] = 0xFF;
+            gst_common->hitodama_block_data.block_z[i] = 0xFF;
+            break;
+        }
+    }
+}
+
+// host: one nobody caught went out of everyone's sight, and turns up in another acre
+void aINS_mp_spirit_away(int bx, int bz) {
+    if (mEv_get_common_area(mEv_EVENT_GHOST, 55) != NULL) {
+        aINS_regist_set_block_table_bk((u8)bx, (u8)bz);
+    }
+}
+#endif
+
 static void aINS_destruct(ACTOR* actorx, GAME* game) {
     aINS_INSECT_ACTOR* insect = (aINS_INSECT_ACTOR*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
+#ifdef VITA_MP
+    int elsewhere;
+
+    // one its own setup threw away (a firefly in the rain): a copy is tried again later
+    if (actorx == aINS_mp_initing) {
+        aINS_mp_lives_on = pc_mp_cr_refused(actorx);
+    }
+    // still out for another player, caught on another screen, or not this game's record to keep
+    elsewhere = aINS_mp_lives_on || pc_mp_cr_listed(actorx) || pc_mp_cr_caught_elsewhere() ||
+                !mp_town_writer_allowed();
+    aINS_mp_lives_on = FALSE;
+    pc_mp_cr_unbind(actorx);
+#endif
     switch (insect->type) {
         case aINS_INSECT_TYPE_SPIRIT:
             /* If we didn't catch the spirit, update it's location */
-            if ((ACTOR*)mPlib_Get_item_net_catch_label() != actorx) {
+            if ((ACTOR*)mPlib_Get_item_net_catch_label() != actorx
+#ifdef VITA_MP
+                && !elsewhere
+#endif
+            ) {
                 aINS_regist_set_block_table(actorx);
             }
         /* fallthrough spirit -> firefly */
@@ -218,6 +271,8 @@ static void aINS_setupActor(ACTOR* actorx, aINS_Init_c* init) {
     aINS_INSECT_ACTOR* insect = (aINS_INSECT_ACTOR*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)init->game;
     f32 shadow_size;
+    int bx = play->block_table.block_x;
+    int bz = play->block_table.block_z;
 
     insect->exist_flag = TRUE;
     insect->type = init->insect_type;
@@ -229,9 +284,12 @@ static void aINS_setupActor(ACTOR* actorx, aINS_Init_c* init) {
     insect->ut_x = -1;
     insect->ut_z = -1;
 
+#ifdef VITA_MP
+    // a copy of another game's bug belongs to that bug's acre
+    mp_cr_binding_block(&bx, &bz);
+#endif
     Actor_init_actor_class(actorx, &Dummy_Profile, NULL, play, -1, init->position.x, init->position.y, init->position.z,
-                           0, 0, 0, play->block_table.block_x, play->block_table.block_z, -1, EMPTY_NO,
-                           init->extra_data);
+                           0, 0, 0, bx, bz, -1, EMPTY_NO, init->extra_data);
     actorx->world = actorx->home;
     actorx->shape_info.rotation = actorx->world.angle;
     Actor_world_to_eye(actorx, 0.0f);
@@ -289,14 +347,76 @@ static ACTOR* aINS_make_insect(aINS_Init_c* init, int make_type) {
         aINS_INSECT_ACTOR* insect = &aINS_ctrlActor->insect_actor[free_idx];
 
         bzero(insect, sizeof(aINS_INSECT_ACTOR));
+#ifdef VITA_MP
+        aINS_mp_followed[free_idx] = FALSE;
+        aINS_mp_netted[free_idx] = FALSE;
+#endif
         aINS_setupActor((ACTOR*)insect, init);
+#ifdef VITA_MP
+        pc_mp_cr_made(MP_CR_INSECT, init->insect_type, &init->position, init->extra_data, insect);
+#endif
         return (ACTOR*)insect;
     }
 
     return NULL;
 }
 
+#ifdef VITA_MP
+// an ant actor still in the scene (a netted one that couldn't turn into a bug fades and goes)
+static int aINS_mp_bg_alive(GAME_PLAY* play, ACTOR* actorx) {
+    ACTOR* it;
+
+    for (it = play->actor_info.list[ACTOR_PART_BG].actor; it != NULL; it = it->next_actor) {
+        // (a gone ant's memory may hold another actor by now)
+        if (it == actorx) {
+            return it->mv_proc != NULL && it->id == mAc_PROFILE_ANT;
+        }
+    }
+    return FALSE;
+}
+
+// another player's net got this one first: this player's comes up empty, and a copy already out of the net
+// (the pull cut short) goes all the same, being theirs
+void aINS_mp_lose_catch(void* netted, int ant) {
+    GAME_PLAY* play = (GAME_PLAY*)gamePT;
+    ACTOR* label;
+    int bug;
+
+    if (netted == NULL || play == NULL || GET_PLAYER_ACTOR(play) == NULL) {
+        return;
+    }
+    label = (ACTOR*)mPlib_Get_item_net_catch_label();
+    // a bug in the net is a slot of the insect control, there to read; an ant or bee actor may be gone
+    bug = mPlib_mp_net_catch_type() == 0;
+    if (label != NULL &&
+        (label == (ACTOR*)netted || (ant && bug && ((aINS_INSECT_ACTOR*)label)->type == aINS_INSECT_TYPE_ANT))) {
+        mPlib_Change_item_net_catch_label(0, 0);
+        mPlib_mp_forget_catch((u32)label);
+        if (bug) {
+            aINS_destruct(label, (GAME*)play);
+        } else if (aINS_mp_bg_alive(play, label)) {
+            aANT_mp_vanish(label);
+        }
+        return;
+    }
+    if (!ant) {
+        if (((aINS_INSECT_ACTOR*)netted)->exist_flag && !pc_mp_cr_listed(netted)) {
+            mPlib_mp_forget_catch((u32)netted);
+            aINS_destruct((ACTOR*)netted, (GAME*)play);
+        }
+    } else if (aINS_mp_bg_alive(play, (ACTOR*)netted)) {
+        aANT_mp_vanish(netted);
+    }
+}
+#endif
+
 static void aINS_make_ant(aINS_Init_c* init, s8 bx, s8 bz) {
+#ifdef VITA_MP
+    // one ant to a candy: stepping back into its acre doesn't make a second
+    if (mp_active() && (aINS_CLIP->ant_spawn_pending || aINS_chk_live_ant(bx, bz, init->game))) {
+        return;
+    }
+#endif
     aINS_CLIP->ant_spawn_pending = TRUE;
     bcopy(init, &aINS_CLIP->ant_spawn_info, sizeof(aINS_Init_c));
     aINS_CLIP->ant_bx = bx;
@@ -307,6 +427,10 @@ static void aINS_set_pl_act_tim(int action, int ut_x, int ut_z) {
     aINS_CLIP->pl_action = action;
     aINS_CLIP->pl_action_ut_x = ut_x;
     aINS_CLIP->pl_action_ut_z = ut_z;
+#ifdef VITA_MP
+    // the bugs another game runs there answer this player too
+    pc_mp_cr_act(action, ut_x, ut_z);
+#endif
 }
 
 static void aINS_init_dma_and_clip_area(aINS_CTRL_ACTOR* ctrl_actor) {

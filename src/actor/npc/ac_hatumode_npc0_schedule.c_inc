@@ -290,3 +290,73 @@ static void aHN0_schedule_proc(NPC_ACTOR* nactorx, GAME_PLAY* play, int proc_typ
             break;
     }
 }
+
+#ifdef VITA_MP
+#define aHN0_MP_TURN_FIRST 34 // a player's own turn at the shrine: walked up, paying, praying
+#define aHN0_MP_TURN_LAST  42 // waiting out the prayer
+#define aHN0_MP_WISH_FIRST 43 // going over to wish that player a happy new year
+#define aHN0_MP_SPEAK      45
+#define aHN0_MP_THINK_NUM  46
+
+int aHTMD_mp_think_fields(ACTOR* actorx);
+void aHTMD_mp_think_take(ACTOR* actorx, GAME_PLAY* play);
+
+// a line visitor's step as the screen running the line has it; a player's own turn at the shrine stays with
+// that player's screen
+void aHN0_mp_step(void* actorx, void* play, mp_evstep_t* st, int mode) {
+    static aNPC_TALK_REQUEST_PROC talk_request_table[] = {
+        (aNPC_TALK_REQUEST_PROC)&none_proc1,
+        &aHN0_norm_talk_request,
+        &aHN0_force_talk_request,
+    };
+    HATUMODE_NPC0_ACTOR* h_npc = (HATUMODE_NPC0_ACTOR*)actorx;
+    int think = st->think;
+    int req;
+
+    if (mode == MP_EVS_GET) {
+        st->think = h_npc->think_idx;
+        st->a = h_npc->root;
+        st->b = h_npc->move_think_idx;
+        st->c = h_npc->player;
+        st->timer = h_npc->timer;
+        st->p0 = h_npc->pos[0];
+        st->p1 = h_npc->pos[1];
+        return;
+    }
+    if (CLIP(hatumode_clip) == NULL || think >= aHN0_MP_THINK_NUM) {
+        return;
+    }
+    h_npc->root = st->a;
+    h_npc->move_think_idx = st->b;
+    h_npc->player = st->c;
+    h_npc->pos[0] = st->p0;
+    h_npc->pos[1] = st->p1;
+    if (mode == MP_EVS_TAKE && think >= aHN0_MP_WISH_FIRST && think <= aHN0_MP_SPEAK) {
+        // the wish was for the player there; on to where it would go after
+        aHN0_setup_think_proc(h_npc, (GAME_PLAY*)play, 0x1D);
+        return;
+    }
+    if (mode == MP_EVS_TAKE && think >= aHN0_MP_TURN_FIRST && think <= aHN0_MP_TURN_LAST) {
+        // that player's turn ended with the line leaving its screen: on as after the prayer, with no wish
+        aEv_hatumode_save_c* hatumode_p = (aEv_hatumode_save_c*)mEv_get_save_area(1, 7);
+
+        if (hatumode_p != NULL) {
+            hatumode_p->flags1 &= ~(1 << ((((ACTOR*)h_npc)->npc_id - SP_NPC_EV_HATUMODE_0) & 1));
+        }
+        aHN0_setup_think_proc(h_npc, (GAME_PLAY*)play, 10);
+        return;
+    }
+    h_npc->think_idx = think;
+    req = aHTMD_mp_think_fields(actorx);
+    // only the screen running the line speaks to its player; none while a player's turn is under way there
+    if (mode == MP_EVS_HUSH || (mode == MP_EVS_SHOW && req == aHN0_TALK_REQ_FORCE)) {
+        req = aHN0_TALK_REQ_NONE;
+    }
+    h_npc->npc_class.talk_info.talk_request_proc = talk_request_table[req];
+    if (mode == MP_EVS_TAKE) {
+        aHTMD_mp_think_take(actorx, (GAME_PLAY*)play);
+        h_npc->think_change_flag = TRUE;
+    }
+    h_npc->timer = st->timer;
+}
+#endif

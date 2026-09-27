@@ -7,6 +7,9 @@
 #include "m_msg.h"
 #include "m_soncho.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // TODO: coordinate enum types with ac_tunahiki_control
 
@@ -165,6 +168,15 @@ static void aTNN1_actor_move(ACTOR* actorx, GAME* game) {
         actorx->world.position.x = actorx->home.position.x + tunahiki->rope_base;
     }
 
+#ifdef VITA_MP
+    // in a shared town this screen's pullers go with its own starter, not the record
+    if (pc_mp_ev_torn(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR) >= 0) {
+        if (pc_mp_ev_torn(mEv_EVENT_SPORTS_FAIR_TUG_OF_WAR)) {
+            Actor_delete(actorx);
+        }
+        return;
+    }
+#endif
     if (tunahiki != NULL) {
         if (tunahiki->npc_state == aTNC_NPC_STATE2 && (tunahiki->flag & aTNC_NPCIDX2DELETEFLG(actorx->npc_id)) == 0) {
             Actor_delete(actorx);

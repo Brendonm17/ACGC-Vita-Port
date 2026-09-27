@@ -3,6 +3,9 @@
 #include "lb_rtc.h"
 #include "m_common_data.h"
 #include "libc64/qrand.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define TRADE_MARKET_ODDS_NUM (Kabu_TRADE_MARKET_TYPE_NUM - 1)
 
@@ -217,6 +220,13 @@ extern u16 Kabu_get_price() {
 extern void Kabu_manager() {
   lbRTC_time_c* rtc_time = Common_GetPointer(time.rtc_time);
   lbRTC_time_c* kabu_update_time = Save_GetPointer(kabu_price_schedule.update_time);
+
+#ifdef VITA_MP
+  // turnip prices are the host's; a visitor reads them from its copy of the town
+  if (!mp_town_writer_allowed()) {
+    return;
+  }
+#endif
   
   /* Check if being called on the Sunday where the Stalk Market has already been set */
   if (lbRTC_IsEqualDate(

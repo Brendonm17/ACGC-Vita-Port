@@ -5,6 +5,9 @@
 #include "m_rcp.h"
 #include "m_house.h"
 #include "m_player_lib.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aMBX_ACT_WAIT,

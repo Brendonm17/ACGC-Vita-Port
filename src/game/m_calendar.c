@@ -2,6 +2,16 @@
 
 #include "lb_reki.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+// a visitor's calendar is its own (the passport's), kept while the host lets visitors do what residents do and only
+// on the traveller's own day: a date apart from home would clear months of it
+#define mCD_KEPT(no) ((no) != mPr_FOREIGNER || (mp_visitor_rights() && mp_rights_same_day()))
+#define mCD_CAL(no)  ((no) == mPr_FOREIGNER ? &Common_Get(now_private)->calendar : &Save_Get(private_data[no]).calendar)
+#else
+#define mCD_KEPT(no) ((no) != mPr_FOREIGNER)
+#define mCD_CAL(no)  (&Save_Get(private_data[no]).calendar)
+#endif
 
 static void mCD_calendar_clear_interval(mCD_player_calendar_c* calendar, int interval) {
     u8 months[lbRTC_MONTHS_MAX];
@@ -143,8 +153,8 @@ extern void mCD_calendar_clear(int player_no) {
         player_no = Common_Get(player_no);
     }
 
-    if (player_no != mPr_FOREIGNER) {
-        mem_clear((u8*)&priv[player_no].calendar, sizeof(mCD_player_calendar_c), 0);
+    if (mCD_KEPT(player_no)) {
+        mem_clear((u8*)mCD_CAL(player_no), sizeof(mCD_player_calendar_c), 0);
     }
 }
 
@@ -177,8 +187,8 @@ extern void mCD_calendar_check_delete(int player_no, lbRTC_year_t year, lbRTC_mo
         player_no = Common_Get(player_no);
     }
 
-    if (player_no != mPr_FOREIGNER) {
-        mCD_player_calendar_c* calendar = &Save_Get(private_data[player_no]).calendar;
+    if (mCD_KEPT(player_no)) {
+        mCD_player_calendar_c* calendar = mCD_CAL(player_no);
 
         if (calendar->year == 0) {
             mCD_calendar_clear(-1);
@@ -201,7 +211,7 @@ extern void mCD_calendar_check_delete(int player_no, lbRTC_year_t year, lbRTC_mo
 extern void mCD_calendar_wellcome_on() {
     mCD_player_calendar_c* calendar = &Common_Get(now_private)->calendar;
 
-    if (Common_Get(player_no) != mPr_FOREIGNER) {
+    if (mCD_KEPT(Common_Get(player_no))) {
         lbRTC_time_c* rtc_time = Common_GetPointer(time.rtc_time);
 
         mCD_calendar_check_delete(-1, rtc_time->year, rtc_time->month, rtc_time->day);
@@ -212,11 +222,11 @@ extern void mCD_calendar_wellcome_on() {
 }
 
 extern void mCD_calendar_event_on(lbRTC_year_t year, lbRTC_month_t month, lbRTC_day_t day, u8 event) {
-    if (Common_Get(player_no) != mPr_FOREIGNER) {
+    if (mCD_KEPT(Common_Get(player_no))) {
         mCD_player_calendar_c* calendar;
 
         mCD_calendar_check_delete(-1, year, month, day);
-        calendar = &Save_Get(private_data[Common_Get(player_no)]).calendar;
+        calendar = mCD_CAL(Common_Get(player_no));
 
         switch (event) {
             case 11: {
@@ -287,13 +297,13 @@ extern int mCD_calendar_event_check(lbRTC_year_t year, lbRTC_month_t month, lbRT
         player_no = Common_Get(player_no);
     }
 
-    if (player_no != mPr_FOREIGNER) {
+    if (mCD_KEPT(player_no)) {
         lbRTC_time_c* rtc_time = Common_GetPointer(time.rtc_time);
 
         int interval = (rtc_time->month - month) + (rtc_time->year - year) * lbRTC_MONTHS_MAX;
 
         if (interval >= 0 && interval < lbRTC_MONTHS_MAX) {
-            mCD_player_calendar_c* calendar = &Save_Get(private_data[player_no]).calendar;
+            mCD_player_calendar_c* calendar = mCD_CAL(player_no);
 
             switch (event) {
                 case 11: {

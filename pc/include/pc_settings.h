@@ -39,6 +39,19 @@ typedef struct {
     // Which folder is treated as home: 0=card_a (default), 1=card_b. Read
     // at boot; save+restart to switch.
     int save_slot;
+
+    // Vita online: the host's rules for its shared town (visitors go by the host's)
+    int mp_visitor_rights; // 1=visitors can do what residents do (museum, bank...), 0=original visitor rules
+    int mp_visitor_items;   // 1=visitors can pick up, drop, dig up, bury and plant things
+    int mp_visitor_dig;     // 1=visitors can dig holes
+    int mp_visitor_axe;     // 1=visitors can cut down trees
+    int mp_visitor_tune;    // 1=visitors can change the town tune
+    int mp_visitor_board;   // 1=visitors can post on the bulletin board
+    int mp_visitor_cottage; // 1=visitors can rearrange the island cottage
+    int mp_visitor_designs; // 1=visitors can change the Able Sisters' displays and the island flag
+    int mp_ask_join;        // 1=ask before anyone joins (far-away callers are always asked about)
+    int mp_chat;            // 1=players chat in your town (visitors go by the host's)
+    int mp_chat_keyboard;   // 0=the game's own keyboard, 1=the Vita's
 #endif
 } PCSettings;
 

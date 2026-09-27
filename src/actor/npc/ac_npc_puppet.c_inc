@@ -1,0 +1,220 @@
+// ac_npc_puppet.c_inc
+// a villager another player's game moves: pose and animation from there, the rest runs here
+
+#define aNPC_MP_GLIDE     0.35f
+#define aNPC_MP_SNAP_DIST 200.0f
+#define aNPC_MP_UMB_KINDS 40 // TOOL_UMBRELLA0 through TOOL_ORG_UMBRELLA7
+#define aNPC_MP_CLOTH_LOADING 2 // aNPC_MP_CLOTH_LOADING (ac_npc_act_get.c_inc comes later)
+#define aNPC_MP_CLOTH_DONE    3 // aNPC_MP_CLOTH_DONE
+#define aNPC_MP_FRAME_SLACK   6.0f // frames the animation here may run apart from a fresh report
+
+#ifndef aNPC_NPC2
+// with the actions, which ac_npc.c includes after this file
+static int aNPC_request_house(NPC_ACTOR* nactorx, GAME_PLAY* play, int request);
+#endif
+
+// what the owner's copy holds in its right hand: an umbrella, or a prop its event handed it; the logic
+// that would bring either out doesn't run here
+static void aNPC_mp_puppet_tool(ACTOR* actorx, GAME* game, const mp_npose_t* pose) {
+    NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
+    TOOLS_ACTOR* tool = (TOOLS_ACTOR*)nactorx->right_hand.item_actor_p;
+    int want = (pose->umb ? pose->tool < aNPC_MP_UMB_KINDS : (pose->prop && pose->tool < aTOL_NUM)) && !pose->hidden;
+
+    nactorx->right_hand.requested_item_type = aNPC_ITEM_TYPE_NONE;
+    // put away there, or traded for another in a greeting: this one goes at once
+    if (tool != NULL && (!want || tool->tool_name != pose->tool)) {
+        Actor_delete((ACTOR*)tool);
+        nactorx->right_hand.item_actor_p = NULL;
+        nactorx->right_hand.item_type = aNPC_ITEM_TYPE_NONE;
+        tool = NULL;
+    }
+    // an umbrella already being closed isn't brought out again
+    if (want && tool == NULL && !(pose->umb && pose->anim == aNPC_ANIM_UMB_CLOSE1) && CLIP(tools_clip) != NULL) {
+        int mode = (pose->umb && pose->anim == aNPC_ANIM_UMB_OPEN1) ? aTOL_ACTION_WAIT : aTOL_ACTION_S_TAKEOUT;
+
+        tool = (TOOLS_ACTOR*)CLIP(tools_clip)->aTOL_birth_proc(pose->tool, mode, actorx, game, -1, NULL);
+        if (tool != NULL) {
+            if (pose->umb) {
+                nactorx->right_hand.umbrella_type = pose->tool;
+                nactorx->right_hand.item_type = aNPC_ITEM_TYPE_UMBRELLA;
+            }
+            nactorx->right_hand.item_actor_p = (ACTOR*)tool;
+            xyz_t_move(&tool->actor_class.world.position, &actorx->world.position);
+        }
+    }
+    // the prop does what the owner's does (a popper raised, a fan put away)
+    if (tool != NULL && pose->prop && pose->tool_act < aTOL_ACTION_NUM) {
+        tool->work0 = pose->tool_act;
+    }
+}
+
+// a shirt changed on the owner's screen (a gift, a greeting swap) is loaded here too
+static void aNPC_mp_puppet_cloth(NPC_ACTOR* nactorx, const mp_npose_t* pose) {
+    if (!ITEM_IS_NPC_CLOTH(pose->cloth) && pose->cloth != RSV_CLOTH) {
+        return;
+    }
+    if (nactorx->draw.cloth_no != pose->cloth || nactorx->draw.org_idx != pose->org_idx) {
+        aNPC_cancel_cloth_data(nactorx);
+        aNPC_setup_chg_cloth(nactorx, pose->cloth, pose->org_idx);
+        nactorx->draw.cloth_change_step = aNPC_MP_CLOTH_LOADING;
+    }
+    if (nactorx->draw.cloth_change_step == aNPC_MP_CLOTH_LOADING && aNPC_change_cloth_data(nactorx) == TRUE) {
+        nactorx->draw.cloth_change_step = aNPC_MP_CLOTH_DONE;
+    }
+}
+
+// a fresh report's frame: far off means the owner began the animation again; near, this one eases
+// back in step so the two never drift apart
+static void aNPC_mp_frame_sync(cKF_FrameControl_c* fc, f32 frame) {
+    f32 d = fc->current_frame - frame;
+    f32 len = fc->end_frame - fc->start_frame;
+    int loop = fc->mode == cKF_FRAMECONTROL_REPEAT && len > 0.0f;
+
+    if (loop) {
+        while (d > len * 0.5f) {
+            d -= len;
+        }
+        while (d < -len * 0.5f) {
+            d += len;
+        }
+    }
+    if (ABS(d) > aNPC_MP_FRAME_SLACK) {
+        fc->current_frame = frame;
+        return;
+    }
+    fc->current_frame -= d * 0.25f;
+    if (loop) {
+        if (fc->current_frame < fc->start_frame) {
+            fc->current_frame += len;
+        } else if (fc->current_frame > fc->end_frame) {
+            fc->current_frame -= len;
+        }
+    }
+}
+
+// back under this game's AI: the action it froze in and where it was heading are stale
+static void aNPC_mp_puppet_resume(NPC_ACTOR* nactorx) {
+    ACTOR* tool = nactorx->right_hand.item_actor_p;
+
+    // an umbrella the owner was closing goes; this game's AI brings out its own if it rains
+    if (tool != NULL && ((TOOLS_ACTOR*)tool)->work0 == aTOL_ACTION_PUTAWAY) {
+        Actor_delete(tool);
+        nactorx->right_hand.item_actor_p = NULL;
+        nactorx->right_hand.item_type = aNPC_ITEM_TYPE_NONE;
+        nactorx->draw.sub_anim_type = aNPC_SUB_ANIM_NONE;
+    }
+    nactorx->condition_info.demo_flg = 0;
+    nactorx->condition_info.greeting_flag = FALSE;
+    nactorx->action.step = aNPC_ACTION_END_STEP;
+    nactorx->action.priority = 0;
+    aNPC_set_dst_pos(nactorx, nactorx->actor_class.world.position.x, nactorx->actor_class.world.position.z);
+}
+
+static void aNPC_mp_puppet_move(ACTOR* actorx, GAME* game, const mp_npose_t* pose) {
+    NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
+    GAME_PLAY* play = (GAME_PLAY*)game;
+    cKF_FrameControl_c* fc = &nactorx->draw.main_animation.keyframe.frame_control;
+    f32 dx = pose->x - actorx->world.position.x;
+    f32 dz = pose->z - actorx->world.position.z;
+
+    if (nactorx->palActor != NULL) {
+        if (nactorx->palActor->part == ACTOR_PART_NPC) {
+            ((NPC_ACTOR*)nactorx->palActor)->palActor = NULL;
+        }
+        nactorx->palActor = NULL;
+    }
+    nactorx->condition_info.hide_request = pose->hidden;
+    if (nactorx->condition_info.hide_flg != pose->hidden) {
+        nactorx->condition_info.hide_flg = pose->hidden;
+        actorx->shape_info.draw_shadow = pose->hidden ^ 1;
+    }
+    if (dx * dx + dz * dz > aNPC_MP_SNAP_DIST * aNPC_MP_SNAP_DIST) {
+        actorx->world.position.x = pose->x;
+        actorx->world.position.y = pose->y;
+        actorx->world.position.z = pose->z;
+        actorx->shape_info.rotation.y = pose->rot_y;
+        actorx->speed = 0.0f;
+    } else {
+        // what reacts to how fast it goes (a bridge, Wisp's glow) sees it walking
+        actorx->speed = sqrtf(dx * dx + dz * dz) * aNPC_MP_GLIDE;
+        actorx->world.position.x += dx * aNPC_MP_GLIDE;
+        actorx->world.position.y += (pose->y - actorx->world.position.y) * aNPC_MP_GLIDE;
+        actorx->world.position.z += dz * aNPC_MP_GLIDE;
+        // poses come a few frames apart: turn toward the newest instead of jumping to it
+        actorx->shape_info.rotation.y += (s16)((s16)(pose->rot_y - actorx->shape_info.rotation.y) * aNPC_MP_GLIDE);
+    }
+    actorx->world.angle.y = actorx->shape_info.rotation.y;
+    nactorx->movement.mv_angl = actorx->shape_info.rotation.y;
+    nactorx->head.angle_x += (s16)((s16)(pose->head_x - nactorx->head.angle_x) / 2);
+    nactorx->head.angle_y += (s16)((s16)(pose->head_y - nactorx->head.angle_y) / 2);
+
+    // the moments the owner's copy opened its door or began closing its umbrella
+    if (pose->anim != nactorx->draw.animation_id) {
+        if (pose->anim == aNPC_ANIM_OPEN1 || pose->anim == aNPC_ANIM_GO_OUT1) {
+#ifndef aNPC_NPC2
+            if (nactorx->npc_info.animal != NULL) {
+                aNPC_request_house(nactorx, play, pose->anim == aNPC_ANIM_OPEN1 ? 1 : 2);
+            }
+#endif
+        } else if (pose->anim == aNPC_ANIM_UMB_CLOSE1 && nactorx->right_hand.item_actor_p != NULL &&
+                   CLIP(tools_clip) != NULL) {
+            CLIP(tools_clip)->aTOL_chg_request_mode_proc(actorx, nactorx->right_hand.item_actor_p,
+                                                         aTOL_ACTION_PUTAWAY);
+        }
+    }
+    // the owner already resolved moods and talk turns into this animation
+    if (pose->anim != nactorx->draw.animation_id || pose->sub_anim != nactorx->draw.sub_anim_type ||
+        pose->talk != (nactorx->talk_info.type == 1)) {
+        nactorx->draw.sub_anim_type = pose->sub_anim;
+        nactorx->talk_info.type = pose->talk;
+        aNPC_Animation_init(actorx, pose->anim, pose->talk);
+        fc->current_frame = pose->frame;
+    } else if (pose->fresh) {
+        // between reports it plays on here
+        aNPC_mp_frame_sync(fc, pose->frame);
+    }
+    fc->speed = pose->speed;
+    nactorx->condition_info.greeting_flag = pose->kutipaku;
+    aNPC_mp_puppet_tool(actorx, game, pose);
+    aNPC_mp_puppet_cloth(nactorx, pose);
+
+    if (pose->hidden) {
+        return;
+    }
+    aNPC_anime_proc(nactorx, game);
+    aNPC_tex_anm_ctrl(nactorx);
+    // a clap or a cheer the owner's copy keeps up
+    if (pose->lsnd != 0) {
+        sAdo_OngenPos((u32)actorx, pose->lsnd, &actorx->world.position);
+    }
+    aNPC_talk_request_check(actorx, game);
+    Actor_world_to_eye(actorx, nactorx->eye_y);
+    if ((nactorx->condition_info.demo_flg & aNPC_COND_DEMO_SKIP_OBJ_COL_CHECK) == 0) {
+        CollisionCheck_Uty_ActorWorldPosSetPipeC(actorx, &nactorx->collision.pipe);
+        CollisionCheck_setOC(game, &play->collision_check, &nactorx->collision.pipe.collision_obj);
+    }
+}
+
+// TRUE when another game moves this villager and this frame is done
+static int aNPC_mp_puppet(ACTOR* actorx, GAME* game) {
+    NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
+    mp_npose_t pose;
+
+    switch (mp_npc_control(actorx, &pose)) {
+        case MP_NPC_PUPPET:
+            if (pose.anim >= aNPC_ANIM_NUM || pose.sub_anim < 0 || pose.sub_anim >= aNPC_SUB_ANIM_NUM) {
+                break; // nothing real to play (an owner mid-setup); this frame runs here
+            }
+            aNPC_mp_puppet_move(actorx, game, &pose);
+            return TRUE;
+        case MP_NPC_RESUME:
+            // a talk that just began keeps the action it set up
+            if (mDemo_Get_talk_actor() != actorx) {
+                aNPC_mp_puppet_resume(nactorx);
+            }
+            // an event's character this screen now runs the event with carries on from the runner's step
+            mp_npc_resumed(actorx, game);
+            break;
+    }
+    return FALSE;
+}

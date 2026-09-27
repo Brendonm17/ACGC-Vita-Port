@@ -8,6 +8,9 @@
 #include "m_player_lib.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
   aHOI_ITEM_TYPE_ITEM,

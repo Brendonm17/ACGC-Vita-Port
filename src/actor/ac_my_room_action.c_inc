@@ -594,6 +594,10 @@ static int aMR_SearchCompleteObstacle(FTR_ACTOR* ftr_actor, s16 rotation_state, 
         if (ut == player_ut) {
             return FALSE;
         }
+
+        if (aMR_mp_ut_blocked(ut)) {
+            return FALSE;
+        }
     }
 
     return TRUE;

@@ -77,7 +77,12 @@ static void aES2_set_norm_talk_info(ACTOR* actorx) {
             break;
         default:
             aES2_change_talk_proc((ACTOR*)soncho, aES2_TALK_5);
+#ifdef VITA_MP
+            // a visitor too, when the host lets visitors do what residents do
+            if (Common_Get(player_no) == 4 && !mp_visitor_rights()) {
+#else
             if (Common_Get(player_no) == 4) {
+#endif
                 mDemo_Set_msg_num(aES2_kinenhin_msg((ACTOR*)soncho, 0x9));
                 aES2_change_talk_proc((ACTOR*)soncho, aES2_TALK_2);
             } else if (mSC_trophy_get(soncho->event) != 0) {

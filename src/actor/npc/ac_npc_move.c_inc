@@ -679,17 +679,39 @@ static void aNPC_actor_move_show(ACTOR* actorx, GAME* game) {
         aNPC_talk_area_check(nactorx, play);
     }
 
+#ifdef VITA_MP
+    // effects and sounds from what it decides show where other games follow it
+    pc_mp_npc_fx(actorx);
+#endif
     aNPC_schedule_proc(nactorx, play);
     aNPC_action_proc(nactorx, play);
+#ifdef VITA_MP
+    pc_mp_npc_fx(NULL);
+#endif
     aNPC_talk_request_check(actorx, game);
     aNPC_angle_calc(nactorx);
     aNPC_calc_fatigue(nactorx, play);
     aNPC_actor_move_show_after(actorx, game);
 }
 
+#ifdef VITA_MP
+#include "../src/actor/npc/ac_npc_puppet.c_inc"
+
+// one with a move of its own (Pete) follows another game's copy the same way
+int aNPC_mp_puppet_frame(void* actorx, void* game) {
+    return aNPC_mp_puppet((ACTOR*)actorx, (GAME*)game);
+}
+#endif
+
 static void aNPC_actor_move(ACTOR* actorx, GAME* game) {
     NPC_ACTOR* nactorx = (NPC_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    // another player's game is moving this villager
+    if (aNPC_mp_puppet(actorx, game)) {
+        return;
+    }
+#endif
 #ifdef TARGET_PC
     // overworld SLEEP: hide villagers who are at their home block
     // (they're inside sleeping). villagers still out in the field

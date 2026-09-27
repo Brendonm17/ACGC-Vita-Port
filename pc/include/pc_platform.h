@@ -131,6 +131,7 @@ extern int g_pc_widescreen_stretch;
 void pc_gx_invalidate_all_state(void);
 
 /* --- Functions --- */
+void pc_log_error(const char* fmt, ...); // errors only, into the port's one log (error.log on the Vita)
 void pc_platform_init(void);
 void pc_platform_shutdown(void);
 void pc_platform_swap_buffers(void);

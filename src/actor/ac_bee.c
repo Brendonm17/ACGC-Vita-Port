@@ -7,6 +7,9 @@
 #include "m_player_lib.h"
 #include "m_common_data.h"
 #include "ac_set_ovl_insect.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aBEE_ACT_APPEAR,
@@ -378,6 +381,17 @@ static void aBEE_actor_draw(ACTOR* actorx, GAME* game) {
         idx = game->frame_counter & 1;
         mtx = bee->mtx[idx];
 
+#ifdef VITA_MP
+        // the swarm chases this screen's player: the other screens draw it at its puppet
+        {
+            u8 rgba[4] = { 0, 0, 0, 0 };
+            f32 frame = bee->start_frame;
+
+            rgba[3] = (u8)bee->alpha;
+            pc_mp_attach(MP_ATT_BEE, frame < 0.0f ? 0 : (frame > 255.0f ? 255 : (int)frame), 0, rgba,
+                         get_Matrix_now());
+        }
+#endif
         Matrix_push();
         _texture_z_light_fog_prim_xlu(graph);
         Setpos_HiliteReflect_xlu_init(&actorx->world.position, play);

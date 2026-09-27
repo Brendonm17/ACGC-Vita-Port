@@ -9,6 +9,9 @@
 #ifdef VITA_TROPHIES
 #include "vita_trophy.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 /* For whatever reason, this file seems to have -pool off */
 #pragma push

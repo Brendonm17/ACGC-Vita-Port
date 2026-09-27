@@ -8,6 +8,9 @@
 #include "m_player_lib.h"
 #include "m_item_name.h"
 #include "m_house.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
   aEGH_TALK_END_WAIT,
@@ -103,6 +106,42 @@ static int aEGH_bitclr_func(u16 bit);
 static u16 aEGH_bitcheck_func(u16 bit);
 
 static void aEGH_byebye_check(EV_GHOST_ACTOR* ghost, GAME_PLAY* play);
+#ifdef VITA_MP
+static void aEGH_think_init_proc(NPC_ACTOR* actorx, GAME_PLAY* play);
+
+static int aEGH_mp_today(mEv_gst_c* ghost_save) {
+  lbRTC_time_c* rtc_time = Common_GetPointer(time.rtc_time);
+
+  return rtc_time->year == ghost_save->renew_time.year && rtc_time->month == ghost_save->renew_time.month &&
+         rtc_time->day == ghost_save->renew_time.day;
+}
+
+// someone returned the spirits on another screen: he's gone here too, unless this copy is saying goodbye
+static int aEGH_mp_returned(EV_GHOST_ACTOR* ghost) {
+  mEv_gst_c* ghost_save = (mEv_gst_c*)mEv_get_save_area(mEv_EVENT_GHOST, 54);
+
+  return mp_active() && ghost_save != NULL && (ghost_save->flags & mEv_GHOST_FLAG_RETURNED_SPIRITS) != 0 &&
+         aEGH_mp_today(ghost_save) && ghost->think_act != aEGH_THINK_IRAI && mDemo_Get_talk_actor() != (ACTOR*)ghost;
+}
+
+// host: a visitor's game has Wisp out: the night's record is made or renewed here as his constructor does it, so
+// every screen keeps the one record
+void aEGH_mp_record(void) {
+  mEv_gst_c* ghost_save = (mEv_gst_c*)mEv_get_save_area(mEv_EVENT_GHOST, 54);
+
+  if (ghost_save == NULL) {
+    mEv_reserve_save_area(mEv_EVENT_GHOST, 54);
+    ghost_save = (mEv_gst_c*)mEv_get_save_area(mEv_EVENT_GHOST, 54);
+  } else if (aEGH_mp_today(ghost_save)) {
+    return;
+  }
+  if (ghost_save != NULL) {
+    ghost_save->flags = 0;
+    ghost_save->okoruhito_str_no = RANDOM_F(32.0f);
+    mTM_set_renew_time(&ghost_save->renew_time, Common_GetPointer(time.rtc_time));
+  }
+}
+#endif
 
 static void aEGH_actor_ct(ACTOR* actorx, GAME* game) {
   static aNPC_ct_data_c ct_data = {
@@ -139,23 +178,41 @@ static void aEGH_actor_ct(ACTOR* actorx, GAME* game) {
     }
     else {
       if (
-        rtc_time->year != ghost_save->renew_time.year ||
-        rtc_time->month != ghost_save->renew_time.month ||
-        rtc_time->day != ghost_save->renew_time.day
+#ifdef VITA_MP
+        // the night's record is the host's to renew
+        mp_town_writer_allowed() &&
+#endif
+        (rtc_time->year != ghost_save->renew_time.year ||
+         rtc_time->month != ghost_save->renew_time.month ||
+         rtc_time->day != ghost_save->renew_time.day)
       ) {
         ghost_save->flags = 0;
         ghost_save->okoruhito_str_no = RANDOM_F(32.0f);
         mTM_set_renew_time(&ghost_save->renew_time, rtc_time);
       }
 
+#ifdef VITA_MP
+      // (a visitor reads a record from another night as empty)
+      if ((ghost_save->flags & mEv_GHOST_FLAG_RETURNED_SPIRITS) != 0 &&
+          (mp_town_writer_allowed() || aEGH_mp_today(ghost_save))) {
+#else
       if ((ghost_save->flags & mEv_GHOST_FLAG_RETURNED_SPIRITS) != 0) {
+#endif
         Actor_delete(actorx);
       }
     }
 
+#ifdef VITA_MP
+    // a visitor meets Wisp as a resident does when the host lets visitors do what residents do
+    if (Common_Get(player_no) == mPr_FOREIGNER && !mp_visitor_rights()) {
+#else
     if (Common_Get(player_no) == mPr_FOREIGNER) {
+#endif
       Actor_delete(actorx);
     }
+#ifdef VITA_MP
+    ghost->_9A5 = FALSE; // no think set up for this screen's player yet (_9A5 is otherwise unused)
+#endif
 
     ghost->_9AA = 0;
     ghost->npc_class.talk_info.default_animation = 126;
@@ -223,6 +280,21 @@ static void aEGH_actor_move(ACTOR* actorx, GAME* game) {
   }
 
   (*Common_Get(clip).npc_clip->move_proc)(actorx, game);
+#ifdef VITA_MP
+  // another game runs Wisp: how this screen's player stands with him is still worked out here, as with K.K.
+  if (mp_npc_is_puppet(actorx)) {
+    if (ghost->_9A5 == FALSE) {
+      aEGH_think_init_proc((NPC_ACTOR*)ghost, play);
+    }
+    if (ghost->think_proc != NULL) {
+      (*ghost->think_proc)(ghost, play);
+    }
+  }
+  if (aEGH_mp_returned(ghost)) {
+    Actor_delete(actorx);
+    return;
+  }
+#endif
   aEGH_byebye_check(ghost, play);
 
   if (ghost->npc_class.schedule.type == aNPC_SCHEDULE_TYPE_WALK_WANDER && ghost->think_act != aEGH_THINK_SPEAK) {

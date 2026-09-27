@@ -12,6 +12,10 @@
 #include "m_rcp.h"
 #include "libforest/gbi_extensions.h"
 
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
+
 enum {
     aPOFF_ACTION_WAIT,
     aPOFF_ACTION_OPEN_DOOR_WAIT,

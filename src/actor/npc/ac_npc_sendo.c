@@ -7,6 +7,10 @@
 #include "libultra/libultra.h"
 #include "GBA2/gba2.h"
 #include "m_ledit_ovl.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "pc_mp_text_data.h"
+#endif
 
 static void aSEN_actor_ct(ACTOR* actorx, GAME* game);
 static void aSEN_actor_dt(ACTOR* actorx, GAME* game);

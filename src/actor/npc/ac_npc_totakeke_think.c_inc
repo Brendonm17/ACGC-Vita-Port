@@ -54,21 +54,21 @@ static void aNTT_roll2(NPC_TOTAKEKE_ACTOR *totakeke, GAME_PLAY *play) {
     weather = CLIP(weather_clip);
     if (weather != NULL) {
         if (totakeke->roll4_count == FRAMERATE_SELECT(5600, 4665)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_SAKURA, mEnv_WEATHER_INTENSITY_HEAVY);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_SAKURA, mEnv_WEATHER_INTENSITY_HEAVY);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(1310, 1090)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_RAIN, mEnv_WEATHER_INTENSITY_HEAVY);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_RAIN, mEnv_WEATHER_INTENSITY_HEAVY);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(2450, 2041)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_LEAVES, mEnv_WEATHER_INTENSITY_HEAVY);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_LEAVES, mEnv_WEATHER_INTENSITY_HEAVY);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(3910, 3258)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_SNOW, mEnv_WEATHER_INTENSITY_HEAVY);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_SNOW, mEnv_WEATHER_INTENSITY_HEAVY);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(1870, 1558)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_RAIN, mEnv_WEATHER_INTENSITY_NONE);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_RAIN, mEnv_WEATHER_INTENSITY_NONE);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(2970, 2550)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_LEAVES, mEnv_WEATHER_INTENSITY_NONE);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_LEAVES, mEnv_WEATHER_INTENSITY_NONE);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(4800, 3975)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_SNOW, mEnv_WEATHER_INTENSITY_NONE);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_SNOW, mEnv_WEATHER_INTENSITY_NONE);
         } else if (totakeke->roll4_count == FRAMERATE_SELECT(6350, 5165)) {
-            weather->change_weather(weather->actor, mEnv_WEATHER_SAKURA, mEnv_WEATHER_INTENSITY_NONE);
+            aNTT_CHANGE_WEATHER(weather, mEnv_WEATHER_SAKURA, mEnv_WEATHER_INTENSITY_NONE);
         }
     }
     if (totakeke->roll2_count > FRAMERATE_SELECT(446, 372)) {
@@ -206,3 +206,21 @@ static void aNTT_schedule_proc(NPC_TOTAKEKE_ACTOR *totakeke, GAME_PLAY *play, in
         break;
     }
 }
+
+#ifdef VITA_MP
+#define aNTT_MP_SHOW_ROW 4 // dt_tbl rows from here on: a show and the handing over of its aircheck
+
+// what K.K. says depends on where this player stands, worked out here; a show is the one who asked for its song,
+// so a screen taking him over mid-show has him back at his guitar
+void aNTT_mp_step(void* actorx, void* play, mp_evstep_t* st, int mode) {
+    NPC_TOTAKEKE_ACTOR* totakeke = (NPC_TOTAKEKE_ACTOR*)actorx;
+
+    if (mode == MP_EVS_GET) {
+        st->think = totakeke->think;
+    } else if (mode == MP_EVS_TAKE && totakeke->think >= aNTT_MP_SHOW_ROW) {
+        aNTT_setup_think_proc(totakeke, (GAME_PLAY*)play, 0);
+        aNTT_enso_init(totakeke);
+        totakeke->npc_class.condition_info.demo_flg = FALSE;
+    }
+}
+#endif

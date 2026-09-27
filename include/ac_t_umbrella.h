@@ -35,6 +35,10 @@ typedef struct t_umbrella_model_s {
     Gfx* model_kasa;
 } UMBRELLA_MODEL;
 
+#ifdef VITA_MP
+void aTUMB_mp_scales(int action, f32* frame, xyz_t* scale_e, xyz_t* scale_kasa);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

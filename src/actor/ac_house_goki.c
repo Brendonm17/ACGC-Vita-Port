@@ -7,6 +7,11 @@
 #include "m_cockroach.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "m_field_info.h"
+#include "m_scene_table.h"
+#endif
 
 enum {
     aHG_ACT_AWAY,
@@ -40,10 +45,82 @@ ACTOR_PROFILE House_Goki_Profile = {
 
 static void aHG_setupAction(HOUSE_GOKI_ACTOR* goki, GAME* game, int action);
 
+#ifdef VITA_MP
+// the lowest slot of the players in a room runs its cockroaches; the others' games show copies that follow them
+#define aHG_MP_COPY_ARG  (-0x100) // actor_specific below this: a copy of the runner's cockroach (this less it)
+#define aHG_MP_KILLED    4
+#define aHG_MP_KILLED_MS 10000 // a copy stepped on here isn't brought back while its runner hasn't heard
+
+static int aHG_mp_running = -1; // this game runs the room's cockroaches (-1: no room of them up)
+static u8 aHG_mp_next_id;
+static int aHG_mp_pup_moving; // the one a cockroach runs from this frame is another player on the move
+static u8 aHG_mp_killed[aHG_MP_KILLED];
+static u32 aHG_mp_killed_ms[aHG_MP_KILLED];
+static int aHG_mp_killed_at;
+
+static int aHG_mp_room(void) {
+    return mFI_IS_PLAYER_ROOM(mFI_GetFieldId()) || Save_Get(scene_no) == SCENE_COTTAGE_MY;
+}
+
+static int aHG_mp_is(ACTOR* a) {
+    return a->id == mAc_PROFILE_HOUSE_GOKI && a->ct_proc == NULL && a->mv_proc != NULL;
+}
+
+// a copy not yet built counts as one all the same (its id is still in its arg)
+static int aHG_mp_copy_id(ACTOR* a) {
+    if (a->id != mAc_PROFILE_HOUSE_GOKI || a->mv_proc == NULL) {
+        return 0;
+    }
+    if (a->ct_proc != NULL) {
+        return a->actor_specific < aHG_MP_COPY_ARG ? aHG_MP_COPY_ARG - a->actor_specific : 0;
+    }
+    return ((HOUSE_GOKI_ACTOR*)a)->mp_copy ? ((HOUSE_GOKI_ACTOR*)a)->mp_id : 0;
+}
+
+static u8 aHG_mp_new_id(GAME* game) {
+    GAME_PLAY* play = (GAME_PLAY*)game;
+    int tries;
+
+    for (tries = 0; tries < 255; tries++) {
+        ACTOR* a;
+        int used = FALSE;
+
+        if (++aHG_mp_next_id == 0) {
+            aHG_mp_next_id = 1;
+        }
+        for (a = play->actor_info.list[ACTOR_PART_BG].actor; a != NULL; a = a->next_actor) {
+            used |= aHG_mp_is(a) && ((HOUSE_GOKI_ACTOR*)a)->mp_id == aHG_mp_next_id;
+        }
+        if (!used) {
+            break;
+        }
+    }
+    return aHG_mp_next_id;
+}
+
+static void aHG_mp_ct(HOUSE_GOKI_ACTOR* goki, GAME* game) {
+    ACTOR* actorx = (ACTOR*)goki;
+
+    if (actorx->actor_specific < aHG_MP_COPY_ARG) {
+        goki->mp_copy = TRUE;
+        goki->mp_id = (u8)(aHG_MP_COPY_ARG - actorx->actor_specific);
+        goki->mp_to = actorx->world.position;
+        goki->mp_angle = actorx->world.angle.y;
+        goki->mp_act = aHG_ACT_WAIT;
+        goki->mp_alpha = 255;
+    } else {
+        goki->mp_id = aHG_mp_new_id(game);
+    }
+}
+#endif
+
 static void aHG_actor_ct(ACTOR* actorx, GAME* game) {
     HOUSE_GOKI_ACTOR* goki = (HOUSE_GOKI_ACTOR*)actorx;
     GAME_PLAY* play = (GAME_PLAY*)game;
 
+#ifdef VITA_MP
+    aHG_mp_ct(goki, game);
+#endif
     goki->alpha = 30.0f;
     if (actorx->actor_specific <= 0) {
         actorx->actor_specific = 0;
@@ -60,6 +137,13 @@ static void aHG_actor_ct(ACTOR* actorx, GAME* game) {
     actorx->shape_info.rotation.y = actorx->player_angle_y + DEG2SHORT_ANGLE2(180.0f);
     actorx->world.angle.y = actorx->shape_info.rotation.y;
     aHG_setupAction(goki, game, aHG_ACT_AWAY);
+#ifdef VITA_MP
+    if (goki->mp_copy) {
+        actorx->shape_info.rotation.y = goki->mp_angle;
+        actorx->world.angle.y = goki->mp_angle;
+        goki->alpha = goki->mp_alpha;
+    }
+#endif
 }
 
 static void aHG_anime_proc(HOUSE_GOKI_ACTOR* goki) {
@@ -199,7 +283,11 @@ static int aHG_player_check(ACTOR* actorx, GAME* game) {
     ACTOR* playerx = GET_PLAYER_ACTOR_GAME_ACTOR(game);
     int ret = FALSE;
 
+#ifdef VITA_MP
+    if (playerx != NULL && (!F32_IS_ZERO(playerx->speed) || aHG_mp_pup_moving) && actorx->player_distance_xz < 60.0f) {
+#else
     if (playerx != NULL && !F32_IS_ZERO(playerx->speed) && actorx->player_distance_xz < 60.0f) {
+#endif
         ret = TRUE;
     }
 
@@ -385,6 +473,9 @@ static void aHG_move_init(HOUSE_GOKI_ACTOR* goki, GAME* game) {
 
 static void aHG_dead_init(HOUSE_GOKI_ACTOR* goki, GAME* game) {
     eEC_CLIP->effect_make_proc(eEC_EFFECT_GOKI, goki->actor_class.world.position, 1, 0, game, EMPTY_NO, 0, 0);
+#ifdef VITA_MP
+    if (!goki->mp_copy)
+#endif
     mCkRh_CalcCanLookGokiCount(-1);
     sAdo_OngenTrgStart(NA_SE_GOKI_DEAD, &goki->actor_class.world.position);
     goki->shadow_alpha = 255.0f;
@@ -416,9 +507,266 @@ static void aHG_setupAction(HOUSE_GOKI_ACTOR* goki, GAME* game, int act) {
     (*init_proc[act])(goki, game);
 }
 
+#ifdef VITA_MP
+static void aHG_mp_note_killed(u8 id) {
+    aHG_mp_killed[aHG_mp_killed_at] = id;
+    aHG_mp_killed_ms[aHG_mp_killed_at] = pc_mp_now_ms();
+    aHG_mp_killed_at = (aHG_mp_killed_at + 1) % aHG_MP_KILLED;
+}
+
+static int aHG_mp_was_killed(u8 id) {
+    int i;
+
+    for (i = 0; i < aHG_MP_KILLED; i++) {
+        if (aHG_mp_killed[i] == id && pc_mp_now_ms() - aHG_mp_killed_ms[i] < aHG_MP_KILLED_MS) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// the nearest player on the move, the others' included, is who a cockroach runs from
+static void aHG_mp_chase(ACTOR* actorx, GAME* game) {
+    ACTOR* playerx = GET_PLAYER_ACTOR_GAME_ACTOR(game);
+    void* pups[4];
+    int n = mp_puppets(pups, 4);
+    f32 best = (playerx != NULL && !F32_IS_ZERO(playerx->speed)) ? actorx->player_distance_xz : 100000.0f;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        ACTOR* p = (ACTOR*)pups[i];
+        f32 d = search_position_distanceXZ(&actorx->world.position, &p->world.position);
+
+        if ((p->world.position.x != p->last_world_position.x || p->world.position.z != p->last_world_position.z) &&
+            d < best) {
+            best = d;
+            actorx->player_distance_xz = d;
+            actorx->player_angle_y = search_position_angleY(&actorx->world.position, &p->world.position);
+            aHG_mp_pup_moving = TRUE;
+        }
+    }
+}
+
+// a copy goes where the runner's game has its cockroach, and dies at once when this player steps on it
+static void aHG_mp_copy_move(HOUSE_GOKI_ACTOR* goki, GAME* game) {
+    ACTOR* actorx = (ACTOR*)goki;
+    ACTOR* playerx = GET_PLAYER_ACTOR_GAME_ACTOR(game);
+
+    aHG_calc_timer(goki);
+    if (goki->action == aHG_ACT_DEAD) {
+        aHG_dead(actorx, game);
+        return;
+    }
+    actorx->world.position.x += (goki->mp_to.x - actorx->world.position.x) * 0.5f;
+    actorx->world.position.y += (goki->mp_to.y - actorx->world.position.y) * 0.5f;
+    actorx->world.position.z += (goki->mp_to.z - actorx->world.position.z) * 0.5f;
+    actorx->world.angle.y = goki->mp_angle;
+    actorx->shape_info.rotation.y = goki->mp_angle;
+    goki->anm_no = goki->mp_anm * 0.5f;
+    goki->alpha = goki->mp_alpha;
+    if (goki->mp_act == aHG_ACT_AWAY || goki->mp_act == aHG_ACT_MOVE) {
+        sAdo_OngenPos((u32)goki, NA_SE_GOKI_MOVE, &actorx->world.position);
+    }
+    if (goki->mp_alpha == 255 && playerx != NULL && !F32_IS_ZERO(playerx->speed) && actorx->player_distance_xz < 9.0f &&
+        actorx->world.position.y < actorx->home.position.y + 1.0f) {
+        u8 body[2];
+
+        body[0] = MP_VFX_GOKI_KILL;
+        body[1] = goki->mp_id;
+        mp_vfx_send(body, 2);
+        aHG_mp_note_killed(goki->mp_id);
+        aHG_setupAction(goki, game, aHG_ACT_DEAD);
+    }
+}
+
+// a copy takes what the runner's game last said of its cockroach
+static void aHG_mp_take(HOUSE_GOKI_ACTOR* goki, const mp_goki_t* e, GAME* game) {
+    goki->mp_to.x = e->x * 0.25f;
+    goki->mp_to.y = e->y * 0.25f;
+    goki->mp_to.z = e->z * 0.25f;
+    goki->mp_angle = e->angle;
+    goki->mp_anm = e->anm;
+    goki->mp_alpha = e->alpha;
+    if (e->act != aHG_ACT_JUMP_AWAY) {
+        goki->actor_class.home.position.y = goki->mp_to.y;
+    } else if (goki->mp_act != aHG_ACT_JUMP_AWAY) {
+        sAdo_OngenTrgStart(NA_SE_GOKI_JUMP_AWAY, &goki->actor_class.world.position);
+    }
+    goki->mp_act = e->act;
+    if (e->act == aHG_ACT_DEAD) {
+        goki->actor_class.world.position = goki->mp_to;
+        aHG_setupAction(goki, game, aHG_ACT_DEAD);
+    }
+}
+
+// copies follow the runner's cockroaches as last heard; one it no longer has goes, one dying here dies out
+static void aHG_mp_follow(GAME_PLAY* play, const mp_goki_t* heard, int n) {
+    u8 have[MP_GOKI_MAX] = { 0 };
+    ACTOR* a;
+    int i;
+
+    for (a = play->actor_info.list[ACTOR_PART_BG].actor; a != NULL; a = a->next_actor) {
+        int id = aHG_mp_copy_id(a);
+        const mp_goki_t* e = NULL;
+
+        if (id == 0) {
+            continue;
+        }
+        for (i = 0; i < n; i++) {
+            if (heard[i].id == id) {
+                e = &heard[i];
+                have[i] = TRUE;
+            }
+        }
+        if (a->ct_proc != NULL || ((HOUSE_GOKI_ACTOR*)a)->action == aHG_ACT_DEAD) {
+            continue;
+        }
+        if (e == NULL) {
+            Actor_delete(a);
+        } else {
+            aHG_mp_take((HOUSE_GOKI_ACTOR*)a, e, (GAME*)play);
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (!have[i] && heard[i].id != 0 && heard[i].act != aHG_ACT_DEAD && !aHG_mp_was_killed(heard[i].id)) {
+            Actor_info_make_actor(&play->actor_info, (GAME*)play, mAc_PROFILE_HOUSE_GOKI, heard[i].x * 0.25f,
+                                  heard[i].y * 0.25f, heard[i].z * 0.25f, 0, heard[i].angle, 0, -1, -1, -1, EMPTY_NO,
+                                  (s16)(aHG_MP_COPY_ARG - heard[i].id), -1, -1);
+        }
+    }
+}
+
+// the room's cockroaches changing hands: a game taking them over makes its copies real, one handing them over lets
+// its own go (the new runner's copies come in their place); the save's count moves as on leaving or entering
+static void aHG_mp_settle(GAME_PLAY* play, int run) {
+    ACTOR* a;
+
+    for (a = play->actor_info.list[ACTOR_PART_BG].actor; a != NULL; a = a->next_actor) {
+        HOUSE_GOKI_ACTOR* g = (HOUSE_GOKI_ACTOR*)a;
+
+        if (!aHG_mp_is(a) || (int)g->mp_copy != run) {
+            continue;
+        }
+        if (g->action == aHG_ACT_DEAD) {
+            if (!run) {
+                Actor_delete(a);
+            }
+        } else if (run && !mp_is_guest() && mCkRh_NowSceneGokiFamilyCount() <= 0) {
+            Actor_delete(a); // (more than the save's count holds: a visitor's own, which never counted)
+        } else if (run) {
+            g->mp_copy = FALSE;
+            mCkRh_CalcCanLookGokiCount(1);
+            mCkRh_MinusGokiN_NowRoom(1, Save_Get(scene_no));
+            aHG_setupAction(g, (GAME*)play, g->mp_act == aHG_ACT_WAIT ? aHG_ACT_WAIT : aHG_ACT_AWAY);
+        } else {
+            mCkRh_CalcCanLookGokiCount(-1);
+            mCkRh_PlussGokiN_NowRoom(1, Save_Get(scene_no));
+            Actor_delete(a);
+        }
+    }
+}
+
+int aHG_mp_room_ct(void* game) {
+    const mp_goki_t* heard;
+    int n;
+
+    aHG_mp_running = -1;
+    if (!mp_active() || !aHG_mp_room()) {
+        return FALSE;
+    }
+    heard = mp_goki_heard(&n);
+    if (heard == NULL && mp_goki_runner()) {
+        aHG_mp_running = TRUE;
+        return FALSE;
+    }
+    // (another player here already runs them: copies first, which the next frame takes over if this game is to)
+    aHG_mp_running = FALSE;
+    aHG_mp_follow((GAME_PLAY*)game, heard, n);
+    return TRUE;
+}
+
+int aHG_mp_follows(void) {
+    return mp_active() && aHG_mp_running == FALSE;
+}
+
+void aHG_mp_room_end(void) {
+    aHG_mp_running = -1;
+}
+
+void aHG_mp_frame(void* play_v) {
+    GAME_PLAY* play = (GAME_PLAY*)play_v;
+    const mp_goki_t* heard;
+    int n;
+
+    if (aHG_mp_running < 0) {
+        return;
+    }
+    aHG_mp_running = mp_goki_runner();
+    aHG_mp_settle(play, aHG_mp_running);
+    if (!aHG_mp_running) {
+        heard = mp_goki_heard(&n);
+        aHG_mp_follow(play, heard, n);
+    }
+}
+
+int aHG_mp_capture(void* play_v, mp_goki_t* out, int max) {
+    GAME_PLAY* play = (GAME_PLAY*)play_v;
+    int n = 0;
+    int dying;
+
+    if (aHG_mp_running != TRUE || play == NULL) {
+        return -1;
+    }
+    // (the living first: a dying one never crowds one out)
+    for (dying = 0; dying < 2; dying++) {
+        ACTOR* a;
+
+        for (a = play->actor_info.list[ACTOR_PART_BG].actor; a != NULL && n < max; a = a->next_actor) {
+            HOUSE_GOKI_ACTOR* g = (HOUSE_GOKI_ACTOR*)a;
+
+            if (!aHG_mp_is(a) || g->mp_copy || (g->action == aHG_ACT_DEAD) != dying) {
+                continue;
+            }
+            out[n].id = g->mp_id;
+            out[n].act = (u8)g->action;
+            out[n].anm = (u8)(g->anm_no * 2.0f);
+            out[n].alpha = (u8)g->alpha;
+            out[n].x = (s16)(a->world.position.x * 4.0f);
+            out[n].y = (s16)(a->world.position.y * 4.0f);
+            out[n].z = (s16)(a->world.position.z * 4.0f);
+            out[n].angle = a->shape_info.rotation.y;
+            n++;
+        }
+    }
+    return n;
+}
+
+void aHG_mp_replay(void* play_v, const unsigned char* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_v;
+    ACTOR* a;
+
+    if (len < 2 || aHG_mp_running != TRUE) {
+        return;
+    }
+    for (a = play->actor_info.list[ACTOR_PART_BG].actor; a != NULL; a = a->next_actor) {
+        HOUSE_GOKI_ACTOR* g = (HOUSE_GOKI_ACTOR*)a;
+
+        if (aHG_mp_is(a) && !g->mp_copy && g->mp_id == body[1] && g->action != aHG_ACT_DEAD) {
+            aHG_setupAction(g, (GAME*)play, aHG_ACT_DEAD);
+        }
+    }
+}
+#endif
+
 static void aHG_actor_move(ACTOR* actorx, GAME* game) {
     HOUSE_GOKI_ACTOR* goki = (HOUSE_GOKI_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    if (goki->mp_copy) {
+        aHG_mp_copy_move(goki, game);
+        return;
+    }
+#endif
     aHG_position_move(actorx);
     aHG_BGcheck(actorx);
     aHG_calc_timer(goki);
@@ -427,6 +775,12 @@ static void aHG_actor_move(ACTOR* actorx, GAME* game) {
         aHG_setupAction(goki, game, aHG_ACT_DEAD);
     }
 
+#ifdef VITA_MP
+    aHG_mp_pup_moving = FALSE;
+    if (mp_active()) {
+        aHG_mp_chase(actorx, game);
+    }
+#endif
     (*goki->act_proc)(actorx, game);
 }
 

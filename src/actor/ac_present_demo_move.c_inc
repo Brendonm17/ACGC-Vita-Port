@@ -80,6 +80,16 @@ static void aPRD_first_set(PRESENT_DEMO_ACTOR* present_demo, GAME* game) {
         int res = CLIP(npc_clip)->setupActor_proc(play, SP_NPC_PRESENT_NPC, -1, -1, -1, play->block_table.block_x, play->block_table.block_z, 6, 6);
 
         if (res == TRUE) {
+#ifdef VITA_MP
+            // (the others' copy of it wears the same look)
+            mNpc_MaskNpc_c* mask = mNpc_GetSameMaskNpc(SP_NPC_PRESENT_NPC);
+
+            if (mask != NULL) {
+                u8 body[3] = { MP_VFX_PRESENT, (u8)mask->npc_id, (u8)(mask->npc_id >> 8) };
+
+                mp_vfx_send(body, sizeof(body));
+            }
+#endif
             present_demo->world_actor = Actor_info_fgName_search(&play->actor_info, SP_NPC_PRESENT_NPC, ACTOR_PART_NPC);
             aPRD_setupAction(present_demo, game, aPRD_ACTION_PL_COME_OUT_WAIT);
         }

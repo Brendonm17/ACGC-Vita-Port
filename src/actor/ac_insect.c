@@ -9,6 +9,9 @@
 #include "m_skin_matrix.h"
 #include "sys_matrix.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static aINS_CTRL_ACTOR* aINS_ctrlActor = NULL;
 static aINS_overlay_c aINS_overlay;
@@ -77,5 +80,9 @@ static void aINS_actor_ct(ACTOR* actorx, GAME* game) {
 }
 
 static void aINS_actor_dt(ACTOR* actorx, GAME* game) {
+#ifdef VITA_MP
+    // its bugs go with it; nothing may point into it after this
+    pc_mp_cr_unbind_kind(MP_CR_INSECT);
+#endif
     aINS_free_clip_area();
 }

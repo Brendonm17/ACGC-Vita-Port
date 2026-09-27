@@ -5,6 +5,9 @@
 #include "m_house.h"
 #include "ac_mailbox.h"
 #include "m_melody.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aPMAN_ACT_ENTER,
@@ -101,7 +104,15 @@ static void aPMAN_actor_ct(ACTOR* actorx, GAME* game) {
 }
 
 static void aPMAN_actor_save(ACTOR* actorx, GAME* game) {
+#ifdef VITA_MP
+    // only the game that brought him by leaves the rest (the host's post office too, for a visitor's)
+    if (mp_npc_mail_here()) {
+        pc_mp_mail_told(MP_MAIL_ALL, 0);
+        mPO_delivery_all_address_proc();
+    }
+#else
     mPO_delivery_all_address_proc();
+#endif
     NPC_CLIP->save_proc(actorx, game);
 }
 

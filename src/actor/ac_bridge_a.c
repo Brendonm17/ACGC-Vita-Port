@@ -6,6 +6,9 @@
 #include "m_player_lib.h"
 #include "m_rcp.h"
 #include "m_debug.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aBridgeA_actor_ct(ACTOR* actorx, GAME* game);
 static void aBridgeA_actor_dt(ACTOR* actorx, GAME* game);
@@ -115,7 +118,55 @@ static void aBridgeA_actor_dt(ACTOR* actorx, GAME* game) {
     sAdo_DeletePlussBridge();
 }
 
+#ifdef VITA_MP
+// one walker on the bridge; TRUE when it keeps the bridge swinging this frame
+static int aBridge_walker_check(STRUCTURE_ACTOR* bridge, ACTOR* walker) {
+    xyz_t dist;
+    f32 run_speed = walker->speed * (0.75f + (f32)GETREG(TAKREG, 23) * 0.01f);
+    f32 dist0;
+    f32 dist1;
+
+    xyz_t_sub(&walker->world.position, &bridge->actor_class.world.position, &dist);
+    if (bridge->actor_class.npc_id == BRIDGE_A1) {
+        dist0 = dist.x - dist.z;
+        dist1 = dist.x + dist.z;
+    } else {
+        dist0 = dist.x + dist.z;
+        dist1 = dist.x - dist.z;
+    }
+    if ((dist0 > -mFI_UNIT_BASE_SIZE_F && dist0 < mFI_UNIT_BASE_SIZE_F) &&
+        (dist1 > -mFI_UNIT_BASE_SIZE_F * 2 && dist1 < mFI_UNIT_BASE_SIZE_F * 2)) {
+        if (run_speed > bridge->arg0_f) {
+            bridge->arg1_f = 1.0f + (f32)GETREG(TAKREG, 20) * 0.01f;
+            bridge->arg0_f = run_speed;
+        } else if (run_speed > 0.1f) {
+            add_calc(&bridge->arg0_f, run_speed, 0.1f + (f32)GETREG(TAKREG, 22) * 0.01f, 0.1f, 0.01f);
+            add_calc(&bridge->arg1_f, 1.0f, 0.1f + (f32)GETREG(TAKREG, 24) * 0.01f, 0.1f, 0.01f);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+#endif
+
 static f32 aBridge_player_check(STRUCTURE_ACTOR* bridge, GAME_PLAY* play) {
+#ifdef VITA_MP
+    // anyone crossing sets it swinging: this screen's player and the other players alike
+    void* walkers[1 + MP_MAX_PEERS];
+    int n = 1 + mp_puppets(walkers + 1, MP_MAX_PEERS);
+    int hold = FALSE;
+    int i;
+
+    walkers[0] = GET_PLAYER_ACTOR(play);
+    for (i = 0; i < n; i++) {
+        hold |= aBridge_walker_check(bridge, (ACTOR*)walkers[i]);
+    }
+    if (!hold) {
+        add_calc(&bridge->arg1_f, 0.0f, (0.08f + (f32)GETREG(TAKREG, 21) * 0.01f) * (0.4f + bridge->arg0_f * 0.1f),
+                 0.1f, 0.01f);
+    }
+    return 0.0f;
+#else
     PLAYER_ACTOR* player = GET_PLAYER_ACTOR(play);
     xyz_t player_pos = player->actor_class.world.position;
     xyz_t bridge_pos = bridge->actor_class.world.position;
@@ -147,6 +198,7 @@ static f32 aBridge_player_check(STRUCTURE_ACTOR* bridge, GAME_PLAY* play) {
 
     add_calc(&bridge->arg1_f, 0.0f, (0.08f + (f32)GETREG(TAKREG, 21) * 0.01f) * (0.4f + bridge->arg0_f * 0.1f), 0.1f,
              0.01f);
+#endif
 }
 
 static void aBridgeA_actor_move(ACTOR* actorx, GAME* game) {

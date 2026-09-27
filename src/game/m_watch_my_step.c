@@ -18,6 +18,9 @@
 #include "audio.h"
 #include "m_scene_table.h"
 #include "m_private.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 typedef struct watch_my_step_s {
     f32 pos_x;
@@ -82,6 +85,12 @@ extern void watch_my_step_move(GAME_PLAY* play) {
 
     if (mEv_IsNotTitleDemo()) {
         window_item = mPlib_Get_itemNo_forWindow();
+#ifdef VITA_MP
+        // (the player's chat balloon is up where this one would be)
+        if (pc_mp_chat_self_showing()) {
+            window_item = EMPTY_NO;
+        }
+#endif
 
         switch (S_watch_my_step.mode) {
             case 0: {

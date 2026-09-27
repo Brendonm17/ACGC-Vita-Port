@@ -1,0 +1,819 @@
+// Multiplayer dialogue ("Friends' Towns"). Format follows tools/msg_tool.py's
+// decoded text; {m:NAME} / {c:NAME} resolve to message / choice ids (names or 0xNNNN).
+// Regenerate the header after editing: python pc/tools/gen_mp_msgs.py
+
+// ---------------------------------------------------------------- choices
+
+[[VCHOICE VISIT]]
+Visit a friend.
+
+[[VCHOICE HAVE_VISITORS]]
+Have visitors.
+
+[[VCHOICE BESIDE]]
+Right beside me!
+
+[[VCHOICE WIFI]]
+On my Wi-Fi.
+
+[[VCHOICE FAR]]
+Far away.
+
+[[VCHOICE BY_CARD]]
+By memory card.
+
+[[VCHOICE TRY_WIFI]]
+Try my Wi-Fi.
+
+[[VCHOICE NEW_TICKET]]
+New ticket.
+
+[[VCHOICE NEVERMIND]]
+Never mind.
+
+[[VCHOICE LOOK_AGAIN]]
+Look again.
+
+[[VCHOICE USE_TICKET]]
+Use a ticket.
+
+[[VCHOICE ENTER_TICKET]]
+Enter ticket.
+
+[[VCHOICE TRY_AGAIN]]
+Try again.
+
+[[VCHOICE MORE]]
+More stations...
+
+[[VCHOICE WHO]]
+Who's here?
+
+[[VCHOICE MY_TICKET]]
+My ticket number
+
+[[VCHOICE CLOSE_LINE]]
+Close the line.
+
+[[VCHOICE KEEP_OPEN]]
+Keep it open.
+
+[[VCHOICE KEEP_WAITING]]
+Keep waiting.
+
+[[VCHOICE GIVE_UP]]
+Forget it.
+
+[[VCHOICE LET_IN]]
+Let them in!
+
+[[VCHOICE NOT_NOW]]
+Not right now.
+
+[[VCHOICE SLOT0]]
+<<STR_FREE10>>
+
+[[VCHOICE SLOT1]]
+<<STR_FREE11>>
+
+[[VCHOICE SLOT2]]
+<<STR_FREE12>>
+
+// ---------------------------------------------------------------- resident menu
+
+// replaces 0x0943 when Porter can offer friends' towns
+[[VMSG P_RES_MENU]]
+Are you planning on going
+on a trip,<<PAUSE [04]>> <<STR_PLAYERNAME>>?<<SETSELSTR2 [{c:0x0062} {c:0x0063}]>><<SELNOB>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_TRIP_MENU}]>><<SETNEXTMSG1 [{m:0x0944}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_TRIP_MENU]]
+A trip?<<PAUSE [06]>> How exciting,<<PAUSE [04]>> eek!<<BTN>>
+<<MSGCLEAR>>Are you off to see a
+friend,<<PAUSE [04]>> or are friends
+riding in to see you?<<SETSELSTR4 [{c:VISIT} {c:HAVE_VISITORS} {c:BY_CARD} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_WHERE_VISIT}]>><<SETNEXTMSG1 [{m:P_WHERE_INVITE}]>><<SETNEXTMSG2 [{m:0x094A}]>><<SETNEXTMSG3 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_WHERE_VISIT]]
+Wonderful!<<PAUSE [06]>> And where is your
+friend's town,<<PAUSE [04]>> eek?<<SETSELSTR4 [{c:BESIDE} {c:WIFI} {c:FAR} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_ADHOC_CALL}]>><<SETNEXTMSG1 [{m:P_SCAN_WAIT}]>><<SETNEXTMSG2 [{m:P_TICKET_ASK}]>><<SETNEXTMSG3 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_WHERE_INVITE]]
+How lovely!<<PAUSE [06]>> And where will
+your friends be riding in
+from,<<PAUSE [04]>> eek?<<SETSELSTR4 [{c:BESIDE} {c:WIFI} {c:FAR} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_ADHOC_CALL}]>><<SETNEXTMSG1 [{m:P_HOST_OPENING}]>><<SETNEXTMSG2 [{m:P_HOST_OPENING}]>><<SETNEXTMSG3 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_NEVERMIND]]
+Oh,<<PAUSE [04]>> all right.<<PAUSE [06]>> Come see me
+whenever you're ready,
+eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+// ---------------------------------------------------------------- visiting
+
+// the system's local-wireless dialog opens over this page
+[[VMSG P_ADHOC_CALL]]
+Right beside you?<<PAUSE [06]>> Then I'll
+signal the station next
+door directly!<<BTN>>
+<<MSGCLEAR>>Your Vita will ask to start
+local wireless.<<PAUSE [06]>> Your friend
+should talk to their Porter
+too,<<PAUSE [04]>> eek!<<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_SCAN_WAIT]]
+Let me check the timetable
+for open stations<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_LIST_1]]
+Here's what I found!<<PAUSE [06]>>
+Which station would you
+like to visit?<<SETSELSTR2 [{c:SLOT0} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_LIST_2]]
+Here's what I found!<<PAUSE [06]>>
+Which station would you
+like to visit?<<SETSELSTR3 [{c:SLOT0} {c:SLOT1} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_LIST_3]]
+Here's what I found!<<PAUSE [06]>>
+Which station would you
+like to visit?<<SETSELSTR4 [{c:SLOT0} {c:SLOT1} {c:SLOT2} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG3 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+// more than one page: every page offers the next
+[[VMSG P_LIST_1M]]
+Here's what I found!<<PAUSE [06]>>
+Which station would you
+like to visit?<<SETSELSTR3 [{c:SLOT0} {c:MORE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_LIST_2M]]
+Here's what I found!<<PAUSE [06]>>
+Which station would you
+like to visit?<<SETSELSTR4 [{c:SLOT0} {c:SLOT1} {c:MORE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG3 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_LIST_3M]]
+Here's what I found!<<PAUSE [06]>>
+Which station would you
+like to visit?<<SETSELSTR5 [{c:SLOT0} {c:SLOT1} {c:SLOT2} {c:MORE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG4 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_SCAN_NONE]]
+Hmm<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> I can't find any
+open stations nearby.<<BTN>>
+<<MSGCLEAR>>Has your friend asked their
+Porter to open the line?<<PAUSE [06]>>
+Or are they on your Wi-Fi?<<SETSELSTR3 [{c:LOOK_AGAIN} {c:TRY_WIFI} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_SCAN_WAIT}]>><<SETNEXTMSG1 [{m:P_SCAN_WAIT}]>><<SETNEXTMSG2 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_SCAN_NONE_WIFI]]
+Hmm<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> I can't find any
+open stations on your Wi-Fi.<<BTN>>
+<<MSGCLEAR>>Has your friend asked their
+Porter to open the line?<<PAUSE [06]>>
+You could also try their
+ticket number,<<PAUSE [04]>> eek.<<SETSELSTR3 [{c:LOOK_AGAIN} {c:USE_TICKET} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_SCAN_WAIT}]>><<SETNEXTMSG1 [{m:P_TICKET_OPEN}]>><<SETNEXTMSG2 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_TICKET_ASK]]
+Far away?<<PAUSE [06]>> Then you'll need
+a ticket number from your
+friend's Porter.<<BTN>>
+<<MSGCLEAR>>Do you have one,<<PAUSE [04]>> eek?<<SETSELSTR2 [{c:ENTER_TICKET} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_TICKET_OPEN}]>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+// the destination entry box opens over this page
+[[VMSG P_TICKET_OPEN]]
+Please tell me the ticket
+number,<<PAUSE [04]>> eek!<<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_TICKET_BAD]]
+Hmm?<<PAUSE [06]>> <<STR_FREE15>>?<<BTN>>
+<<MSGCLEAR>>That doesn't look like a
+real ticket number,<<PAUSE [04]>> eek.
+Could you check it again?<<SETSELSTR2 [{c:TRY_AGAIN} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_TICKET_OPEN}]>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_CALLING]]
+Let me ring <<STR_FREE16>> station
+and ask if there's room<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_CALL_STILL]]
+Still no answer from
+<<STR_FREE16>>,<<PAUSE [04]>> eek.<<PAUSE [06]>> Shall we
+keep waiting?<<SETSELSTR2 [{c:KEEP_WAITING} {c:GIVE_UP}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_CALLING}]>><<SETNEXTMSG1 [{m:P_CHANGED_MIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_WELCOME]]
+Good news,<<PAUSE [04]>> eek!<<PAUSE [06]>> <<STR_FREE16>>
+station says you're welcome!<<BTN>>
+<<MSGCLEAR>><<STR_FREE17>> is expecting you.<<PAUSE [06]>>
+Shall I get you ready for
+departure?<<SETSELSTR2 [{c:0x0003} {c:0x0004}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_DEPART_A}]>><<SETNEXTMSG1 [{m:P_CHANGED_MIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_WELCOME_OTHERS]]
+Good news,<<PAUSE [04]>> eek!<<PAUSE [06]>> <<STR_FREE16>>
+station says you're welcome!<<BTN>>
+<<MSGCLEAR>><<STR_FREE17>> is expecting you,<<PAUSE [04]>>
+and <<STR_FREE18>> other passengers
+are already there!<<PAUSE [06]>> Shall I get
+you ready for departure?<<SETSELSTR2 [{c:0x0003} {c:0x0004}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_DEPART_A}]>><<SETNEXTMSG1 [{m:P_CHANGED_MIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+// network copies of 0x094A / 0x094B / 0x094F, chained to the network save
+[[VMSG P_DEPART_A]]
+Eek, EEK!<<PAUSE [04]>> You must be very
+excited!<<BTN>>
+<<MSGCLEAR>>Please wait here. It'll just be
+a moment<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>><<SETFORCEMSG [{m:P_DEPART_B}]>><<BTN>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_DEPART_B]]
+The next train should be
+arriving<<PAUSE [02]>> any minute now.<<BTN>>
+So, let's get you ready
+for departure, eek!<<SETFORCEMSG [{m:P_NET_SAVE}]>><<BTN>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_NET_SAVE]]
+OK,<<PAUSE [04]>> <<STR_PLAYERNAME>>.<<PAUSE [06]>> I'll write
+up your <<COLORCHARS [E1 1E D7 0D]>>travel papers
+and save <<COLORCHARS [E1 1E D7 09]>>town data for
+<<STR_COUNTRYNAME>>.<<PAUSE [06]>> Please wait.<<PAUSE [1E]>>
+<<MSGCLEAR>><<TEXTCOLOR [C3 5F 00]>>I'm saving your data now.<<PAUSE [08]>>
+<<TEXTCOLOR [C3 5F 00]>>Do not turn the power off!<<SNDTRGSYS [04]>><<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_NET_SAVED]]
+Sorry to keep you waiting.<<PAUSE [08]>>
+That takes care of all your
+predeparture preparations!<<BTN>>
+<<MSGCLEAR>>If the line to <<STR_FREE16>>
+is ever cut,<<PAUSE [04]>> don't worry.<<PAUSE [06]>>
+I'll make sure you get home
+safe and sound,<<PAUSE [04]>> eek eek!
+<<MSGEND>>
+
+// the train pulls in as the papers finish (0x0964's moment)
+[[VMSG P_NET_SAVED_TRAIN]]
+Thank you for your patience.<<PAUSE [08]>>
+Your predeparture
+preparations<<PAUSE [04]>> are
+now complete!<<BTN>>
+<<MSGCLEAR>>And just in time!<<PAUSE [04]>> It looks
+like the train has just
+pulled in!<<BTN>>
+<<MSGCLEAR>>If the line to <<STR_FREE16>>
+is ever cut,<<PAUSE [04]>> don't worry.<<PAUSE [06]>>
+I'll make sure you get home
+safe and sound,<<PAUSE [04]>> eek eek!
+<<MSGEND>>
+
+// a network visitor heading home; FREE19 is their home town
+[[VMSG P_RETURN_SAVE]]
+Heading home to <<STR_FREE19>>?<<PAUSE [06]>>
+I'll write up your <<COLORCHARS [E1 1E D7 0D]>>travel papers
+right away.<<PAUSE [06]>> Please wait.<<PAUSE [1E]>>
+<<MSGCLEAR>><<TEXTCOLOR [C3 5F 00]>>I'm saving your data now.<<PAUSE [08]>>
+<<TEXTCOLOR [C3 5F 00]>>Do not turn the power off!<<SNDTRGSYS [04]>><<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_RETURN_SAVED]]
+Sorry to keep you waiting.<<PAUSE [08]>>
+Your papers are all in
+order!<<BTN>>
+<<MSGCLEAR>>Please give my regards to
+everyone in <<STR_FREE19>>,<<PAUSE [04]>>
+eek eek!
+<<MSGEND>>
+
+[[VMSG P_RETURN_SAVED_TRAIN]]
+Thank you for your patience.<<PAUSE [08]>>
+Your papers are all in
+order!<<BTN>>
+<<MSGCLEAR>>And just in time!<<PAUSE [04]>> It looks
+like the train has just
+pulled in!<<PAUSE [06]>> Say hello to
+<<STR_FREE19>> for me,<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_CHANGED_MIND]]
+Oh,<<PAUSE [04]>> all right.<<PAUSE [06]>> I'll let
+<<STR_FREE16>> know you've changed
+your mind.<<PAUSE [06]>> Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_LINE_CUT_EARLY]]
+Eek EEEK!<<PAUSE [06]>> The line to
+<<STR_FREE16>> was cut before I
+could finish your papers!<<BTN>>
+<<MSGCLEAR>>Nothing was lost,<<PAUSE [04]>> so let's
+try again later,<<PAUSE [04]>> eek eek!
+<<MSGEND>>
+
+// ---------------------------------------------------------------- refusals
+
+[[VMSG P_NO_WIFI]]
+<<DEMONPC0 [00 00 17]>>Eek!<<PAUSE [06]>> Your Vita isn't
+connected to any Wi-Fi
+right now.<<BTN>><<DEMONPC0 [00 00 FF]>>
+<<MSGCLEAR>>Please connect in the Vita's
+Settings,<<PAUSE [04]>> then come talk
+to me again.<<PAUSE [06]>> Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_NO_WIFI_V]]
+<<DEMONPC0 [00 00 17]>>Eek!<<PAUSE [06]>> Your Vita isn't
+connected to any Wi-Fi
+right now.<<BTN>><<DEMONPC0 [00 00 FF]>>
+<<MSGCLEAR>>But if your friend is right
+beside you,<<PAUSE [04]>> I can still
+signal their station!<<SETSELSTR2 [{c:BESIDE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_ADHOC_CALL}]>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_NO_WIFI_H]]
+<<DEMONPC0 [00 00 17]>>Eek!<<PAUSE [06]>> Your Vita isn't
+connected to any Wi-Fi
+right now.<<BTN>><<DEMONPC0 [00 00 FF]>>
+<<MSGCLEAR>>But if your friends are
+right beside you,<<PAUSE [04]>> I can
+still open the line to them!<<SETSELSTR2 [{c:BESIDE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_ADHOC_CALL}]>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_WIFI_WAIT]]
+<<DEMONPC0 [00 00 17]>>Eek!<<PAUSE [06]>> Your Vita is still
+finding its Wi-Fi again
+after playing up close.<<BTN>><<DEMONPC0 [00 00 FF]>>
+<<MSGCLEAR>>Give it a few seconds,<<PAUSE [04]>>
+then come talk to me
+again.<<PAUSE [06]>> Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_ADHOC_CANCEL]]
+Oh!<<PAUSE [06]>> Not today,<<PAUSE [04]>> then?<<PAUSE [06]>> That's
+quite all right.<<PAUSE [06]>> Come see me
+whenever you're ready,
+eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_NO_ANSWER]]
+Hmm<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> No one's answering
+at that station.<<BTN>>
+<<MSGCLEAR>>Is your friend's line open,
+and is the ticket number
+right,<<PAUSE [04]>> eek?<<SETSELSTR3 [{c:TRY_AGAIN} {c:NEW_TICKET} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_CALLING}]>><<SETNEXTMSG1 [{m:P_TICKET_OPEN}]>><<SETNEXTMSG2 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_NO_ANSWER_SCAN]]
+Hmm<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> No one's answering
+at <<STR_FREE16>> station.<<BTN>>
+<<MSGCLEAR>>Maybe their line just
+closed,<<PAUSE [04]>> eek?<<SETSELSTR2 [{c:LOOK_AGAIN} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_SCAN_WAIT}]>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_NO_ANSWER_HOME]]
+Hmm<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> Hold on!<<PAUSE [06]>> That
+ticket is for a station
+in your very own home!<<BTN>>
+<<MSGCLEAR>>Try "On my Wi-Fi." instead,
+eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_REFUSE_FULL]]
+Oh dear!<<PAUSE [06]>> The platform at
+<<STR_FREE16>> is packed.<<PAUSE [06]>> There's
+no room for more passengers
+right now.<<BTN>>
+<<MSGCLEAR>>Maybe try again a little
+later,<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_REFUSE_VERSION]]
+Eek!<<PAUSE [06]>> <<STR_FREE16>> station runs
+on a different timetable
+than ours!<<BTN>>
+<<MSGCLEAR>>You and your friend need
+the same version of the
+game to visit each other.
+<<MSGEND>>
+
+[[VMSG P_REFUSE_MODS]]
+Eek!<<PAUSE [06]>> <<STR_FREE16>> station runs
+different trains than ours!<<BTN>>
+<<MSGCLEAR>>You and your friend need
+the same mods switched on
+to visit each other.
+<<MSGEND>>
+
+[[VMSG P_REFUSE_SAME_TOWN]]
+Eek?<<PAUSE [06]>> But that's <<STR_COUNTRYNAME>>!<<BTN>>
+<<MSGCLEAR>>That station is your very
+own town,<<PAUSE [04]>> <<STR_PLAYERNAME>>!<<PAUSE [06]>>
+You're already home,
+eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_REFUSE_RESIDENT]]
+Hmm?<<PAUSE [06]>> According to my list,
+you already live in
+<<STR_FREE16>>,<<PAUSE [04]>> <<STR_PLAYERNAME>>!<<BTN>>
+<<MSGCLEAR>>I can't sell you a visitor's
+ticket to your own home,
+eek!
+<<MSGEND>>
+
+[[VMSG P_REFUSE_DUPLICATE]]
+Eek!<<PAUSE [06]>> Someone just like you
+is already visiting
+<<STR_FREE16>>!<<BTN>>
+<<MSGCLEAR>>I can't let two of you on
+the same platform.<<PAUSE [06]>> That
+would be very confusing!
+<<MSGEND>>
+
+[[VMSG P_REFUSE_CLOSED]]
+Oh!<<PAUSE [06]>> It seems <<STR_FREE16>> has
+just closed its line.<<PAUSE [06]>>
+Better luck next time,
+eek!
+<<MSGEND>>
+
+[[VMSG P_REFUSE_DENIED]]
+Oh<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> <<STR_FREE16>> station
+says they can't take any
+visitors right now.<<PAUSE [06]>> Maybe
+another time!
+<<MSGEND>>
+
+// ---------------------------------------------------------------- hosting
+
+[[VMSG P_HOST_ADHOC_CALL]]
+Right beside you?<<PAUSE [06]>> Then I'll
+open the line to the
+stations next door!<<BTN>>
+<<MSGCLEAR>>Your Vita will ask to start
+local wireless.<<PAUSE [06]>> Your friends
+should talk to their Porter
+too,<<PAUSE [04]>> eek!<<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_OPENING]]
+All right!<<PAUSE [06]>> I'll open the line
+to <<STR_COUNTRYNAME>>.<<PAUSE [06]>> Please
+wait just a moment<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_OPEN_LOCAL]]
+The line is open!<<PAUSE [06]>> Friends
+nearby can now ride the
+train to <<STR_COUNTRYNAME>>.<<BTN>>
+<<MSGCLEAR>>Come see me whenever you
+want to close the line.<<PAUSE [06]>>
+Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_OPEN_WIFI]]
+The line is open!<<PAUSE [06]>> Friends
+on your Wi-Fi can now ride
+the train to <<STR_COUNTRYNAME>>.<<BTN>>
+<<MSGCLEAR>>If they can't find your
+station,<<PAUSE [04]>> give them this
+ticket number:<<PAUSE [06]>>
+<<STR_FREE15>><<BTN>>
+<<MSGCLEAR>>Come see me whenever you
+want to close the line.<<PAUSE [06]>>
+Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_OPEN_FAR]]
+Good news!<<PAUSE [06]>> The line to
+<<STR_COUNTRYNAME>> is open to towns
+far away!<<BTN>>
+<<MSGCLEAR>>Your ticket number is
+<<STR_FREE15>>.<<PAUSE [06]>> Give it to your
+friends so they can ride
+straight here!<<BTN>>
+<<MSGCLEAR>>I'll let you know whenever
+a train asks to stop here,
+eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_NOPORTMAP]]
+Hmm<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> I couldn't open the
+line all the way by myself.<<BTN>>
+<<MSGCLEAR>>Trains from far away might
+not get through unless your
+router lets them in on
+port <<STR_FREE18>>.<<BTN>>
+<<MSGCLEAR>>Ask whoever set up your
+Wi-Fi to forward that port
+to this Vita.<<BTN>>
+<<MSGCLEAR>>Your ticket number is
+<<STR_FREE15>>.<<PAUSE [06]>> Shall I keep
+the line open anyway?<<SETSELSTR2 [{c:KEEP_OPEN} {c:CLOSE_LINE}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_STAYS_OPEN}]>><<SETNEXTMSG1 [{m:P_HOST_CLOSED}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_CGNAT]]
+Oh dear<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [06]>> Your line runs
+through another station
+before it reaches the
+outside.<<BTN>>
+<<MSGCLEAR>>Trains from far away won't
+find their way here.<<PAUSE [06]>> But I
+can open the line to
+friends nearby instead!<<SETSELSTR3 [{c:BESIDE} {c:WIFI} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_ADHOC_CALL}]>><<SETNEXTMSG1 [{m:P_HOST_OPENING}]>><<SETNEXTMSG2 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_NOBIND]]
+Eek!<<PAUSE [06]>> Something's blocking
+the line.<<PAUSE [06]>> Shall I try
+again?<<SETSELSTR2 [{c:TRY_AGAIN} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_OPENING}]>><<SETNEXTMSG1 [{m:P_NEVERMIND}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+// the line's timetable; T: its ticket can be shown, WHO: two or more visitors to list
+[[VMSG P_HS_0]]
+The line to <<STR_COUNTRYNAME>> is
+open,<<PAUSE [04]>> eek!<<PAUSE [06]>> No passengers
+yet.<<SETSELSTR2 [{c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_0T]]
+The line to <<STR_COUNTRYNAME>> is
+open,<<PAUSE [04]>> eek!<<PAUSE [06]>> No passengers
+yet.<<SETSELSTR3 [{c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_W1]]
+Eek!<<PAUSE [06]>> A train from
+<<STR_FREE16>> is on its way to
+<<STR_COUNTRYNAME>>!<<SETSELSTR2 [{c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_W1T]]
+Eek!<<PAUSE [06]>> A train from
+<<STR_FREE16>> is on its way to
+<<STR_COUNTRYNAME>>!<<SETSELSTR3 [{c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_WN]]
+Eek!<<PAUSE [06]>> <<STR_FREE18>> trains are on
+their way to <<STR_COUNTRYNAME>>!<<SETSELSTR2 [{c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_WNT]]
+Eek!<<PAUSE [06]>> <<STR_FREE18>> trains are on
+their way to <<STR_COUNTRYNAME>>!<<SETSELSTR3 [{c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_A1]]
+<<STR_FREE17>> from
+<<STR_FREE16>> is visiting
+<<STR_COUNTRYNAME>>,<<PAUSE [04]>> eek!<<SETSELSTR2 [{c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_A1T]]
+<<STR_FREE17>> from
+<<STR_FREE16>> is visiting
+<<STR_COUNTRYNAME>>,<<PAUSE [04]>> eek!<<SETSELSTR3 [{c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_A1W]]
+<<STR_FREE17>> from
+<<STR_FREE16>> is here,<<PAUSE [04]>> and
+another train is on its
+way,<<PAUSE [04]>> eek!<<SETSELSTR2 [{c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_A1WT]]
+<<STR_FREE17>> from
+<<STR_FREE16>> is here,<<PAUSE [04]>> and
+another train is on its
+way,<<PAUSE [04]>> eek!<<SETSELSTR3 [{c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_AN]]
+<<STR_FREE18>> visitors are in
+<<STR_COUNTRYNAME>> right now,<<PAUSE [04]>> eek!<<SETSELSTR3 [{c:WHO} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_ANT]]
+<<STR_FREE18>> visitors are in
+<<STR_COUNTRYNAME>> right now,<<PAUSE [04]>> eek!<<SETSELSTR4 [{c:WHO} {c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG3 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_ANW]]
+<<STR_FREE18>> visitors are here,<<PAUSE [04]>>
+and another train is on
+its way,<<PAUSE [04]>> eek!<<SETSELSTR3 [{c:WHO} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG2 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HS_ANWT]]
+<<STR_FREE18>> visitors are here,<<PAUSE [04]>>
+and another train is on
+its way,<<PAUSE [04]>> eek!<<SETSELSTR4 [{c:WHO} {c:MY_TICKET} {c:CLOSE_LINE} {c:NEVERMIND}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG3 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+// a visitor's train home just left; the timetable follows
+[[VMSG P_HOST_THANKS]]
+Oh!<<PAUSE [06]>> The train carrying
+<<STR_FREE17>> home left safe and
+sound.<<BTN>>
+<<MSGCLEAR>>They asked me to thank you
+for having them,<<PAUSE [04]>> eek<<PAUSE [04]>> eek!<<BTN>><<DEMONPC0 [09 00 01]>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_WHO_1]]
+Let me check the passenger
+list<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<BTN>>
+<<MSGCLEAR>>Visiting now:
+<<STR_FREE10>>
+<<MSGEND>>
+
+[[VMSG P_HOST_WHO_2]]
+Let me check the passenger
+list<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<BTN>>
+<<MSGCLEAR>>Visiting now:
+<<STR_FREE10>>
+<<STR_FREE11>>
+<<MSGEND>>
+
+[[VMSG P_HOST_WHO_3]]
+Let me check the passenger
+list<<PAUSE [02]>>.<<PAUSE [02]>>.<<PAUSE [02]>>.<<BTN>>
+<<MSGCLEAR>>Visiting now:
+<<STR_FREE10>>
+<<STR_FREE11>>
+<<STR_FREE12>>
+<<MSGEND>>
+
+[[VMSG P_HOST_TICKET]]
+Your ticket number is
+<<STR_FREE15>>,<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_CLOSE_CONFIRM]]
+There are still visitors in
+<<STR_COUNTRYNAME>>!<<BTN>>
+<<MSGCLEAR>>If I close the line,<<PAUSE [04]>> they'll
+have to head home on the
+last train.<<PAUSE [06]>> Close it anyway?<<SETSELSTR2 [{c:0x0003} {c:0x0004}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_CLOSING}]>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_CLOSE_CONFIRM_IN]]
+A train is on its way to
+<<STR_COUNTRYNAME>> right now!<<BTN>>
+<<MSGCLEAR>>If I close the line,<<PAUSE [04]>> it'll
+have to turn back.<<PAUSE [06]>> Close
+it anyway?<<SETSELSTR2 [{c:0x0003} {c:0x0004}]>><<BTN>><<OPENCHOICE>><<SETNEXTMSG0 [{m:P_HOST_CLOSING}]>><<SETNEXTMSG1 [{m:P_HOST_STAYS_OPEN}]>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG P_HOST_CLOSING]]
+All right.<<PAUSE [06]>> I'll announce the
+last train home.<<PAUSE [06]>>
+Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_CLOSED]]
+The line is now closed.<<PAUSE [06]>>
+Thank you for opening
+<<STR_COUNTRYNAME>> to visitors,
+eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_CLOSING_WAIT]]
+The last train home is
+already on its way,<<PAUSE [04]>> eek.<<BTN>>
+<<MSGCLEAR>>I'll close the line once
+every visitor has headed
+home.<<PAUSE [06]>> Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG P_HOST_STAYS_OPEN]]
+Then I'll keep the line
+open.<<PAUSE [06]>> Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+// ---------------------------------------------------------------- announcements
+// station PA in the conductor's voice (pa), spoken by the notice actor
+
+[[VMSG N_ARRIVED pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>><<STR_FREE17>> from <<STR_FREE16>>
+<<TEXTCOLOR [28 3C 28]>>has just arrived at
+<<TEXTCOLOR [28 3C 28]>><<STR_COUNTRYNAME>> station!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_REQUEST pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>><<STR_FREE17>> from <<STR_FREE16>>
+<<TEXTCOLOR [28 3C 28]>>is asking to stop at
+<<TEXTCOLOR [28 3C 28]>><<STR_COUNTRYNAME>> station.<<BTN>>
+<<MSGCLEAR>><<TEXTCOLOR [28 3C 28]>>Shall I let them in?<<SETSELSTR2 [{c:LET_IN} {c:NOT_NOW}]>><<BTN>><<OPENCHOICE>><<FORCENEXT>>
+<<MSGCONTINUE>>
+
+[[VMSG N_LEFT pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>><<STR_FREE17>> is heading home
+<<TEXTCOLOR [28 3C 28]>>to <<STR_FREE16>>.<<PAUSE [06]>> Thank you
+<<TEXTCOLOR [28 3C 28]>>for visiting!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_GUEST_LOST pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>We've lost contact with
+<<TEXTCOLOR [28 3C 28]>><<STR_FREE17>>'s train.<<PAUSE [06]>> We hope
+<<TEXTCOLOR [28 3C 28]>>to see them again soon!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_LAST_TRAIN pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>The line to <<STR_COUNTRYNAME>> is
+<<TEXTCOLOR [28 3C 28]>>closing.<<PAUSE [06]>> The last train
+<<TEXTCOLOR [28 3C 28]>>home leaves in one minute!<<BTN>>
+<<MSGCLEAR>><<TEXTCOLOR [28 3C 28]>>Visitors,<<PAUSE [04]>> please make your
+<<TEXTCOLOR [28 3C 28]>>way to the station.<<PAUSE [06]>>
+<<TEXTCOLOR [28 3C 28]>>Eek<<PAUSE [04]>> eek!
+<<MSGEND>>
+
+[[VMSG N_LINE_CLOSED pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>The line to <<STR_COUNTRYNAME>> is
+<<TEXTCOLOR [28 3C 28]>>now closed.<<BTN>>
+<<MSGCLEAR>><<TEXTCOLOR [28 3C 28]>>Your train home is
+<<TEXTCOLOR [28 3C 28]>>boarding now.<<PAUSE [06]>> Thank you
+<<TEXTCOLOR [28 3C 28]>>for visiting!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_HOST_CUT pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>We've lost contact with
+<<TEXTCOLOR [28 3C 28]>><<STR_COUNTRYNAME>> station!<<BTN>>
+<<MSGCLEAR>><<TEXTCOLOR [28 3C 28]>>Don't worry,<<PAUSE [04]>> a train is
+<<TEXTCOLOR [28 3C 28]>>standing by to take you
+<<TEXTCOLOR [28 3C 28]>>home right away!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_LINE_TROUBLE pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>We're having trouble with
+<<TEXTCOLOR [28 3C 28]>>the line to <<STR_COUNTRYNAME>>
+<<TEXTCOLOR [28 3C 28]>>station.<<BTN>>
+<<MSGCLEAR>><<TEXTCOLOR [28 3C 28]>>Please stand by while
+<<TEXTCOLOR [28 3C 28]>>we try to get it back!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_LINE_BACK pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>The line to <<STR_COUNTRYNAME>>
+<<TEXTCOLOR [28 3C 28]>>station is working again.<<PAUSE [06]>>
+<<TEXTCOLOR [28 3C 28]>>Thank you for waiting!<<PAUSE [0A]>>
+<<MSGEND>>
+
+[[VMSG N_RESTORED pa]]
+<<TEXTCOLOR [28 3C 28]>>Attention,<<PAUSE [04]>> please!<<PAUSE [08]>>
+<<TEXTCOLOR [28 3C 28]>>Your last trip was cut
+<<TEXTCOLOR [28 3C 28]>>short,<<PAUSE [04]>> but everything you
+<<TEXTCOLOR [28 3C 28]>>carried made it home safe!<<PAUSE [0A]>>
+<<MSGEND>>
+
+// ---------------------------------------------------------------- the host's switches
+// a visitor's own thoughts where the host keeps them from something
+
+[[VMSG V_ITEM_KEEP]]
+<<TEXTCOLOR [1E 3C 1E]>>I'd like to pick this up,<<PAUSE [06]>>
+<<TEXTCOLOR [1E 3C 1E]>>but this isn't my town.
+<<TEXTCOLOR [1E 3C 1E]>>I'd better leave it be.
+<<MSGEND>>
+
+[[VMSG V_TUNE_KEEP]]
+<<TEXTCOLOR [1E 3C 1E]>>That's this town's tune.<<PAUSE [06]>>
+<<TEXTCOLOR [1E 3C 1E]>>It isn't mine to change,
+<<TEXTCOLOR [1E 3C 1E]>>so I'll leave it be.
+<<MSGEND>>
+
+// Kapp'n: an island the town has never been to is its own folk's to name first
+[[VMSG V_ISLAND_UNNAMED]]
+Ahoy, landlubber!<<PAUSE [06]>>
+That island out there ain't
+been named yet, and namin' it
+is for this town's own folk.<<BTN>>
+<<MSGCLEAR>>Once one of 'em sails out
+and names it, I'll row ye
+over, matey!
+<<MSGEND>>
+
+[[VMSG V_FLAG_KEEP]]
+<<TEXTCOLOR [FF FF AF]>>It's not my flag to change.<<PAUSE [06]>>
+<<TEXTCOLOR [FF FF AF]>>I'd better leave it be.
+<<MSGEND>>

@@ -30,6 +30,15 @@
 #ifdef VITA_TROPHIES
 #include "vita_trophy.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+// a visitor may put up a blank sign when the host lets visitors do what residents do
+#define mTG_SIGN_REFUSED() (mLd_PlayerManKindCheck() && !mp_visitor_rights())
+// ...and leaves nothing on the town's ground when the host says so
+#define mTG_ITEMS_REFUSED() (Common_Get(field_type) == mFI_FIELDTYPE2_FG && !mp_visitor_may(MP_RULE_ITEMS))
+#else
+#define mTG_SIGN_REFUSED() (mLd_PlayerManKindCheck())
+#endif
 
 static void mTG_mark_main_CLR(Submenu* submenu, const mSM_MenuInfo_c* menu_info);
 
@@ -2856,7 +2865,14 @@ static int mTG_common_throw_put_field(GAME_PLAY* play, mActor_name_t item, xyz_t
 
         if (mFI_Wpos2UtNum(&ux, &uz, *pos_p) && Common_Get(clip).bg_item_clip != NULL &&
             Common_Get(clip).bg_item_clip->player_drop_entry_proc != NULL) {
+#ifdef VITA_MP
+            // dropped from the pockets: the other screens see it fall too
+            pc_mp_fx_capture(TRUE);
+#endif
             res = Common_Get(clip).bg_item_clip->player_drop_entry_proc(&play->game, item, ux, uz, layer);
+#ifdef VITA_MP
+            pc_mp_fx_capture(FALSE);
+#endif
         }
     }
 
@@ -3172,6 +3188,9 @@ static void mTG_give_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
     } else if (ITEM_NAME_GET_TYPE(item_p->item) == NAME_TYPE_ITEM1 &&
                (category == ITEM1_CAT_FRUIT || category == ITEM1_CAT_FISH)) {
         submenu->after_mode = aHOI_REQUEST_EAT;
+#ifdef VITA_MP
+        mp_world_eaten(item_p->item);
+#endif
     } else {
         submenu->after_mode = aHOI_REQUEST_PUTAWAY;
     }
@@ -3265,6 +3284,13 @@ static void mTG_get_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
         sAdo_SysTrgStart(MONO(NA_SE_3));
     } else {
         haniwa_item_p = &Save_Get(homes[menu_info->data1]).haniwa.items[tag->tag_col];
+#ifdef VITA_MP
+        // another player bought it while this tag was open: nothing is left to pay for
+        if (mp_active() && haniwa_item_p->item == EMPTY_NO) {
+            mTG_return_tag_init(submenu, mTG_TYPE_NONE, mTG_RETURN_CLOSE);
+            return;
+        }
+#endif
         item_p = Now_Private->inventory.pockets;
 
         money = Now_Private->inventory.wallet;
@@ -3851,6 +3877,12 @@ static void mTG_plant_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
 
     plant_item = Now_Private->inventory.pockets[idx];
 
+#ifdef VITA_MP
+    if (mTG_ITEMS_REFUSED()) {
+        mTG_open_warning_window(submenu, menu_info, mWR_WARNING_MP_LEAVE);
+        return;
+    }
+#endif
     if (((Now_Private->equipment >= ITM_SHOVEL && Now_Private->equipment <= ITM_SHOVEL) ||
          (Now_Private->equipment >= ITM_GOLDEN_SHOVEL && Now_Private->equipment <= ITM_GOLDEN_SHOVEL)) &&
         inv_ovl->shovel_flag == TRUE) {
@@ -3911,6 +3943,15 @@ static void mTG_field_put_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
     mIV_Ovl_c* inv_ovl = submenu->overlay->inventory_ovl;
     xyz_t pos;
 
+#ifdef VITA_MP
+    if (mTG_ITEMS_REFUSED()) {
+        if ((inv_ovl->item_mark_bitfield & (1 << idx)) != 0) {
+            inv_ovl->item_mark_bitfield = 0;
+        }
+        mTG_open_warning_window(submenu, menu_info, mWR_WARNING_MP_LEAVE);
+        return;
+    }
+#endif
     if (inv_ovl->item_mark_bitfield != 0 && (inv_ovl->item_mark_bitfield & (1 << idx)) != 0) {
         int i;
         int put_cnt = 0;
@@ -3944,7 +3985,7 @@ static void mTG_field_put_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
 
         inv_ovl->item_mark_bitfield = 0;
     } else {
-        if (put_item == ITM_SIGNBOARD && (mFI_CheckInIsland() || mLd_PlayerManKindCheck())) {
+        if (put_item == ITM_SIGNBOARD && (mFI_CheckInIsland() || mTG_SIGN_REFUSED())) {
             if (mFI_CheckInIsland()) {
                 mTG_open_warning_window(submenu, menu_info, mWR_WARNING_PUT_SIGN_ISLAND);
             } else {
@@ -4753,6 +4794,9 @@ static void mTG_take_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
 
             if (category == ITEM1_CAT_FRUIT || category == ITEM1_CAT_FISH) {
                 submenu->after_mode = aHOI_REQUEST_EAT;
+#ifdef VITA_MP
+                mp_world_eaten(item_p->item);
+#endif
             } else if (category == ITEM1_CAT_CLOTH) {
                 submenu->after_mode = aHOI_REQUEST_GET_PULL_WAIT;
             } else {
@@ -4852,6 +4896,12 @@ static void mTG_bury_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
     int idx = mTG_get_table_idx(tag);
     mActor_name_t item = Now_Private->inventory.pockets[idx];
 
+#ifdef VITA_MP
+    if (mTG_ITEMS_REFUSED()) {
+        mTG_open_warning_window(submenu, menu_info, mWR_WARNING_MP_LEAVE);
+        return;
+    }
+#endif
     mTG_island_check_plant_plant(item);
     mTG_island_check_fruit_plant(item);
 
@@ -5002,6 +5052,12 @@ static void mTG_exchange_proc(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
         } else {
             xyz_t pos;
 
+#ifdef VITA_MP
+            if (mTG_ITEMS_REFUSED()) {
+                mTG_open_warning_window(submenu, menu_info, mWR_WARNING_MP_LEAVE);
+                return;
+            }
+#endif
             if (!mFI_CheckInIsland() ||
                 (!mSP_SearchItemCategoryPriority(item, mSP_KIND_FURNITURE, mSP_LISTTYPE_HOMEPAGE, NULL) &&
                  !mSP_SearchItemCategoryPriority(item, mSP_KIND_FURNITURE, mSP_LISTTYPE_SPECIALPRESENT, NULL))) {

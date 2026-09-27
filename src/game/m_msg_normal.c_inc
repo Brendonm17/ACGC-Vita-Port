@@ -35,7 +35,7 @@ static void mMsg_request_main_index_fromNormal(mMsg_Window_c* msg_p, GAME* game)
     if (mMsg_Check_NextIndex_ContinueCode(msg_p) && msg_p->continue_cancel_flag == FALSE) {
       int continue_msg = msg_p->continue_msg_no;
 
-      if (continue_msg >= 0 && continue_msg < MSG_MAX && mMsg_ChangeMsgData(msg_p, continue_msg)) {
+      if (continue_msg >= 0 && mMsg_IDX_VALID(continue_msg) && mMsg_ChangeMsgData(msg_p, continue_msg)) {
         if (mMsg_request_main_cursol(msg_p, FALSE, 5) && msg_p->force_next == FALSE && mMsg_Check_NextIndex_SetSelectWindowCode(msg_p) == FALSE) {
           if ((msg_p->status_flags & mMsg_STATUS_FLAG_NO_SE_PAGE_OKURI) == 0) {
             mMsg_sound_PAGE_OKURI();

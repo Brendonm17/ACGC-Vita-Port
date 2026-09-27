@@ -78,6 +78,29 @@ static int aCNV_check_player(ACTOR* actorx, GAME_PLAY* play) {
     return ret;
 }
 
+#ifdef VITA_MP
+// another player at the door opens it too (going in is the player's own at each screen)
+static int aCNV_check_anyone(ACTOR* actorx, GAME_PLAY* play) {
+    void* puppets[MP_MAX_PEERS];
+    int n = mp_puppets(puppets, MP_MAX_PEERS);
+    int res = aCNV_check_player(actorx, play);
+    int i;
+
+    for (i = 0; i < n && res == 0; i++) {
+        ACTOR* p = (ACTOR*)puppets[i];
+        f32 dx = p->world.position.x - (actorx->world.position.x - 14.0f);
+        f32 dz = p->world.position.z - (actorx->world.position.z + 76.0f);
+
+        if (SQ(dx) + SQ(dz) < 800.0f) {
+            res = 1;
+        }
+    }
+    return res;
+}
+#else
+#define aCNV_check_anyone aCNV_check_player
+#endif
+
 static void aCNV_set_talk_info_close_wait(ACTOR* actorx) {
     rgba_t window_color;
     int msg_no;
@@ -230,7 +253,7 @@ static void aCNV_close_wait(CONVENI_ACTOR* conveni, GAME_PLAY* play) {
     }
 
     if ((mSP_ShopOpen() == mSP_SHOP_STATUS_OPEN) || (mSP_ShopOpen() == mSP_SHOP_STATUS_OPENEVENT)) {
-        if (aCNV_check_player(actorx, play) != 0) {
+        if (aCNV_check_anyone(actorx, play) != 0) {
             aCNV_setup_action(conveni, aCNV_ACTION_OPEN_DOOR);
         }
         return;
@@ -250,7 +273,7 @@ static void aCNV_open_wait(CONVENI_ACTOR* conveni, GAME_PLAY* play) {
         if (mSP_ShopOpen() != mSP_SHOP_STATUS_OPEN && mSP_ShopOpen() != mSP_SHOP_STATUS_OPENEVENT) {
             aCNV_setup_action(conveni, aCNV_ACTION_CLOSE_DOOR);
         } else if (aCNV_check_player(actorx, play) != 2) {
-            if (aCNV_check_player(actorx, play) == 0) {
+            if (aCNV_check_anyone(actorx, play) == 0) {
                 aCNV_setup_action(conveni, aCNV_ACTION_CLOSE_DOOR);
             }
         } else if (aCNV_check_player2(play)) {

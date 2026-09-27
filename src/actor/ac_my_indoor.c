@@ -8,6 +8,12 @@
 #include "m_rcp.h"
 #include "m_mark_room.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "m_house.h"
+
+static int aMI_mp_fresh; // a room just built draws what the save has
+#endif
 
 enum {
     aMI_ROOM_KIND_S,
@@ -378,6 +384,9 @@ static void My_Indoor_Actor_ct(ACTOR* actorx, GAME* game) {
     aMI_GetMyIndoorBank(actorx, game);
     aMI_MyIndoorDma(actorx, game);
     aMI_SetClipProc(actorx, TRUE);
+#ifdef VITA_MP
+    aMI_mp_fresh = TRUE;
+#endif
 }
 
 static void My_Indoor_Actor_dt(ACTOR* actorx, GAME* game) {
@@ -738,6 +747,9 @@ static void aMI_Change2ReservedWall(ACTOR* actorx, GAME* game) {
                     my_indoor->wall_num;
                 mRmTp_SetNowSceneOriginalWallStatus((u8)my_indoor->wall_is_original_design);
             }
+#ifdef VITA_MP
+            aMI_mp_fresh = TRUE; // (laid here: nothing for the refresh to lay again)
+#endif
 
             mMkRm_ReportChangePlayerRoom();
             sAdo_SysTrgStart(0x11B);
@@ -769,6 +781,9 @@ static void aMI_Change2ReservedFloor(ACTOR* actorx, GAME* game) {
                     my_indoor->floor_num;
                 mRmTp_SetNowSceneOriginalFloorStatus(my_indoor->floor_is_original_design);
             }
+#ifdef VITA_MP
+            aMI_mp_fresh = TRUE;
+#endif
 
             aNI_SetFloorSE(my_indoor->floor_num);
             sAdo_SysTrgStart(0x11B);
@@ -776,6 +791,95 @@ static void aMI_Change2ReservedFloor(ACTOR* actorx, GAME* game) {
         }
     }
 }
+
+#ifdef VITA_MP
+// a sum of the owner's design a wall or floor shows, so one redrawn at Able Sisters shows here too
+static u32 aMI_mp_org_sum(int orig_no) {
+    int pl = mHS_get_pl_no_detail(aMI_GetPlayerRoomIdx());
+    const u32* p = (const u32*)&Save_Get(private_data[(pl >= 0 && pl < PLAYER_NUM) ? pl : 0]).my_org[orig_no & 7];
+    u32 sum = 0;
+    int i;
+
+    for (i = 0; i < (int)(sizeof(mNW_original_design_c) / sizeof(u32)); i++) {
+        sum = sum * 31 + p[i];
+    }
+    return sum;
+}
+
+// another player laid a carpet or wallpaper in the island's cottage or a house's floor this player is in: this screen
+// lays it too (the save has it already)
+void aMI_mp_refresh(void) {
+    static u32 wall_sum;
+    static u32 floor_sum;
+    MY_INDOOR_ACTOR* my_indoor;
+    mHm_wf_c* wf;
+    int wall_orig = FALSE;
+    int floor_orig = FALSE;
+    s16 wall_idx;
+    s16 floor_idx;
+    u32 wsum;
+    u32 fsum;
+
+    if (Common_Get(clip).my_indoor_clip == NULL ||
+        (my_indoor = Common_Get(clip).my_indoor_clip->my_indoor_actor_p) == NULL) {
+        return;
+    }
+    if (Save_Get(scene_no) == SCENE_COTTAGE_MY) {
+        wf = &Save_Get(island).cottage.room.wall_floor;
+        wall_orig = my_indoor->wall_is_original_design; // (its save keeps no such flag: as drawn here)
+        floor_orig = my_indoor->floor_is_original_design;
+    } else if (mFI_GET_TYPE(mFI_GetFieldId()) == mFI_FIELD_PLAYER0_ROOM && my_indoor->house_floor_no >= 0 &&
+               my_indoor->house_floor_no < mHm_ROOM_NUM) {
+        mHm_flr_c* flr = &Save_Get(homes[aMI_GetPlayerRoomIdx()]).floors[my_indoor->house_floor_no];
+
+        wf = &flr->wall_floor;
+        wall_orig = flr->floor_bit_info.wall_original;
+        floor_orig = flr->floor_bit_info.floor_original;
+    } else {
+        return;
+    }
+    wall_idx = wf->wallpaper_idx;
+    floor_idx = wf->flooring_idx;
+    aMI_CheckFloorWallIndex(&wall_idx, &floor_idx);
+    wsum = WALL_IS_MY_ORIG(wall_idx) ? aMI_mp_org_sum(wall_idx - WALL_MY_ORIG_START) : 0;
+    fsum = FLOOR_IS_MY_ORIG(floor_idx) ? aMI_mp_org_sum(floor_idx - FLOOR_MY_ORIG_START) : 0;
+    if (aMI_mp_fresh) {
+        aMI_mp_fresh = FALSE;
+        wall_sum = wsum;
+        floor_sum = fsum;
+    }
+    if (!my_indoor->wall_reserve.reserve_flag && (my_indoor->wall_num != wall_idx || wall_sum != wsum)) {
+        my_indoor->wall_num = wall_idx;
+        my_indoor->wall_bank_idx = (my_indoor->wall_bank_idx ^ 1) & 1;
+        my_indoor->wall_is_original_design = wall_orig;
+        aMI_CopyWallTexture((ACTOR*)my_indoor, my_indoor->wall_num, my_indoor->wall_bank_idx);
+        sAdo_SysTrgStart(0x11B);
+        wall_sum = wsum;
+    }
+    if (!my_indoor->floor_reserve.reserve_flag && (my_indoor->floor_num != floor_idx || floor_sum != fsum)) {
+        my_indoor->floor_num = floor_idx;
+        my_indoor->floor_bank_idx = (my_indoor->floor_bank_idx ^ 1) & 1;
+        my_indoor->floor_is_original_design = floor_orig;
+        aMI_CopyFloorTexture((ACTOR*)my_indoor, my_indoor->floor_num, my_indoor->floor_bank_idx);
+        aNI_SetFloorSE(my_indoor->floor_num);
+        sAdo_SysTrgStart(0x11B);
+        floor_sum = fsum;
+    }
+}
+#endif
+
+#ifdef VITA_MP
+// a carpet or wallpaper chosen in a menu and not laid yet
+int aMI_mp_reserved(void) {
+    MY_INDOOR_ACTOR* my_indoor;
+
+    if (Common_Get(clip).my_indoor_clip == NULL ||
+        (my_indoor = Common_Get(clip).my_indoor_clip->my_indoor_actor_p) == NULL) {
+        return FALSE;
+    }
+    return my_indoor->wall_reserve.reserve_flag || my_indoor->floor_reserve.reserve_flag;
+}
+#endif
 
 static void My_Indoor_Actor_move(ACTOR* actorx, GAME* game) {
     aMI_Change2ReservedWall(actorx, game);

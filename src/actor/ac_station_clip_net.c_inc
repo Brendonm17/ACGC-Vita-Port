@@ -1,0 +1,783 @@
+// ac_station_clip_net.c_inc
+// Porter's friends' towns; waits hold thinking pages (DEMONPC0 order 9) with LockContinue
+#include "pc_mp.h"
+#include "pc_mp_text_data.h"
+#include "m_ledit_ovl.h"
+#include "m_submenu.h"
+
+enum {
+    aSTM_NET_VISIT,
+    aSTM_NET_HOST,
+};
+
+enum {
+    aSTM_NET_WAIT_SCAN,
+    aSTM_NET_WAIT_JOIN,
+    aSTM_NET_WAIT_HOST,
+};
+
+enum {
+    aSTM_NET_RETRY_SCAN_NONE,
+    aSTM_NET_RETRY_SCAN_NONE_WIFI,
+    aSTM_NET_RETRY_TICKET_ASK,
+    aSTM_NET_RETRY_TICKET_BAD,
+    aSTM_NET_RETRY_CALL_STILL,
+    aSTM_NET_RETRY_NO_WIFI,        // no Wi-Fi: right beside them instead
+    aSTM_NET_RETRY_NO_ANSWER,      // a ticket nobody answered: again, or another ticket
+    aSTM_NET_RETRY_NO_ANSWER_SCAN, // a listed station stopped answering: look again
+    aSTM_NET_RETRY_HOST_CGNAT,     // no way in from far away: nearby instead
+    aSTM_NET_RETRY_HOST_NOBIND,
+};
+
+enum {
+    aSTM_NET_ACT_WHO,
+    aSTM_NET_ACT_TICKET,
+    aSTM_NET_ACT_CLOSE,
+    aSTM_NET_ACT_NEVERMIND,
+};
+
+#define aSTM_NET_PAGE_SIZE     3
+#define aSTM_NET_PENDING_MS    15000
+
+static struct {
+    u8 intent;
+    u8 link;
+    u8 wait;
+    u8 locked;
+    u8 retry;
+    u8 via_ticket; // this call was placed by ticket number
+    u8 page;
+    u8 page_count;
+    u8 page_more;
+    u8 host_act[4];
+    u32 wait_start;
+    int page_msg; // the page whose choice the current proc waits on
+    u8 ticket[MP_TICKET_LEN];
+} aSTM_net;
+
+static void aSTM_net_set_str(int str_no, const u8* str, int len) {
+    mMsg_SET_FREE_STR(str_no, (u8*)str, len);
+}
+
+static void aSTM_net_set_num(int str_no, int num) {
+    u8 buf[8];
+    int len = 0;
+    int div;
+
+    // digits share their ASCII codes in the game charset
+    for (div = 10000; div > 1 && num < div; div /= 10) {
+    }
+    for (; div > 0; div /= 10) {
+        buf[len++] = (u8)('0' + (num / div) % 10);
+    }
+    aSTM_net_set_str(str_no, buf, len);
+}
+
+// the page before still sits on its continue code with its old choice, so it gives way at once
+static void aSTM_net_continue(int msg_no) {
+    mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
+
+    mMsg_Unset_LockContinue(msg_p);
+    mMsg_Set_continue_msg_num(msg_p, msg_no);
+    mMsg_Set_ForceNext(msg_p);
+    aSTM_net.page_msg = msg_no;
+}
+
+// a choice counts only once the page that asked it is up and answered
+static int aSTM_net_answered(void) {
+    return mMsg_GET_MSG_NUM() == aSTM_net.page_msg && mMsg_CHECK_MAINNORMALCONTINUE() == TRUE;
+}
+
+static void aSTM_net_start_wait(NPC_STATION_MASTER_ACTOR* master, int wait) {
+    aSTM_net.wait = wait;
+    aSTM_net.locked = FALSE;
+    aSTM_net.wait_start = pc_mp_now_ms();
+    aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_WAIT);
+}
+
+static void aSTM_net_end(NPC_STATION_MASTER_ACTOR* master) {
+    mp_ui_done();
+    aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_END_WAIT);
+}
+
+// shows one page of scan results as a choice list
+static void aSTM_net_show_list(NPC_STATION_MASTER_ACTOR* master) {
+    static const int list_msg[] = { MP_MSG_P_LIST_1, MP_MSG_P_LIST_2, MP_MSG_P_LIST_3 };
+    static const int list_more_msg[] = { MP_MSG_P_LIST_1M, MP_MSG_P_LIST_2M, MP_MSG_P_LIST_3M };
+    int total = mp_ui_scan_count();
+    int first = aSTM_net.page * aSTM_NET_PAGE_SIZE;
+    int n = total - first;
+    int i;
+
+    if (n > aSTM_NET_PAGE_SIZE) {
+        n = aSTM_NET_PAGE_SIZE;
+    }
+    aSTM_net.page_count = n;
+    aSTM_net.page_more = total > aSTM_NET_PAGE_SIZE;
+
+    for (i = 0; i < n; i++) {
+        u8 town[MP_NAME_LEN];
+        u8 host[MP_NAME_LEN];
+        int guests;
+
+        mp_ui_scan_entry(first + i, town, host, &guests);
+        aSTM_net_set_str(mMsg_FREE_STR10 + i, town, MP_NAME_LEN);
+    }
+
+    aSTM_net_continue(aSTM_net.page_more ? list_more_msg[n - 1] : list_msg[n - 1]);
+    aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LIST);
+}
+
+// no Wi-Fi for a Wi-Fi or far-away line: Porter offers the one that needs none (TRUE: he asked)
+static int aSTM_net_no_wifi(NPC_STATION_MASTER_ACTOR* master) {
+    if (aSTM_net.link == MP_LINK_ADHOC) {
+        aSTM_net_continue(MP_MSG_P_NO_WIFI);
+        return FALSE;
+    }
+    aSTM_net.retry = aSTM_NET_RETRY_NO_WIFI;
+    aSTM_net_continue(aSTM_net.intent == aSTM_NET_HOST ? MP_MSG_P_NO_WIFI_H : MP_MSG_P_NO_WIFI_V);
+    aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+    return TRUE;
+}
+
+static void aSTM_net_show_scan(NPC_STATION_MASTER_ACTOR* master, int res) {
+    switch (res) {
+        case MP_UI_DONE:
+            if (mp_ui_scan_count() > 0) {
+                aSTM_net.page = 0;
+                aSTM_net_show_list(master);
+                return;
+            }
+            if (aSTM_net.link == MP_LINK_LAN) {
+                aSTM_net.retry = aSTM_NET_RETRY_SCAN_NONE_WIFI;
+                aSTM_net_continue(MP_MSG_P_SCAN_NONE_WIFI);
+            } else {
+                aSTM_net.retry = aSTM_NET_RETRY_SCAN_NONE;
+                aSTM_net_continue(MP_MSG_P_SCAN_NONE);
+            }
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+            return;
+        case MP_UI_ADHOC_CANCEL:
+            aSTM_net_continue(MP_MSG_P_ADHOC_CANCEL);
+            break;
+        case MP_UI_WIFI_WAIT:
+            aSTM_net_continue(MP_MSG_P_WIFI_WAIT);
+            break;
+        default:
+            if (aSTM_net_no_wifi(master)) {
+                return;
+            }
+            break;
+    }
+    aSTM_net_end(master);
+}
+
+static void aSTM_net_show_join(NPC_STATION_MASTER_ACTOR* master, int res) {
+    u8 town[MP_NAME_LEN];
+    u8 host[MP_NAME_LEN];
+    int others;
+
+    switch (res) {
+        case MP_UI_DONE:
+            mp_ui_join_info(town, host, &others);
+            aSTM_net_set_str(mMsg_FREE_STR16, town, MP_NAME_LEN);
+            aSTM_net_set_str(mMsg_FREE_STR17, host, MP_NAME_LEN);
+            aSTM_net_set_num(mMsg_FREE_STR18, others);
+            aSTM_net_continue(others > 0 ? MP_MSG_P_WELCOME_OTHERS : MP_MSG_P_WELCOME);
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_WELCOME);
+            return;
+        case MP_UI_PENDING:
+            aSTM_net.retry = aSTM_NET_RETRY_CALL_STILL;
+            aSTM_net_continue(MP_MSG_P_CALL_STILL);
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+            return;
+        case MP_UI_NO_ANSWER:
+            mp_ui_join_cancel();
+            aSTM_net.retry = aSTM_net.via_ticket ? aSTM_NET_RETRY_NO_ANSWER : aSTM_NET_RETRY_NO_ANSWER_SCAN;
+            aSTM_net_continue(aSTM_net.via_ticket ? MP_MSG_P_NO_ANSWER : MP_MSG_P_NO_ANSWER_SCAN);
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+            return;
+        case MP_UI_NO_ANSWER_HOME:
+            aSTM_net_continue(MP_MSG_P_NO_ANSWER_HOME);
+            break;
+        case MP_UI_REFUSE_FULL:
+            aSTM_net_continue(MP_MSG_P_REFUSE_FULL);
+            break;
+        case MP_UI_REFUSE_VERSION:
+            aSTM_net_continue(MP_MSG_P_REFUSE_VERSION);
+            break;
+        case MP_UI_REFUSE_MODS:
+            aSTM_net_continue(MP_MSG_P_REFUSE_MODS);
+            break;
+        case MP_UI_REFUSE_SAME_TOWN:
+            aSTM_net_continue(MP_MSG_P_REFUSE_SAME_TOWN);
+            break;
+        case MP_UI_REFUSE_RESIDENT:
+            aSTM_net_continue(MP_MSG_P_REFUSE_RESIDENT);
+            break;
+        case MP_UI_REFUSE_DUPLICATE:
+            aSTM_net_continue(MP_MSG_P_REFUSE_DUPLICATE);
+            break;
+        case MP_UI_REFUSE_CLOSED:
+            aSTM_net_continue(MP_MSG_P_REFUSE_CLOSED);
+            break;
+        case MP_UI_REFUSE_DENIED:
+            aSTM_net_continue(MP_MSG_P_REFUSE_DENIED);
+            break;
+        case MP_UI_WIFI_WAIT:
+            aSTM_net_continue(MP_MSG_P_WIFI_WAIT);
+            break;
+        default:
+            mp_ui_join_cancel();
+            if (aSTM_net_no_wifi(master)) {
+                return;
+            }
+            break;
+    }
+    mp_ui_join_cancel();
+    aSTM_net_end(master);
+}
+
+static void aSTM_net_show_host(NPC_STATION_MASTER_ACTOR* master, int res) {
+    static const int open_msg[] = { MP_MSG_P_HOST_OPEN_LOCAL, MP_MSG_P_HOST_OPEN_WIFI, MP_MSG_P_HOST_OPEN_FAR };
+    u8 ticket[MP_TICKET_LEN + 1];
+
+    if (mp_ui_host_ticket(ticket)) {
+        aSTM_net_set_str(mMsg_FREE_STR15, ticket, sizeof(ticket));
+    }
+
+    switch (res) {
+        case MP_UI_DONE:
+            aSTM_net_continue(open_msg[aSTM_net.link]);
+            break;
+        case MP_UI_NOPORTMAP:
+            aSTM_net_set_num(mMsg_FREE_STR18, mp_ui_host_port());
+            aSTM_net_continue(MP_MSG_P_HOST_NOPORTMAP);
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_HOST_PORTMAP);
+            return;
+        case MP_UI_CGNAT:
+            mp_ui_host_close();
+            aSTM_net.retry = aSTM_NET_RETRY_HOST_CGNAT;
+            aSTM_net_continue(MP_MSG_P_HOST_CGNAT);
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+            return;
+        case MP_UI_NOBIND:
+            aSTM_net.retry = aSTM_NET_RETRY_HOST_NOBIND;
+            aSTM_net_continue(MP_MSG_P_HOST_NOBIND);
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+            return;
+        case MP_UI_ADHOC_CANCEL:
+            aSTM_net_continue(MP_MSG_P_ADHOC_CANCEL);
+            break;
+        case MP_UI_WIFI_WAIT:
+            aSTM_net_continue(MP_MSG_P_WIFI_WAIT);
+            break;
+        default:
+            if (aSTM_net_no_wifi(master)) {
+                return;
+            }
+            break;
+    }
+    aSTM_net_end(master);
+}
+
+// talk procs
+
+static void aSTM_net_res_menu(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (mMsg_CHECK_MAINNORMALCONTINUE() == TRUE) {
+        if (mChoice_GET_CHOSENUM() == mChoice_CHOICE0) {
+            aSTM_net.page_msg = MP_MSG_P_TRIP_MENU;
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_MENU);
+        } else {
+            aSTM_net_end(master);
+        }
+    }
+}
+
+// a trip: to a friend's town, friends riding in, or the memory card's (the original from here)
+static void aSTM_net_menu(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (!aSTM_net_answered()) {
+        return;
+    }
+    switch (mChoice_GET_CHOSENUM()) {
+        case mChoice_CHOICE0:
+            aSTM_net.intent = aSTM_NET_VISIT;
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_WHERE);
+            break;
+        case mChoice_CHOICE1:
+            aSTM_net.intent = aSTM_NET_HOST;
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_WHERE);
+            break;
+        case mChoice_CHOICE2:
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_CHK_LEAVE_TALK2);
+            break;
+        default:
+            aSTM_net_end(master);
+            break;
+    }
+}
+
+// the chosen page routes itself: call / scan / ticket for visits, open the line for hosts
+static void aSTM_net_where(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    static const u8 link_of[] = { MP_LINK_ADHOC, MP_LINK_LAN, MP_LINK_ONLINE };
+    int choice;
+
+    if (mMsg_CHECK_MAINNORMALCONTINUE() != TRUE) {
+        return;
+    }
+
+    choice = mChoice_GET_CHOSENUM();
+    if (choice < mChoice_CHOICE0 || choice > mChoice_CHOICE2) {
+        aSTM_net_end(master);
+        return;
+    }
+
+    aSTM_net.link = link_of[choice];
+    if (aSTM_net.intent == aSTM_NET_HOST) {
+        mp_ui_host_start((mp_link_t)aSTM_net.link);
+        aSTM_net_start_wait(master, aSTM_NET_WAIT_HOST);
+    } else if (aSTM_net.link == MP_LINK_ONLINE) {
+        aSTM_net.retry = aSTM_NET_RETRY_TICKET_ASK;
+        aSTM_net.page_msg = MP_MSG_P_TICKET_ASK;
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+    } else {
+        mp_ui_scan_start((mp_link_t)aSTM_net.link);
+        aSTM_net_start_wait(master, aSTM_NET_WAIT_SCAN);
+    }
+}
+
+// holds a thinking page until the session answers
+static void aSTM_net_wait(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
+    int res;
+
+    if (!aSTM_net.locked) {
+        if (mDemo_Get_OrderValue(mDemo_ORDER_NPC0, 9) != 0) {
+            mDemo_Set_OrderValue(mDemo_ORDER_NPC0, 9, 0);
+            mMsg_Set_LockContinue(msg_p);
+            aSTM_net.locked = TRUE;
+        }
+        return;
+    }
+
+    switch (aSTM_net.wait) {
+        case aSTM_NET_WAIT_SCAN:
+            res = mp_ui_scan_poll();
+            if (res != MP_UI_BUSY) {
+                aSTM_net_show_scan(master, res);
+            }
+            break;
+        case aSTM_NET_WAIT_JOIN:
+            res = mp_ui_join_poll();
+            // an unanswered ring only surfaces after a while
+            if (res == MP_UI_PENDING && pc_mp_now_ms() - aSTM_net.wait_start < aSTM_NET_PENDING_MS) {
+                res = MP_UI_BUSY;
+            }
+            if (res != MP_UI_BUSY) {
+                aSTM_net_show_join(master, res);
+            }
+            break;
+        default:
+            res = mp_ui_host_poll();
+            if (res != MP_UI_BUSY) {
+                aSTM_net_show_host(master, res);
+            }
+            break;
+    }
+}
+
+static void aSTM_net_list(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    int choice;
+
+    if (!aSTM_net_answered()) {
+        return;
+    }
+
+    choice = mChoice_GET_CHOSENUM();
+    if (choice >= mChoice_CHOICE0 && choice < aSTM_net.page_count) {
+        int entry = aSTM_net.page * aSTM_NET_PAGE_SIZE + choice;
+        u8 town[MP_NAME_LEN];
+        u8 host[MP_NAME_LEN];
+        int guests;
+
+        mp_ui_scan_entry(entry, town, host, &guests);
+        aSTM_net_set_str(mMsg_FREE_STR16, town, MP_NAME_LEN);
+        aSTM_net_set_str(mMsg_FREE_STR17, host, MP_NAME_LEN);
+        mp_ui_join_scan(entry);
+        aSTM_net.via_ticket = FALSE;
+        aSTM_net_continue(MP_MSG_P_CALLING);
+        aSTM_net_start_wait(master, aSTM_NET_WAIT_JOIN);
+    } else if (aSTM_net.page_more && choice == aSTM_net.page_count) {
+        int pages = (mp_ui_scan_count() + aSTM_NET_PAGE_SIZE - 1) / aSTM_NET_PAGE_SIZE;
+
+        aSTM_net.page = (aSTM_net.page + 1) % pages;
+        aSTM_net_show_list(master);
+    } else {
+        aSTM_net_end(master);
+    }
+}
+
+// second-chance choices; each page's SETNEXTMSG already names where it goes
+static void aSTM_net_retry(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    int choice;
+
+    if (!aSTM_net_answered()) {
+        return;
+    }
+
+    choice = mChoice_GET_CHOSENUM();
+    switch (aSTM_net.retry) {
+        case aSTM_NET_RETRY_SCAN_NONE:
+        case aSTM_NET_RETRY_SCAN_NONE_WIFI:
+        case aSTM_NET_RETRY_NO_ANSWER_SCAN:
+            // (nothing nearby: maybe they're on this Wi-Fi)
+            if (choice == mChoice_CHOICE1 && aSTM_net.retry == aSTM_NET_RETRY_SCAN_NONE) {
+                aSTM_net.link = MP_LINK_LAN;
+                choice = mChoice_CHOICE0;
+            }
+            if (choice == mChoice_CHOICE0) {
+                mp_ui_scan_start((mp_link_t)aSTM_net.link);
+                aSTM_net_start_wait(master, aSTM_NET_WAIT_SCAN);
+                return;
+            }
+            if (choice == mChoice_CHOICE1 && aSTM_net.retry == aSTM_NET_RETRY_SCAN_NONE_WIFI) {
+                aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LEDIT_CLOSE);
+                return;
+            }
+            break;
+        case aSTM_NET_RETRY_TICKET_ASK:
+        case aSTM_NET_RETRY_TICKET_BAD:
+            if (choice == mChoice_CHOICE0) {
+                aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LEDIT_CLOSE);
+                return;
+            }
+            break;
+        case aSTM_NET_RETRY_CALL_STILL:
+            if (choice == mChoice_CHOICE0) {
+                aSTM_net_start_wait(master, aSTM_NET_WAIT_JOIN);
+                return;
+            }
+            mp_ui_join_cancel();
+            break;
+        case aSTM_NET_RETRY_NO_WIFI:
+            if (choice == mChoice_CHOICE0) {
+                aSTM_net.link = MP_LINK_ADHOC;
+                if (aSTM_net.intent == aSTM_NET_HOST) {
+                    mp_ui_host_start(MP_LINK_ADHOC);
+                    aSTM_net_start_wait(master, aSTM_NET_WAIT_HOST);
+                } else {
+                    mp_ui_scan_start(MP_LINK_ADHOC);
+                    aSTM_net_start_wait(master, aSTM_NET_WAIT_SCAN);
+                }
+                return;
+            }
+            break;
+        case aSTM_NET_RETRY_NO_ANSWER:
+            if (choice == mChoice_CHOICE0 && mp_ui_join_ticket(aSTM_net.ticket, MP_TICKET_LEN)) {
+                aSTM_net_start_wait(master, aSTM_NET_WAIT_JOIN);
+                return;
+            }
+            if (choice == mChoice_CHOICE1) {
+                aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LEDIT_CLOSE);
+                return;
+            }
+            break;
+        case aSTM_NET_RETRY_HOST_CGNAT:
+        case aSTM_NET_RETRY_HOST_NOBIND:
+            if (aSTM_net.retry == aSTM_NET_RETRY_HOST_CGNAT && choice <= mChoice_CHOICE1) {
+                aSTM_net.link = choice == mChoice_CHOICE0 ? MP_LINK_ADHOC : MP_LINK_LAN;
+                choice = mChoice_CHOICE0;
+            }
+            if (choice == mChoice_CHOICE0) {
+                mp_ui_host_start((mp_link_t)aSTM_net.link);
+                aSTM_net_start_wait(master, aSTM_NET_WAIT_HOST);
+                return;
+            }
+            break;
+    }
+    aSTM_net_end(master);
+}
+
+// ticket entry: hide the window, open the destination box, then bring the window back
+static void aSTM_net_ledit_close(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (mDemo_Get_OrderValue(mDemo_ORDER_NPC0, 9) != 0) {
+        mMsg_request_main_disappear_wait_type1(mMsg_Get_base_window_p());
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LEDIT_OPEN);
+    }
+}
+
+static void aSTM_net_ledit_open(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (mMsg_Check_main_wait(mMsg_Get_base_window_p()) == TRUE) {
+        mDemo_Set_OrderValue(mDemo_ORDER_NPC0, 9, 0);
+        mem_clear(aSTM_net.ticket, sizeof(aSTM_net.ticket), CHAR_SPACE);
+        mSM_open_submenu_new(&play->submenu, mSM_OVL_LEDIT, mLE_TYPE_MP_TICKET, 0, aSTM_net.ticket);
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LEDIT_END);
+    }
+}
+
+static void aSTM_net_ledit_end(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (play->submenu.open_flag == FALSE) {
+        mMsg_request_main_appear_wait_type1(mMsg_Get_base_window_p());
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_LEDIT_REOPEN);
+    }
+}
+
+static void aSTM_net_ledit_reopen(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
+    int blank = TRUE;
+    int i;
+
+    if (mMsg_Check_not_series_main_wait(msg_p) != TRUE) {
+        return;
+    }
+
+    for (i = 0; i < MP_TICKET_LEN; i++) {
+        if (aSTM_net.ticket[i] != CHAR_SPACE) {
+            blank = FALSE;
+        }
+    }
+
+    if (blank) {
+        mMsg_ChangeMsgData(msg_p, MP_MSG_P_ADHOC_CANCEL);
+        aSTM_net_end(master);
+    } else if (mp_ui_join_ticket(aSTM_net.ticket, MP_TICKET_LEN)) {
+        u8 shown[MP_TICKET_LEN + 1];
+
+        aSTM_net.via_ticket = TRUE;
+        // until the station answers, it goes by its ticket number
+        memcpy(shown, aSTM_net.ticket, 4);
+        shown[4] = CHAR_SPACE;
+        memcpy(shown + 5, aSTM_net.ticket + 4, 4);
+        mMsg_Set_free_str(msg_p, mMsg_FREE_STR16, shown, sizeof(shown));
+        mMsg_ChangeMsgData(msg_p, MP_MSG_P_CALLING);
+        aSTM_net_start_wait(master, aSTM_NET_WAIT_JOIN);
+    } else {
+        mMsg_Set_free_str(msg_p, mMsg_FREE_STR15, aSTM_net.ticket, MP_TICKET_LEN);
+        mMsg_ChangeMsgData(msg_p, MP_MSG_P_TICKET_BAD);
+        aSTM_net.page_msg = MP_MSG_P_TICKET_BAD;
+        aSTM_net.retry = aSTM_NET_RETRY_TICKET_BAD;
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_RETRY);
+    }
+}
+
+static void aSTM_net_welcome(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (aSTM_net_answered()) {
+        if (mChoice_GET_CHOSENUM() == mChoice_CHOICE0) {
+            aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_DEPART);
+        } else {
+            mp_ui_join_cancel();
+            aSTM_net_end(master);
+        }
+    }
+}
+
+// "saving..." page reached: ask for the host's town, then the stock save flow runs the
+// departure (mCD_SaveStation_NextLand_bg stays busy until the town has arrived)
+static void aSTM_net_depart(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
+
+    if (mDemo_Get_OrderValue(mDemo_ORDER_NPC0, 9) != 0) {
+        mDemo_Set_OrderValue(mDemo_ORDER_NPC0, 9, 0);
+        master->station_check_res = mCD_TRANS_ERR_NONE_NEXTLAND;
+        aSTM_chk_train_local(master, play);
+        mp_travel_guest_fetch();
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_SAVE_TALK);
+        mMsg_Set_LockContinue(msg_p);
+        Actor_info_save_actor(play);
+    }
+}
+
+// a network visitor heading home skips the memory card checks and goes to its papers
+static void aSTM_net_cardproc(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    mMsg_Window_c* msg_p = mMsg_Get_base_window_p();
+
+    master->station_check_res = mCD_TRANS_ERR_NONE_NEXTLAND;
+    aSTM_chk_train_local(master, play);
+    if (Now_Private != NULL) {
+        aSTM_net_set_str(mMsg_FREE_STR19, Now_Private->player_ID.land_name, LAND_NAME_SIZE);
+    }
+    mMsg_UNSET_LOCKCONTINUE();
+    mMsg_Set_continue_msg_num(msg_p, MP_MSG_P_RETURN_SAVE);
+    aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_BEFORE_SAVE_TALK);
+}
+
+// save_talk outcome lines for network trips; FALSE leaves the stock message
+static int aSTM_net_save_msg(int res, int train_coming, int* msg_no) {
+    if (res == mCD_TRANS_ERR_NONE) {
+        if (mp_travel_state() == MP_TRAVEL_DEPARTED) {
+            *msg_no = train_coming ? MP_MSG_P_NET_SAVED_TRAIN : MP_MSG_P_NET_SAVED;
+            return TRUE;
+        }
+        if (mp_travel_state() == MP_TRAVEL_RETURNING) {
+            *msg_no = train_coming ? MP_MSG_P_RETURN_SAVED_TRAIN : MP_MSG_P_RETURN_SAVED;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    if (mp_travel_state() == MP_TRAVEL_FAILED || mp_travel_state() == MP_TRAVEL_FETCHING ||
+        mp_travel_state() == MP_TRAVEL_READY) {
+        int cut = mp_travel_state() == MP_TRAVEL_FAILED;
+
+        // no departure happened: the trip and the line both end here, whatever the reason
+        mp_travel_guest_reset();
+        mp_ui_join_cancel();
+        if (cut) {
+            *msg_no = MP_MSG_P_LINE_CUT_EARLY; // the line dropped before anything was written
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void aSTM_net_host_status(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    u8 ticket[MP_TICKET_LEN + 1];
+    u8 town[MP_NAME_LEN];
+    int count;
+    int act;
+    int i;
+
+    if (!aSTM_net_answered()) {
+        return;
+    }
+
+    act = mChoice_GET_CHOSENUM();
+    act = (act >= mChoice_CHOICE0 && act <= mChoice_CHOICE3) ? aSTM_net.host_act[act] : aSTM_NET_ACT_NEVERMIND;
+    count = mp_ui_host_arrived();
+
+    switch (act) {
+        case aSTM_NET_ACT_WHO:
+            if (count > MP_MAX_PEERS - 1) {
+                count = MP_MAX_PEERS - 1;
+            }
+            for (i = 0; i < count; i++) {
+                u8 name[MP_NAME_LEN];
+
+                mp_ui_host_visitor(i, name, town);
+                aSTM_net_set_str(mMsg_FREE_STR10 + i, name, MP_NAME_LEN);
+            }
+            aSTM_net_continue(MP_MSG_P_HOST_WHO_1 + (count > 0 ? count - 1 : 0));
+            break;
+        case aSTM_NET_ACT_TICKET:
+            if (mp_ui_host_ticket(ticket)) {
+                aSTM_net_set_str(mMsg_FREE_STR15, ticket, sizeof(ticket));
+            }
+            aSTM_net_continue(MP_MSG_P_HOST_TICKET);
+            break;
+        case aSTM_NET_ACT_CLOSE:
+            if (count > 0 || mp_ui_host_inbound(town) > 0) {
+                aSTM_net_continue(count > 0 ? MP_MSG_P_HOST_CLOSE_CONFIRM : MP_MSG_P_HOST_CLOSE_CONFIRM_IN);
+                aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_HOST_CONFIRM);
+                return;
+            }
+            mp_ui_host_close();
+            aSTM_net_continue(MP_MSG_P_HOST_CLOSED);
+            break;
+        default:
+            break;
+    }
+    aSTM_net_end(master);
+}
+
+static void aSTM_net_host_confirm(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (aSTM_net_answered()) {
+        if (mChoice_GET_CHOSENUM() == mChoice_CHOICE0) {
+            mp_ui_host_close();
+        }
+        aSTM_net_end(master);
+    }
+}
+
+static void aSTM_net_host_portmap(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (aSTM_net_answered()) {
+        if (mChoice_GET_CHOSENUM() == mChoice_CHOICE1) {
+            mp_ui_host_close();
+        }
+        aSTM_net_end(master);
+    }
+}
+
+// entry
+
+// the line's timetable: who's here and who's on the way, with only the choices that apply (each one's meaning kept)
+static int aSTM_net_host_status_msg(void) {
+    static const int msg_no[7][2] = {
+        { MP_MSG_P_HS_0, MP_MSG_P_HS_0T },     { MP_MSG_P_HS_W1, MP_MSG_P_HS_W1T },
+        { MP_MSG_P_HS_WN, MP_MSG_P_HS_WNT },   { MP_MSG_P_HS_A1, MP_MSG_P_HS_A1T },
+        { MP_MSG_P_HS_A1W, MP_MSG_P_HS_A1WT }, { MP_MSG_P_HS_AN, MP_MSG_P_HS_ANT },
+        { MP_MSG_P_HS_ANW, MP_MSG_P_HS_ANWT },
+    };
+    u8 ticket[MP_TICKET_LEN + 1];
+    u8 name[MP_NAME_LEN];
+    u8 town[MP_NAME_LEN];
+    int has_ticket = mp_ui_host_ticket(ticket);
+    int here = mp_ui_host_arrived();
+    int coming = mp_ui_host_inbound(town);
+    int n = 0;
+    int st;
+
+    if (here >= 2) {
+        aSTM_net.host_act[n++] = aSTM_NET_ACT_WHO;
+    }
+    if (has_ticket) {
+        aSTM_net.host_act[n++] = aSTM_NET_ACT_TICKET;
+    }
+    aSTM_net.host_act[n++] = aSTM_NET_ACT_CLOSE;
+    aSTM_net.host_act[n++] = aSTM_NET_ACT_NEVERMIND;
+
+    if (here == 0) {
+        st = coming == 0 ? 0 : coming == 1 ? 1 : 2;
+        if (coming > 0) {
+            aSTM_net_set_str(mMsg_FREE_STR16, town, MP_NAME_LEN);
+            aSTM_net_set_num(mMsg_FREE_STR18, coming);
+        }
+    } else if (here == 1) {
+        mp_ui_host_visitor(0, name, town);
+        aSTM_net_set_str(mMsg_FREE_STR17, name, MP_NAME_LEN);
+        aSTM_net_set_str(mMsg_FREE_STR16, town, MP_NAME_LEN);
+        st = coming > 0 ? 4 : 3;
+    } else {
+        aSTM_net_set_num(mMsg_FREE_STR18, here);
+        st = coming > 0 ? 6 : 5;
+    }
+    aSTM_net.page_msg = msg_no[st][has_ticket ? 1 : 0];
+    return aSTM_net.page_msg;
+}
+
+static void aSTM_net_open_host_status(ACTOR* actorx) {
+    mDemo_Set_msg_num(aSTM_net_host_status_msg());
+    aSTC_clip_change_talk_proc(actorx, aSTM_TALK_NET_HOST_STATUS);
+}
+
+// a visitor's train home just left: Porter passes on their thanks, then the timetable
+static void aSTM_net_host_thanks(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
+    if (mDemo_Get_OrderValue(mDemo_ORDER_NPC0, 9) != 0) {
+        mDemo_Set_OrderValue(mDemo_ORDER_NPC0, 9, 0);
+        aSTM_net_continue(aSTM_net_host_status_msg());
+        aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_NET_HOST_STATUS);
+    }
+}
+
+static int aSTC_clip_net_route(ACTOR* actorx) {
+    if (!mp_ui_available()) {
+        return FALSE;
+    }
+
+    if (mp_ui_host_closing()) {
+        mDemo_Set_msg_num(MP_MSG_P_HOST_CLOSING_WAIT);
+        aSTC_clip_change_talk_proc(actorx, aSTM_TALK_END_WAIT);
+    } else if (mp_ui_hosting()) {
+        u8 name[MP_NAME_LEN];
+
+        if (mp_ui_host_thanks(name)) {
+            aSTM_net_set_str(mMsg_FREE_STR17, name, MP_NAME_LEN);
+            mDemo_Set_msg_num(MP_MSG_P_HOST_THANKS);
+            aSTC_clip_change_talk_proc(actorx, aSTM_TALK_NET_HOST_THANKS);
+        } else {
+            aSTM_net_open_host_status(actorx);
+        }
+    } else {
+        mDemo_Set_msg_num(MP_MSG_P_RES_MENU);
+        aSTC_clip_change_talk_proc(actorx, aSTM_TALK_NET_RES_MENU);
+    }
+    return TRUE;
+}

@@ -117,8 +117,14 @@ static void Player_actor_Pull_net_demo_ct(ACTOR* actor) {
             player->item_net_has_catch = TRUE;
         }
         if (idx == aINS_INSECT_TYPE_SPIRIT) {
+#ifndef BUGFIXES
             int item_idx = mPr_GetPossessionItemIdxKindWithCond(Save_GetPointer(private_data[Common_Get(player_no)]),
                                                                 ITM_SPIRIT0, ITM_SPIRIT4, FALSE);
+#else
+            // @BUG - a foreigner's player_no (4) indexed past private_data[]; the pockets are always Now_Private's
+            int item_idx =
+                mPr_GetPossessionItemIdxKindWithCond(Common_Get(now_private), ITM_SPIRIT0, ITM_SPIRIT4, FALSE);
+#endif
 
             if (item_idx == -1) {
                 msg_no = 0x2F03;
@@ -179,6 +185,12 @@ static int Player_actor_MessageControl_Pull_net(ACTOR* actor) {
     }
 
     if (main_pull->timer >= 50.0f) {
+#ifdef VITA_MP
+        // another player may have netted it too: the report waits on the host's word, and an empty net has none
+        if (pc_mp_cr_net_waiting() || player->item_net_catch_label == 0) {
+            return FALSE;
+        }
+#endif
         if (!mDemo_Check(mDemo_TYPE_REPORT, actor)) {
             mDemo_Request(mDemo_TYPE_REPORT, actor, Player_actor_Pull_net_demo_ct);
         } else {
@@ -192,6 +204,15 @@ static void Player_actor_request_proc_index_fromPull_net(ACTOR* actor, GAME* gam
     PLAYER_ACTOR* player = (PLAYER_ACTOR*)actor;
     mPlayer_main_pull_net_c* main_pull = &player->main_data.pull_net;
 
+#ifdef VITA_MP
+    // another player's net got it first: this one comes up empty
+    if (player->item_net_catch_label == 0) {
+        if (end_flag != FALSE) {
+            Player_actor_request_main_wait_all(game, -5.0f, 0.0f, 0, mPlayer_REQUEST_PRIORITY_34);
+        }
+        return;
+    }
+#endif
     if (end_flag != FALSE && pull != FALSE) {
         Player_actor_request_main_notice_net(game, main_pull->already_collected, mPlayer_REQUEST_PRIORITY_27);
     }

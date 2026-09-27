@@ -24,6 +24,9 @@ static void aGYO_change_data_area(Object_Exchange_c* exc) {
 static void aGYO_destruct(ACTOR* actorx, GAME* game) {
     aGYO_CTRL_ACTOR* ctrl = (aGYO_CTRL_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    pc_mp_cr_unbind(actorx);
+#endif
     ctrl->exist = FALSE;
     ctrl->gyo_flags = 0;
     ClObjPipe_dt(game, &ctrl->col_pipe);
@@ -64,6 +67,8 @@ static void aGYO_setupActor(aGYO_Init_c* init_data, int idx) {
     aGYO_CTRL_ACTOR* ctrl = &gyoei->ctrl[idx];
     GAME_PLAY* play = (GAME_PLAY*)init_data->game;
     Object_Exchange_c* exc = &play->object_exchange;
+    int bx = play->block_table.block_x;
+    int bz = play->block_table.block_z;
 
     bzero(ctrl, sizeof(aGYO_CTRL_ACTOR));
     ctrl->tools_class.actor_class.shape_info.ofs_y = 200.0f;
@@ -74,9 +79,12 @@ static void aGYO_setupActor(aGYO_Init_c* init_data, int idx) {
     ctrl->range = 40.0f;
     ctrl->col_flags |= 1;
 
+#ifdef VITA_MP
+    // a copy of another game's fish belongs to that fish's acre (out at sea it swims clear of the shore)
+    mp_cr_binding_block(&bx, &bz);
+#endif
     Actor_init_actor_class((ACTOR*)ctrl, &Dummy_Profile, NULL, play, -1, init_data->position.x, init_data->position.y,
-                           init_data->position.z, 0, 0, 0, play->block_table.block_x, play->block_table.block_z, -1,
-                           EMPTY_NO, 0);
+                           init_data->position.z, 0, 0, 0, bx, bz, -1, EMPTY_NO, 0);
     Shape_Info_init((ACTOR*)ctrl, 0.0f, &mAc_ActorShadowCircle, 5.0f, 5.0f);
     ctrl->tools_class.actor_class.shape_info.shadow_alpha_change_rate = 0.6f;
     ctrl->tools_class.actor_class.world = ctrl->tools_class.actor_class.home;
@@ -127,12 +135,58 @@ static void aGYO_setupActor(aGYO_Init_c* init_data, int idx) {
     ctrl->tools_class.actor_class.drawn = TRUE;
 }
 
+#ifdef VITA_MP
+static int aGYO_mp_type[aGYO_MAX_GYOEI]; // each slot's fish as rolled (setup folds a river-mouth salmon in)
+static u8 aGYO_mp_bolted[aGYO_MAX_GYOEI]; // darting off (2 with a start)
+
+// something spooked this fish on another player's screen
+void aGYO_mp_scare(void* actor) {
+    ((aGYO_CTRL_ACTOR*)actor)->escape_flag = TRUE;
+}
+
+void aGYO_mp_bolt(void* actor, int start) {
+    int idx = (aGYO_CTRL_ACTOR*)actor - ((GYOEI_ACTOR*)aGYO_ctrlActor)->ctrl;
+
+    if (idx >= 0 && idx < aGYO_MAX_GYOEI && aGYO_mp_bolted[idx] != 2) {
+        aGYO_mp_bolted[idx] = start ? 2 : 1;
+    }
+}
+
+// the screen running this fish saw it dart off: its ripple and shadow go here too
+void aGYO_mp_bolt_copy(void* actor, void* game, int start) {
+    aGYO_CTRL_ACTOR* ctrl = (aGYO_CTRL_ACTOR*)actor;
+    ACTOR* actorx = (ACTOR*)ctrl;
+    GAME_PLAY* play = (GAME_PLAY*)game;
+    xyz_t pos = actorx->world.position;
+    xyz_t flow;
+
+    if (!actorx->drawn) {
+        return;
+    }
+    pos.y = mCoBG_GetWaterHeight_File(pos, __FILE__, __LINE__);
+    if (start && ctrl->size_type <= aGYO_SIZE_XXL && eEC_CLIP != NULL) {
+        mCoBG_GetWaterFlow(&flow, mCoBG_Wpos2BgAttribute_Original(actorx->world.position));
+        eEC_CLIP->effect_make_proc(eEC_EFFECT_TURI_HAMON, pos, 1, atans_table(flow.z, flow.x), (GAME*)play, EMPTY_NO,
+                                   ctrl->size_type <= aGYO_SIZE_M ? 3 : 2, 0);
+    }
+    Actor_info_make_actor(&play->actor_info, (GAME*)play, mAc_PROFILE_GYO_KAGE, pos.x, pos.y - 8.0f, pos.z, 0, 0, 0,
+                          play->block_table.block_x, play->block_table.block_z, -1, EMPTY_NO, ctrl->size_type, -1,
+                          ACTOR_OBJ_BANK_KEEP);
+}
+#endif
+
 static int aGYO_make_gyoei(aGYO_Init_c* init_data) {
     int idx = aGYO_searchRegistSpace();
     int ret = FALSE;
 
     if (idx >= 0) {
         aGYO_setupActor(init_data, idx);
+#ifdef VITA_MP
+        aGYO_mp_type[idx] = init_data->fish_type;
+        aGYO_mp_bolted[idx] = 0;
+        pc_mp_cr_made(MP_CR_FISH, init_data->fish_type, &init_data->position, init_data->extra_data,
+                      &((GYOEI_ACTOR*)aGYO_ctrlActor)->ctrl[idx]);
+#endif
         ret = TRUE;
     }
 
@@ -168,6 +222,10 @@ static void aGYO_ballcheck(xyz_t* pos_p, f32 r, s16 type) {
 
         ctrl++;
     }
+#ifdef VITA_MP
+    // the fish other games run there bolt as well
+    pc_mp_cr_scare_at(pos_p, aGYO_escape_distance(type));
+#endif
 }
 
 static void aGYO_hitcheck(xyz_t* pos_p, s16 size_type) {
@@ -203,6 +261,9 @@ static void aGYO_hitcheck(xyz_t* pos_p, s16 size_type) {
 
         ctrl++;
     }
+#ifdef VITA_MP
+    pc_mp_cr_scare_at(pos_p, size_type == aGYO_SIZE_XXS ? 70.0f : (size_type <= aGYO_SIZE_M ? 85.0f : 100.0f));
+#endif
 }
 
 static int aGYO_chk_live_gyoei(int bx, int bz, GAME* game) {

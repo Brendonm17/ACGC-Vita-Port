@@ -3,6 +3,10 @@ static u16 aNTT_bitset_func(u16 field, int flag) {
     aNTT_event_common_c* common = (aNTT_event_common_c*)mEv_get_common_area(mEv_EVENT_KK_SLIDER, 0x10);
     if (player_no == mPr_FOREIGNER) {
         common->foreigner_bitfield |= flag;
+#ifdef VITA_MP
+        // a visitor's greeting and aircheck hold for the night in its passport, a return trip included
+        mp_mark_set(MP_MARK_KK, flag);
+#endif
     } else {
         field |= ((u16)flag << player_no);
     }
@@ -13,6 +17,11 @@ static int aNTT_bitcheck_func(int field, u16 flag) {
     u16 player_no = Common_Get(player_no);
     aNTT_event_common_c* common = (aNTT_event_common_c*)mEv_get_common_area(mEv_EVENT_KK_SLIDER, 0x10);
     if (player_no == mPr_FOREIGNER) {
+#ifdef VITA_MP
+        if (mp_mark_get(MP_MARK_KK) & flag) {
+            return flag;
+        }
+#endif
         return common->foreigner_bitfield & flag;
     } else {
         return (u16)field & (flag << player_no);

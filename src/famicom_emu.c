@@ -14,6 +14,9 @@
 #include "m_debug.h"
 #include "m_malloc.h"
 #include "m_scene.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static int famicom_done = FALSE;
 static int famicom_done_countdown = 0;
@@ -169,6 +172,10 @@ extern void famicom_emu_init(GAME* game) {
 
     game->exec = famicom_emu_main;
     game->cleanup = famicom_emu_cleanup;
+#ifdef VITA_MP
+    // (a shared town goes on for its visitors meanwhile)
+    pc_mp_emu_enter();
+#endif
 
 #ifdef TARGET_PC
     /* Pump audio system until it transitions to sub-game (NES) mode */
@@ -214,6 +221,9 @@ extern void famicom_emu_init(GAME* game) {
 }
 
 extern void famicom_emu_cleanup(GAME* game) {
+#ifdef VITA_MP
+    pc_mp_emu_leave();
+#endif
     JC_JFWDisplay_startFadeIn(JC_JFWDisplay_getManager(), 1);
 
     if (famicom_cleanup() != 0) {

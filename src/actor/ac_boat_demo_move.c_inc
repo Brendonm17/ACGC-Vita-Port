@@ -103,6 +103,9 @@ static void aBTD_change_season(BOAT_DEMO_ACTOR* boat_demo, GAME_PLAY* play) {
         aWeather_RequestChangeWeatherToIsland();
         mISL_ChangeBG();
         mRmTp_DecideCottageDefaultLightSwitch();
+#ifdef VITA_MP
+        mp_light_boat();
+#endif
         mSP_SelectRandomItemToAGB();
         mISL_ClearNowPlayerAction();
         mNpc_SetIslandPresentFtr();

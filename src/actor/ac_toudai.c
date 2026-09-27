@@ -1,4 +1,7 @@
 #include "ac_toudai.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #include "m_name_table.h"
 #include "m_rcp.h"
@@ -54,6 +57,13 @@ static void aTOU_fgunit_on(ACTOR* actor) {
     pos.x -= 40.0f;
     pos.z -= 80.0f;
     for (i = 0; i < 2; i++) {
+#ifdef VITA_MP
+        // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+        if (mp_town_keep_at(&pos, MP_KEEP_UNIT)) {
+            pos.x += 40.0f;
+            continue;
+        }
+#endif
         nameptr = mFI_GetUnitFG(pos);
         if (nameptr != NULL) {
             if (mSN_ClearSnowman(nameptr) == 0) {
@@ -85,6 +95,12 @@ static void aTOU_fgunit_off(ACTOR* actor) {
     pos.x -= 40.0f;
     pos.z -= 80.0f;
     for (i = 0; i < 2; i++) {
+#ifdef VITA_MP
+        if (mp_town_keep_at(&pos, MP_KEEP_NONE)) {
+            pos.x += 40.0f;
+            continue;
+        }
+#endif
         mFI_SetFG_common(EMPTY_NO, pos, 1);
         pos.x += 40.0f;
     }

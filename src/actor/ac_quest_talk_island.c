@@ -12,6 +12,9 @@
 #include "m_melody.h"
 #include "m_ledit_ovl.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static int aQMgr_decide_msg_trade(QUEST_MANAGER_ACTOR* manager, int looks);
 
@@ -513,6 +516,9 @@ static void aQMgr_trade_give_item(int trade_idx, int pockets_idx) {
         if (ITEM_IS_FTR(item)) {
             if (aMR_CorrespondFurniture(item, present_ftr) == TRUE && mNpc_GetIslandPresentFtrPersonalID() != NULL) {
                 mPr_ClearPersonalID(mNpc_GetIslandPresentFtrPersonalID());
+#ifdef VITA_MP
+                mp_island_ftr(FALSE, NULL, item); // (the present is given for good: the host's islander lets it go)
+#endif
             } else {
                 mNpc_EraseIslandFtr(item);
                 mNpc_EraseIslandFtr_keep(item);

@@ -10,6 +10,12 @@ static void change_FGUnit(ACTOR* actorx, int keep_flag) {
     xyz_t_move(&pos, &actorx->world.position);
     pos.z += 2 * mFI_UT_WORLDSIZE_Z_F;
 
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, keep_flag ? MP_KEEP_UNIT : MP_KEEP_NONE)) {
+        return;
+    }
+#endif
     if (keep_flag == FALSE) {
         mFI_SetFG_common(EMPTY_NO, pos, TRUE);
     } else {
@@ -403,6 +409,14 @@ static f32 aHUS_ctrl_light(HOUSE_ACTOR* house) {
 
 static void aHUS_wait(HOUSE_ACTOR* house, GAME_PLAY* play) {
     int next_act = -1;
+#ifdef VITA_MP
+    int out;
+
+    // another player through this door: it opens and shuts as it does for a villager
+    if (house->request_type == 0 && mp_door_take(house, &out)) {
+        house->request_type = out ? 2 : 1;
+    }
+#endif
 
     switch (aHUS_check_open(house, play)) {
         case 1:

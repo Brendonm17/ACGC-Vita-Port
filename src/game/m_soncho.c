@@ -9,7 +9,20 @@
 #include "m_item_name.h"
 #include "m_string.h"
 #include "m_font.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #include "ac_taisou_npc0.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+// a visitor too, when the host lets visitors do what residents do: trophies and the card live in the passport (the card
+// only on the traveller's own day, or its date would lose it back home)
+#define mSC_OUTSIDER()      (Common_Get(player_no) == mPr_FOREIGNER && !mp_visitor_rights())
+#define mSC_CARD_OUTSIDER() (Common_Get(player_no) == mPr_FOREIGNER && !(mp_visitor_rights() && mp_rights_same_day()))
+#else
+#define mSC_OUTSIDER()      (Common_Get(player_no) == mPr_FOREIGNER)
+#define mSC_CARD_OUTSIDER() (Common_Get(player_no) == mPr_FOREIGNER)
+#endif
 #include "m_player_lib.h"
 
 static u8 event_table[mSC_EVENT_NUM] = {
@@ -468,7 +481,7 @@ extern int mSC_Radio_Set_Talk_Proc(TAISOU_NPC0_ACTOR* taisou_actor) {
         mActor_name_t card;
         int article;
 
-        if (Common_Get(player_no) == mPr_FOREIGNER) {
+        if (mSC_CARD_OUTSIDER()) {
             msg_no = 0x343B;
         } else if (time_check == mSC_RADIO_TIME_SAME_DAY) {
             msg_no = 0x3433;
@@ -658,7 +671,7 @@ extern int mSC_Radio_Set_Talk_Proc(TAISOU_NPC0_ACTOR* taisou_actor) {
                 }
             }
         }
-    } else if (Common_Get(player_no) == mPr_FOREIGNER) {
+    } else if (mSC_OUTSIDER()) {
         msg_no = mSC_Radio_msg(taisou_actor, 9);
         taisou_actor->talk_proc = mSCR_TALK_8;
     } else if (mSC_trophy_get(taisou_actor->soncho_event) != FALSE) {
@@ -1069,6 +1082,9 @@ extern void mSC_LightHouse_Switch_On() {
 
     day = mSC_LightHouse_day(rtc_time);
     lh->days_switched_on |= (1 << day);
+#ifdef VITA_MP
+    mp_world_lighthouse(day); // (a visitor's light counts in the host's town too)
+#endif
     player_no = Common_Get(player_no);
 
     if (player_no < mPr_FOREIGNER) {

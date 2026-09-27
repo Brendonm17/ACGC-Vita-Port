@@ -3,6 +3,9 @@
 #include "m_common_data.h"
 #include "m_player_lib.h"
 #include "ac_uki.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aGTT_ACTION_SWIM,
@@ -152,6 +155,9 @@ static void aGTT_kage_make_actor(aGYO_CTRL_ACTOR* gyo, GAME* game, u8 state) {
 
     if (state == 0) {
         gyo->gyo_flags |= 0x20;
+#ifdef VITA_MP
+        aGYO_mp_bolt(gyo, FALSE);
+#endif
     }
     
     height = aGTT_Get_water_surface_position_y(gyo->tools_class.actor_class.world.position);
@@ -365,6 +371,9 @@ static int aGTT_player_near(ACTOR* actorx, GAME* game) {
             mPlib_Check_HitScoop(&pos)
         ))) ||
         gyo->escape_flag
+#ifdef VITA_MP
+        || mp_cr_dash_near(&actorx->world.position, 110.0f)
+#endif
         // clang-format on
     ) {
         aGTT_set_angle(actorx, target_angle + DEG2SHORT_ANGLE2(180.0f));
@@ -382,6 +391,10 @@ static int aGTT_player_near(ACTOR* actorx, GAME* game) {
                 break;
         }
 
+#ifdef VITA_MP
+        // spooked: its start shows on the other screens too
+        aGYO_mp_bolt(gyo, TRUE);
+#endif
         aGTT_kage_make_actor(gyo, game, 0);
         ret = TRUE;
     }
@@ -860,6 +873,10 @@ static void aGTT_setupAction(aGYO_CTRL_ACTOR* gyo, int action) {
 static void aGTT_actor_move(ACTOR* actorx, GAME* game) {
     aGYO_CTRL_ACTOR* gyo = (aGYO_CTRL_ACTOR*)actorx;
     
+#ifdef VITA_MP
+    // the fish on the local player's line: its splashes show at the puppet too
+    pc_mp_fx_capture((gyo->gyo_flags & 4) != 0);
+#endif
     actorx->world.position.y = aGTT_Get_water_surface_position_y(actorx->world.position);
     if (aGYO_check_bridge(gyo) == TRUE && aGYO_check_fall(gyo) == TRUE) {
         (*gyo->act_proc)(actorx, game);
@@ -869,4 +886,7 @@ static void aGTT_actor_move(ACTOR* actorx, GAME* game) {
     } else if (DECREMENT_TIMER(gyo->work0) == 0) {
         gyo->gyo_flags |= 0x20;
     }
+#ifdef VITA_MP
+    pc_mp_fx_capture(FALSE);
+#endif
 }

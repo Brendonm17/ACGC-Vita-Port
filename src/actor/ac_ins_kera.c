@@ -507,3 +507,12 @@ static void aIKR_actor_move(ACTOR* actorx, GAME* game) {
         insect->action_proc(actorx, game);
     }
 }
+
+#ifdef VITA_MP
+// another game ran this bug until now: this one carries on from the state that one had it in
+void aIKR_mp_set_action(aINS_INSECT_ACTOR* insect, int action, GAME* game) {
+    if (action >= 0 && action < aIKR_ACT_NUM && action != insect->action) {
+        aIKR_setupAction(insect, action, game);
+    }
+}
+#endif

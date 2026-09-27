@@ -48,7 +48,15 @@ static int aDOU_get_douzou_type(int house_no) {
 }
 
 static void KeepItem(xyz_t pos) {
-    mActor_name_t* unit_fg = mFI_GetUnitFG(pos);
+    mActor_name_t* unit_fg;
+
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's statue's spots to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, MP_KEEP_UNIT)) {
+        return;
+    }
+#endif
+    unit_fg = mFI_GetUnitFG(pos);
     if (unit_fg != NULL) {
         mFI_Wpos2DepositOFF(pos);
         mPB_keep_item(*unit_fg);

@@ -6,6 +6,15 @@
 #include "libultra/libultra.h"
 #include "ac_set_ovl_insect.h"
 #include "ac_set_ovl_gyoei.h"
+#ifdef VITA_MP
+#include "m_play.h"
+#include "pc_mp.h"
+#include "m_common_data.h"
+#include "m_kankyo.h"
+#include "m_random_field_h.h"
+
+static SET_MANAGER* aSetMgr_mp_self; // this game's, for rolling another player's step
+#endif
 
 /**
  * @brief Gets the X & Z acre the player is currently in.
@@ -186,7 +195,13 @@ static int aSetMgr_move_set(GAME_PLAY* play, SET_MANAGER* set_manager) {
 
   if (aSetMgr_ovl(&set_manager->set_overlay, set_manager->set_ovl_type) == TRUE &&
       set_manager->set_overlay.ovl_proc != NULL) {
+#ifdef VITA_MP
+      pc_mp_cr_roll(TRUE, set_manager->player_pos.next_bx, set_manager->player_pos.next_bz);
+#endif
       set_manager->set_overlay.ovl_proc(set_manager, play);
+#ifdef VITA_MP
+      pc_mp_cr_roll(FALSE, 0, 0);
+#endif
       set_manager->set_ovl_type++;
   }
   else {
@@ -255,7 +270,49 @@ static void aSetMgr_ct(ACTOR* actor, GAME* game) {
   set_manager->wait_timer = aSetMgr_WAIT_TIME;
 
   aSetMgr_clear_keep(&set_manager->keep);
+#ifdef VITA_MP
+  aSetMgr_mp_self = set_manager;
+#endif
 }
+
+#ifdef VITA_MP
+// another player's step rolled here as for our own step (host), or one the host left to us (visitor)
+int aSetMgr_mp_roll(struct game_play_s* play_s, int bx, int bz) {
+  GAME_PLAY* play = (GAME_PLAY*)play_s;
+  SET_MANAGER* set_manager = aSetMgr_mp_self;
+  int keep_bx;
+  int keep_bz;
+  s16 keep_w;
+  s16 keep_wi;
+
+  if (set_manager == NULL) {
+    return FALSE;
+  }
+  keep_bx = set_manager->player_pos.next_bx;
+  keep_bz = set_manager->player_pos.next_bz;
+  keep_w = Common_Get(weather);
+  keep_wi = Common_Get(weather_intensity);
+  // (with the weather over that acre: the island's out there, the town's elsewhere)
+  if (mFI_BkNum2BlockKind(bx, bz) & mRF_BLOCKKIND_ISLAND) {
+    Common_Set(weather, Common_Get(island_weather));
+    Common_Set(weather_intensity, Common_Get(island_weather_intensity));
+  } else {
+    Common_Set(weather, mEnv_SAVE_GET_WEATHER_TYPE(Save_Get(weather)));
+    Common_Set(weather_intensity, mEnv_SAVE_GET_WEATHER_INTENSITY(Save_Get(weather)));
+  }
+  set_manager->player_pos.next_bx = bx;
+  set_manager->player_pos.next_bz = bz;
+  pc_mp_cr_roll(TRUE, bx, bz);
+  aSOI_insect_set(set_manager, play);
+  aSOG_gyoei_set(set_manager, play);
+  pc_mp_cr_roll(FALSE, 0, 0);
+  set_manager->player_pos.next_bx = keep_bx;
+  set_manager->player_pos.next_bz = keep_bz;
+  Common_Set(weather, keep_w);
+  Common_Set(weather_intensity, keep_wi);
+  return TRUE;
+}
+#endif
 
 /**
  * @brief SET_MANAGER destructor.
@@ -263,7 +320,13 @@ static void aSetMgr_ct(ACTOR* actor, GAME* game) {
  * @param actor Pointer to the SET_MANAGER actor
  * @param game GAME pointer
  **/
-static void aSetMgr_dt(ACTOR* actor, GAME* game) { }
+static void aSetMgr_dt(ACTOR* actor, GAME* game) {
+#ifdef VITA_MP
+  if (aSetMgr_mp_self == (SET_MANAGER*)actor) {
+    aSetMgr_mp_self = NULL;
+  }
+#endif
+}
 
 /* actor profile for SET_MANAGER */ 
 ACTOR_PROFILE Set_Manager_Profile = {

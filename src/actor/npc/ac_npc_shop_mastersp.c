@@ -5,6 +5,9 @@
 #include "m_item_name.h"
 #include "m_msg.h"
 #include "m_bgm.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aSHM_WON_FIRST_PLACE,

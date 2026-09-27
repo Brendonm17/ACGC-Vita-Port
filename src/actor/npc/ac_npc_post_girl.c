@@ -9,6 +9,9 @@
 #include "m_house.h"
 #include "m_home_h.h"
 #include "m_player.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 void aPG_Set_continue_msg_num(NPC_POSTGIRL_ACTOR *postgirl, int msg);
 void aPG_setupAction(NPC_POSTGIRL_ACTOR *postgirl, GAME_PLAY *play, int action);
@@ -63,6 +66,12 @@ void aPG_actor_ct(ACTOR *actorx, GAME *game) {
                 postgirl->has_bank_account = TRUE;
             }
         }
+#ifdef VITA_MP
+        // a visitor's house is back home: savings open to them as they would there
+        else if (Now_Private->inventory.loan == 0 && mp_rights_home_bank()) {
+            postgirl->has_bank_account = TRUE;
+        }
+#endif
     }
 }
 
@@ -74,6 +83,10 @@ void aPG_actor_dt(ACTOR *actorx, GAME *game) {
     NPC_POSTGIRL_ACTOR *postgirl = (NPC_POSTGIRL_ACTOR *)actorx;
     if (postgirl->is_desk_full == TRUE) {
         Common_Get(force_mail_delivery_flag) = TRUE;
+#ifdef VITA_MP
+        // the host keeps this for the whole town
+        pc_mp_mail_told(MP_MAIL_FORCE, 0);
+#endif
     }
     CLIP(npc_clip)->dt_proc(actorx, game);
 }

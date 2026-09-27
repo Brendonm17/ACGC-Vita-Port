@@ -18,6 +18,9 @@
 #include "m_fishrecord.h"
 #include "m_event.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define lbRTC_TIME_TO_U32(t) ((u32)(((t)->year << 16) + ((t)->month << 8) + (t)->day))
 
@@ -234,6 +237,10 @@ extern int mNtc_notice_write_num() {
 
 extern void mNtc_notice_write(mNtc_board_post_c* new_post) {
     int write_num = mNtc_notice_write_num();
+#ifdef VITA_MP
+    // a visitor's post goes on the host's board as well
+    mp_world_board_post(new_post, sizeof(*new_post));
+#endif
     if (write_num == mNtc_BOARD_POST_COUNT) {
         mNtc_board_post_c* post = Save_Get(noticeboard);
         int i;

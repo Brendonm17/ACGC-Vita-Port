@@ -40,6 +40,12 @@ static void eHanabiBotan2_ct(eEC_Effect_c* effect, GAME* game, void* ct_arg) {
     effect->offset.y = 0.f;
     effect->offset.z = 0.f;
     effect->effect_specific[3] = (u16)(RANDOM_F(10.f)) & 1;
+#ifdef VITA_MP
+    // a shell from a shared show: its colour came with it
+    if (effect->arg1 & 0x40) {
+        effect->effect_specific[3] = effect->arg1 & 1;
+    }
+#endif
 }
 
 static void eHanabiBotan2_mv(eEC_Effect_c* effect, GAME* game) {

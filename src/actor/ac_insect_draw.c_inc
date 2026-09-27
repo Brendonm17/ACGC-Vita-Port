@@ -94,7 +94,27 @@ static void aINS_actor_draw_sub(GRAPH* graph, aINS_INSECT_ACTOR* insect, GAME* g
 
     SET_POLY_XLU_DISP(gfx);
     CLOSE_DISP(graph);
+#ifdef VITA_MP
+    // the bug in the local player's net shows on the other screens too
+    if ((u32)insect == mPlib_Get_item_net_catch_label() && (draw_type & 1) == 0) {
+        u8 rgba[4] = { 255, 255, 255, 255 };
+
+        rgba[3] = (u8)alpha;
+        pc_mp_attach(MP_ATT_INSECT, insect->type, draw_type, rgba, get_Matrix_now());
+    }
+#endif
 }
+
+#ifdef VITA_MP
+Gfx* aINS_mp_insect_dl(int type, int draw_type) {
+    int max = (type == aINS_INSECT_TYPE_MOLE_CRICKET) ? 1 : 3;
+
+    if (type < 0 || type > aINS_INSECT_TYPE_SPIRIT || draw_type < 0 || draw_type > max) {
+        return NULL;
+    }
+    return aINS_displayList[type][draw_type];
+}
+#endif
 
 static void aINS_actor_draw(ACTOR* actorx, GAME* game) {
     GRAPH* graph = game->graph;

@@ -11,6 +11,9 @@
 #include "gfxalloc.h"
 #include "m_rcp.h"
 #include "m_event_map_npc.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define GOLD_TREE_SAPLING_EFFECT_X 12.0f
 #define GOLD_TREE_SAPLING_EFFECT_Y 27.0f

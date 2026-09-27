@@ -28,6 +28,17 @@ PCSettings g_pc_settings = {
     .boot_logo     = 1,
     .text_speed    = 1,
     .save_slot     = 0,
+    .mp_visitor_rights = 1,
+    .mp_visitor_items   = 1,
+    .mp_visitor_dig     = 1,
+    .mp_visitor_axe     = 1,
+    .mp_visitor_tune    = 1,
+    .mp_visitor_board   = 1,
+    .mp_visitor_cottage = 1,
+    .mp_visitor_designs = 1,
+    .mp_ask_join        = 0,
+    .mp_chat            = 1,
+    .mp_chat_keyboard   = 0,
 #endif
 };
 
@@ -82,7 +93,35 @@ static const char* DEFAULT_SETTINGS =
     "# save_slot: 0 = home is card_a, Porter visits card_b\n"
     "#            1 = home is card_b, Porter visits card_a\n"
     "# Both folders stay put; this just swaps which one is home.\n"
-    "save_slot = 0\n";
+    "save_slot = 0\n"
+    "\n"
+    "[Online]\n"
+    "# mp_visitor_rights: 1 = your visitors can do what residents do (museum, bank...), 0 = original visitor rules\n"
+    "mp_visitor_rights = 1\n"
+    "\n"
+    "# What visitors to your town may do: 1 = yes, 0 = no\n"
+    "# mp_visitor_items: pick up, drop, dig up, bury and plant things\n"
+    "mp_visitor_items = 1\n"
+    "# mp_visitor_dig: dig holes\n"
+    "mp_visitor_dig = 1\n"
+    "# mp_visitor_axe: cut down trees\n"
+    "mp_visitor_axe = 1\n"
+    "# mp_visitor_tune: change the town tune\n"
+    "mp_visitor_tune = 1\n"
+    "# mp_visitor_board: post on the bulletin board\n"
+    "mp_visitor_board = 1\n"
+    "# mp_visitor_cottage: rearrange the island cottage\n"
+    "mp_visitor_cottage = 1\n"
+    "# mp_visitor_designs: change the Able Sisters' displays and the island flag\n"
+    "mp_visitor_designs = 1\n"
+    "\n"
+    "# mp_ask_join: 1 = ask you before anyone joins, 0 = only far-away visitors are asked about\n"
+    "mp_ask_join = 0\n"
+    "\n"
+    "# mp_chat: 1 = players can chat in your town (visitors go by yours), 0 = no chat\n"
+    "mp_chat = 1\n"
+    "# mp_chat_keyboard: 0 = the game's own keyboard, 1 = the Vita's keyboard\n"
+    "mp_chat_keyboard = 0\n";
 #else
 static const char* DEFAULT_SETTINGS =
     "[Graphics]\n"
@@ -185,6 +224,29 @@ static void apply_setting(const char* key, const char* value) {
         if (val >= 0 && val <= 2) g_pc_settings.text_speed = val;
     } else if (strcmp(key, "save_slot") == 0) {
         g_pc_settings.save_slot = (val == 1) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_rights") == 0) {
+        g_pc_settings.mp_visitor_rights = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_items") == 0) {
+        g_pc_settings.mp_visitor_items = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_dig") == 0) {
+        g_pc_settings.mp_visitor_dig = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_axe") == 0) {
+        g_pc_settings.mp_visitor_axe = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_tune") == 0) {
+        g_pc_settings.mp_visitor_tune = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_board") == 0) {
+        g_pc_settings.mp_visitor_board = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_cottage") == 0) {
+        g_pc_settings.mp_visitor_cottage = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_visitor_designs") == 0) {
+        g_pc_settings.mp_visitor_designs = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_ask_join") == 0) {
+        g_pc_settings.mp_ask_join = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_chat") == 0) {
+        g_pc_settings.mp_chat = (val != 0) ? 1 : 0;
+    } else if (strcmp(key, "mp_chat_keyboard") == 0) {
+        g_pc_settings.mp_chat_keyboard = (val != 0) ? 1 : 0;
+
     }
 #endif
 }
@@ -232,7 +294,31 @@ void pc_settings_save(void) {
     fprintf(f, "# save_slot: 0 = home is card_a, Porter visits card_b\n");
     fprintf(f, "#            1 = home is card_b, Porter visits card_a\n");
     fprintf(f, "# Both folders stay put; this just swaps which one is home.\n");
-    fprintf(f, "save_slot = %d\n", g_pc_settings.save_slot);
+    fprintf(f, "save_slot = %d\n\n", g_pc_settings.save_slot);
+    fprintf(f, "[Online]\n");
+    fprintf(f, "# mp_visitor_rights: 1 = your visitors can do what residents do (museum, bank...), 0 = original visitor rules\n");
+    fprintf(f, "mp_visitor_rights = %d\n\n", g_pc_settings.mp_visitor_rights);
+    fprintf(f, "# What visitors to your town may do: 1 = yes, 0 = no\n");
+    fprintf(f, "# mp_visitor_items: pick up, drop, dig up, bury and plant things\n");
+    fprintf(f, "mp_visitor_items = %d\n", g_pc_settings.mp_visitor_items);
+    fprintf(f, "# mp_visitor_dig: dig holes\n");
+    fprintf(f, "mp_visitor_dig = %d\n", g_pc_settings.mp_visitor_dig);
+    fprintf(f, "# mp_visitor_axe: cut down trees\n");
+    fprintf(f, "mp_visitor_axe = %d\n", g_pc_settings.mp_visitor_axe);
+    fprintf(f, "# mp_visitor_tune: change the town tune\n");
+    fprintf(f, "mp_visitor_tune = %d\n", g_pc_settings.mp_visitor_tune);
+    fprintf(f, "# mp_visitor_board: post on the bulletin board\n");
+    fprintf(f, "mp_visitor_board = %d\n", g_pc_settings.mp_visitor_board);
+    fprintf(f, "# mp_visitor_cottage: rearrange the island cottage\n");
+    fprintf(f, "mp_visitor_cottage = %d\n", g_pc_settings.mp_visitor_cottage);
+    fprintf(f, "# mp_visitor_designs: change the Able Sisters' displays and the island flag\n");
+    fprintf(f, "mp_visitor_designs = %d\n\n", g_pc_settings.mp_visitor_designs);
+    fprintf(f, "# mp_ask_join: 1 = ask you before anyone joins, 0 = only far-away visitors are asked about\n");
+    fprintf(f, "mp_ask_join = %d\n\n", g_pc_settings.mp_ask_join);
+    fprintf(f, "# mp_chat: 1 = players can chat in your town (visitors go by yours), 0 = no chat\n");
+    fprintf(f, "mp_chat = %d\n", g_pc_settings.mp_chat);
+    fprintf(f, "# mp_chat_keyboard: 0 = the game's own keyboard, 1 = the Vita's keyboard\n");
+    fprintf(f, "mp_chat_keyboard = %d\n", g_pc_settings.mp_chat_keyboard);
 #else
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# Window size (ignored in fullscreen)\n");

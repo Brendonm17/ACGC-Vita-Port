@@ -64,6 +64,10 @@ typedef struct background_item_clip_s {
     void* _48;
     ACTOR* bg_item_actorx;
     bIT_FADE_ENTRY_PROC fade_entry_proc;
+#ifdef VITA_MP
+    void (*mp_replay_proc)(const u8* body, int len); // another player's doing, shown by this season's items
+    void (*mp_menu_move_proc)(void);                 // behind a menu, this season's falling items land
+#endif
 } bIT_Clip_c;
 
 #ifdef __cplusplus

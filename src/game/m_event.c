@@ -9,6 +9,9 @@
 #include "m_play.h"
 #include "m_scene_table.h"
 #include "m_soncho.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     mEv_INIT_NO_RENEWAL,
@@ -293,6 +296,11 @@ extern void mEv_SetTitleDemo(int demo_number) {
 }
 
 extern void mEv_RenewalDataEveryDay() {
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed()) {
+        return;
+    }
+#endif
     if (mTM_check_renew_time(mTM_RENEW_TIME_DAILY) == TRUE) {
         int i;
 
@@ -2264,6 +2272,73 @@ extern int mEv_check_keep(int event) {
     return FALSE;
 }
 
+#ifdef VITA_MP
+// a visitor never claims or frees a slot in the host's save; these stand in until the host has one
+static struct {
+    int type;
+    u8 id;
+    u8 used;
+    int data[11];
+} l_mp_area[mEv_AREA_NUM];
+
+// a new visit starts with no stand-ins from the last one
+extern void mEv_mp_areas_reset(void) {
+    memset(l_mp_area, 0, sizeof(l_mp_area));
+}
+
+static u8* mEv_mp_area(int type, u8 id, int make) {
+    int i;
+
+    for (i = 0; i < mEv_AREA_NUM; i++) {
+        if (l_mp_area[i].used && l_mp_area[i].type == type && l_mp_area[i].id == id) {
+            return (u8*)l_mp_area[i].data;
+        }
+    }
+    if (make) {
+        static int next;
+
+        // the oldest stand-in makes way; the host's own area replaces it once it exists
+        i = next;
+        next = (next + 1) % mEv_AREA_NUM;
+        l_mp_area[i].used = TRUE;
+        l_mp_area[i].type = type;
+        l_mp_area[i].id = id;
+        memset(l_mp_area[i].data, 0, sizeof(l_mp_area[i].data));
+        return (u8*)l_mp_area[i].data;
+    }
+    return NULL;
+}
+#endif
+
+#ifdef VITA_MP
+// a visitor's own record of that event, the n-th (for the host to take when it has none)
+extern u8* mEv_mp_stand_in(int type, int n, u8* id) {
+    int i;
+
+    for (i = 0; i < mEv_AREA_NUM; i++) {
+        if (l_mp_area[i].used && l_mp_area[i].type == type && n-- == 0) {
+            *id = l_mp_area[i].id;
+            return (u8*)l_mp_area[i].data;
+        }
+    }
+    return NULL;
+}
+
+// the save's own record, past a visitor's copy
+extern u8* mEv_mp_real_area(int type, int id) {
+    mEv_save_common_data_c* ev_save_common = Save_GetPointer(event_save_common);
+    int i;
+
+    for (i = 0; i < mEv_AREA_NUM; i++) {
+        if (((1 << i) & ev_save_common->area_use_bitfield) != 0 && type == ev_save_common->area[i].info.type &&
+            (u8)id == ev_save_common->area[i].info.id) {
+            return (u8*)ev_save_common->area[i].data;
+        }
+    }
+    return NULL;
+}
+#endif
+
 extern u8* mEv_reserve_save_area(int type, u8 id) {
     lbRTC_time_c* rtc_time = Common_GetPointer(time.rtc_time);
     int index = index_today[type];
@@ -2275,6 +2350,12 @@ extern u8* mEv_reserve_save_area(int type, u8 id) {
     u8* ret;
     int exist_slot = -1;
 
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed()) {
+        ret = mEv_get_save_area(type, id);
+        return ret != NULL ? ret : mEv_mp_area(type, id, TRUE);
+    }
+#endif
     for (i = 0; i < mEv_AREA_NUM; i++) {
         if (((1 << i) & ev_save_common->area_use_bitfield) == 0) {
             free_slot_idx = i;
@@ -2327,6 +2408,17 @@ extern u8* mEv_get_save_area(int type, u8 id) {
     mEv_save_common_data_c* ev_save_common = Save_GetPointer(event_save_common);
     int i;
 
+#ifdef VITA_MP
+    // a visitor's own copy of a record the screen running its event keeps
+    {
+        u8* rec = pc_mp_ev_record(type, id);
+
+        if (rec != NULL) {
+            return rec;
+        }
+    }
+#endif
+
     for (i = 0; i < mEv_AREA_NUM; i++) {
         if (((1 << i) & ev_save_common->area_use_bitfield) != 0) {
             if (type == ev_save_common->area[i].info.type && id == ev_save_common->area[i].info.id) {
@@ -2335,12 +2427,23 @@ extern u8* mEv_get_save_area(int type, u8 id) {
         }
     }
 
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed()) {
+        return mEv_mp_area(type, id, FALSE);
+    }
+#endif
     return NULL;
 }
 
 extern int mEv_clear_save_area(int type, u8 id) {
     mEv_save_common_data_c* ev_save_common = Save_GetPointer(event_save_common);
     int i;
+
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed()) {
+        return 0;
+    }
+#endif
 
     for (i = 0; i < mEv_AREA_NUM; i++) {
         if (((1 << i) & ev_save_common->area_use_bitfield) != 0) {
@@ -2366,6 +2469,11 @@ static int update_save_area() {
 
     mEv_area_c* area;
 
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed()) {
+        return 0;
+    }
+#endif
     for (i = 0; i < mEv_AREA_NUM; i++) {
         area = &ev_save_common->area[i];
         if (((1 << i) & ev_save_common->area_use_bitfield) != 0) {
@@ -2477,6 +2585,9 @@ extern mEv_place_data_c* mEv_reserve_common_place(int type, u8 id) {
         ev_common->place[exist_slot].info.id = id;
         memset(data, 0, sizeof(ev_common->place[exist_slot].data));
         res = data;
+#ifdef VITA_MP
+        pc_mp_ev_place_made(type, id, exist_slot);
+#endif
     } else {
         res = NULL;
     }
@@ -2507,6 +2618,9 @@ extern int mEv_clear_common_place(int type, u8 id) {
         if (((1 << i) & ev_common->place_use_bitfield) != 0) {
             if (type == ev_common->place[i].info.type && id == ev_common->place[i].info.id) {
                 ev_common->place_use_bitfield &= ~(1 << i);
+#ifdef VITA_MP
+                pc_mp_ev_place_gone(type, id);
+#endif
                 return sizeof(ev_common->place[i].data);
             }
         }
@@ -2650,6 +2764,12 @@ extern void mEv_make_new_special_event() {
     mEv_schedule_c sched;
     mEv_schedule_date_u today_date;
     mEv_schedule_c* sched_p = &sched;
+
+#ifdef VITA_MP
+    if (!mp_town_writer_allowed()) {
+        return;
+    }
+#endif
 
     today_date.d.month = rtc_time->month;
     today_date.d.day = rtc_time->day;

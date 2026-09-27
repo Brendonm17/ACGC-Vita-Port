@@ -34,6 +34,12 @@
 #ifdef TARGET_VITA
 #include "pc_settings.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "pc_mp_text_data.h"
+// refuse_pickup_knife_fork_flag: the host keeps its town's things from visitors
+#define Player_actor_MP_REFUSE_HOST 2
+#endif
 
 /* Static function declarations, add as needed for intellisense */
 static void Player_actor_Item_Setup_main(ACTOR* actor, int now, int last);
@@ -368,6 +374,12 @@ static int Player_actor_request_main_demo_getoff_boat_all(GAME* game, const xyz_
 #include "../src/game/m_player_vibration.c_inc"
 #include "../src/game/m_player_common.c_inc"
 #include "../src/game/m_player_sound.c_inc"
+
+#ifdef VITA_MP
+Gfx* mPlayer_mp_sponge_model(void) {
+    return (Gfx*)tol_sponge_1_model;
+}
+#endif
 #ifdef TARGET_VITA
 #include "../src/game/m_player_vita_dpad.c_inc"
 #endif
@@ -1584,14 +1596,24 @@ extern void Player_actor_move(ACTOR* actorx, GAME* game) {
     PLAYER_ACTOR* player = (PLAYER_ACTOR*)actorx;
     int idx;
 
+#ifdef VITA_MP
+    // sounds made while the player updates replay at their puppets on other screens
+    pc_mp_fx_capture(TRUE);
+#endif
     Player_actor_move_other_func1(actorx, game); //
     idx = player->now_main_index;
     if (mPlayer_MAIN_INDEX_VALID(idx) == FALSE || proc[idx] == NULL) {
+#ifdef VITA_MP
+        pc_mp_fx_capture(FALSE);
+#endif
         return;
     }
 
     (*proc[idx])(actorx, game);
     Player_actor_move_other_func2(actorx, game); //
+#ifdef VITA_MP
+    pc_mp_fx_capture(FALSE);
+#endif
 }
 
 typedef void (*mPlayer_DRAW_PROC)(ACTOR*, GAME*);
@@ -1645,8 +1667,14 @@ extern void Player_actor_draw(ACTOR* actorx, GAME* game) {
         int draw_idx = data[main_idx];
 
         if (draw_idx >= 0 && draw_idx < mPlayer_DRAW_TYPE_NUM && proc[draw_idx] != NULL) {
+#ifdef VITA_MP
+            pc_mp_fx_capture(TRUE);
+#endif
             (*proc[draw_idx])(actorx, game);
             Player_actor_draw_other_func2(actorx, game); //
+#ifdef VITA_MP
+            pc_mp_fx_capture(FALSE);
+#endif
         }
     }
 }

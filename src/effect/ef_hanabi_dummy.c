@@ -44,6 +44,12 @@ static void eHanabiDummy_init(xyz_t pos, int prio, s16 angle, GAME* game, u16 it
 static void eHanabiDummy_ct(eEC_Effect_c* effect, GAME* game, void* ct_arg) {
     effect->timer = eHanabiDummy_TIMER;
     eHanabiDummy_TYPE_ARG = RANDOM(eHanabiDummy_TYPE_NUM);
+#ifdef VITA_MP
+    // a shell from a shared show: its kind came with it
+    if (effect->arg1 & 0x40) {
+        eHanabiDummy_TYPE_ARG = (effect->arg1 & 0xF) % eHanabiDummy_TYPE_NUM;
+    }
+#endif
 }
 
 static void eHanabiDummy_mv(eEC_Effect_c* effect, GAME* game) {

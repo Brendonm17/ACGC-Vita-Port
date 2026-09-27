@@ -1,4 +1,7 @@
 #include "ac_kamakura.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #include "m_name_table.h"
 #include "bg_item_h.h"

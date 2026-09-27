@@ -6,6 +6,12 @@ static void change_FGUnit(ACTOR* actor, int type) {
     xyz_t_move(&pos, &actor->world.position);
     pos.z += 80.0f;
 
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, type != 0 ? MP_KEEP_UNIT : MP_KEEP_NONE)) {
+        return;
+    }
+#endif
     if (type == 0) {
         mFI_SetFG_common(0, pos, 1);
         return;

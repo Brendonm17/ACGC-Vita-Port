@@ -245,6 +245,10 @@
 #include "ac_windmill.h"
 #include "ac_yatai.h"
 #include "ac_weather.h"
+#ifdef VITA_MP
+#include "ac_mp_player.h"
+#include "ac_mp_notice.h"
+#endif
 
 #define MAKE_ACTOR_DLF(actor)\
   {0,0,NULL,NULL,NULL,&actor##_Profile, 0,0,0,0}
@@ -499,13 +503,21 @@ ACTOR_DLFTBL actor_dlftbls[] = {
   MAKE_ACTOR_DLF(Npc_Hem),
   MAKE_ACTOR_DLF(Tent),
   MAKE_ACTOR_DLF(Pterminal),
-  MAKE_ACTOR_DLF(Mscore_Control)
+  MAKE_ACTOR_DLF(Mscore_Control),
+#ifdef VITA_MP
+  MAKE_ACTOR_DLF(Mp_Player),
+  MAKE_ACTOR_DLF(Mp_Notice),
+#endif
 };
 
 int actor_dlftbls_num;
 
 extern void actor_dlftbls_init() {
+#ifdef VITA_MP
+  actor_dlftbls_num = mAc_PROFILE_NUM;
+#else
   actor_dlftbls_num = 246;
+#endif
 }
 
 extern void actor_dlftbls_cleanup() {

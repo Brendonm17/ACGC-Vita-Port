@@ -11,6 +11,7 @@
 #include "pc_disc.h"
 #include "vita_banner.h"
 #include "vita_trophy.h"
+#include "pc_mp.h"
 
 #include <psp2/kernel/processmgr.h>
 
@@ -25,8 +26,6 @@ int main(int argc, char* argv[]) {
     vita_init();
     setvbuf(stdout, NULL, _IONBF, 0);
     g_pc_verbose = 0;
-
-    printf("[VITA] Animal Crossing Vita port starting...\n");
 
     pc_settings_load();
     banner_scan_folder();
@@ -61,8 +60,6 @@ int main(int argc, char* argv[]) {
     pc_assets_init();
 
     vita_trophy_init();
-
-    printf("[VITA] Initialization complete, entering game...\n");
 
     ac_entry();
     boot_main(0, NULL);

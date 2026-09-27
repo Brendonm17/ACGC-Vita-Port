@@ -11,6 +11,9 @@
 #include "sys_matrix.h"
 #include "m_rcp.h"
 #include "libforest/gbi_extensions.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #ifdef TARGET_VITA
 #include "pc_settings.h"
 #endif

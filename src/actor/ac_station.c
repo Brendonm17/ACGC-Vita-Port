@@ -18,6 +18,9 @@
 #include "m_string.h"
 #include "m_card.h"
 #include "m_cpak.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     aSTA_ACTION_WAIT,

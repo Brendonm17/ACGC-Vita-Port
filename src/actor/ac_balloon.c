@@ -4,6 +4,25 @@
 #include "sys_matrix.h"
 #include "m_player_lib.h"
 #include "m_rcp.h"
+#ifdef VITA_MP
+#include "m_play.h"
+#include "pc_mp.h"
+
+#define Ac_Balloon_MP_MAX 4
+
+// another player's balloons floating off here, each gone once it has hidden
+static ACTOR* Ac_Balloon_mp_actor[Ac_Balloon_MP_MAX];
+
+static void Ac_Balloon_mp_put(void* dst, const void* src, int n) {
+    u8* d = (u8*)dst;
+    const u8* s = (const u8*)src;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        d[i] = s[i];
+    }
+}
+#endif
 
 enum {
     Ac_Balloon_MODE_HIDE,
@@ -13,7 +32,15 @@ enum {
 };
 
 static void Ac_Balloon_dt(ACTOR* actorx, GAME* game) {
-    // empty
+#ifdef VITA_MP
+    int i;
+
+    for (i = 0; i < Ac_Balloon_MP_MAX; i++) {
+        if (Ac_Balloon_mp_actor[i] == actorx) {
+            Ac_Balloon_mp_actor[i] = NULL;
+        }
+    }
+#endif
 }
 
 extern void Ac_Balloon_request_hide(ACTOR* actorx, GAME* game) {
@@ -52,7 +79,69 @@ extern void Ac_Balloon_request_fly(ACTOR* actorx, GAME* game, int balloon_type, 
     balloon->start_frame = start_frame;
     balloon->speed = speed;
     balloon->pos = *pos_p;
+#ifdef VITA_MP
+    // the local player let it go: the other screens see it float off too
+    if (mp_vfx_recording()) {
+        u8 body[30];
+
+        body[0] = MP_VFX_BALLOON;
+        body[1] = (u8)balloon_type;
+        Ac_Balloon_mp_put(body + 2, angle_p, 6);
+        Ac_Balloon_mp_put(body + 8, &lean, 2);
+        Ac_Balloon_mp_put(body + 10, pos_p, 12);
+        Ac_Balloon_mp_put(body + 22, &start_frame, 4);
+        Ac_Balloon_mp_put(body + 26, &speed, 4);
+        mp_vfx_send(body, sizeof(body));
+    }
+#endif
 }
+
+#ifdef VITA_MP
+void Ac_Balloon_mp_replay(struct game_play_s* play_s, const u8* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_s;
+    s_xyz angle;
+    s16 lean;
+    xyz_t pos;
+    f32 start_frame;
+    f32 speed;
+    int i;
+
+    if (len < 30) {
+        return;
+    }
+    for (i = 0; i < Ac_Balloon_MP_MAX && Ac_Balloon_mp_actor[i] != NULL; i++) {
+    }
+    if (i == Ac_Balloon_MP_MAX) {
+        return;
+    }
+    Ac_Balloon_mp_put(&angle, body + 2, 6);
+    Ac_Balloon_mp_put(&lean, body + 8, 2);
+    Ac_Balloon_mp_put(&pos, body + 10, 12);
+    Ac_Balloon_mp_put(&start_frame, body + 22, 4);
+    Ac_Balloon_mp_put(&speed, body + 26, 4);
+    Ac_Balloon_mp_actor[i] = Actor_info_make_actor(&play->actor_info, (GAME*)play, mAc_PROFILE_BALLOON, pos.x, pos.y,
+                                                   pos.z, 0, 0, 0, -1, -1, -1, EMPTY_NO, -1, -1, -1);
+    if (Ac_Balloon_mp_actor[i] != NULL) {
+        Ac_Balloon_request_fly(Ac_Balloon_mp_actor[i], (GAME*)play, body[1], &angle, lean, &pos, start_frame, speed);
+    }
+}
+
+// a replayed balloon that has floated out of sight is done
+static void Ac_Balloon_mp_done(ACTOR* actorx) {
+    BALLOON_ACTOR* balloon = (BALLOON_ACTOR*)actorx;
+    int i;
+
+    for (i = 0; i < Ac_Balloon_MP_MAX; i++) {
+        if (Ac_Balloon_mp_actor[i] == actorx) {
+            if (balloon->main_mode == Ac_Balloon_MODE_HIDE && balloon->setup_mode < 0) {
+                Ac_Balloon_mp_actor[i] = NULL;
+                Actor_delete(actorx);
+            }
+            return;
+        }
+    }
+}
+#endif
 
 static void Ac_Balloon_setup_fly(ACTOR* actorx, GAME* game) {
     static int data[] = {
@@ -140,6 +229,9 @@ static void Ac_Balloon_main(ACTOR* actorx, GAME* game) {
             (*data[balloon->main_mode])(actorx, game);
         }
     }
+#ifdef VITA_MP
+    Ac_Balloon_mp_done(actorx);
+#endif
 }
 
 static void Ac_Balloon_ct(ACTOR* actorx, GAME* game) {

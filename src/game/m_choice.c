@@ -7,6 +7,9 @@
 #include "m_font.h"
 #include "m_msg.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 typedef void (*mChoice_MAIN_PROC)(mChoice_c*, GAME*);
 

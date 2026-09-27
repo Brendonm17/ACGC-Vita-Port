@@ -327,6 +327,21 @@ static int mMsg_LoadMsgData(mMsg_Data_c* msg_data, int index, int cut) {
         u32 addr;
         u32 size;
 
+#ifdef VITA_MP
+        if (pc_mp_text_is_msg(index)) {
+            if (pc_mp_text_load_msg(msg_data->text_buf.data, sizeof(msg_data->text_buf.data), index) > 0) {
+                msg_data->msg_no = index;
+                msg_data->data_loaded = TRUE;
+                msg_data->msg_len = mMsg_Count_MsgData(msg_data->text_buf.data);
+                msg_data->cut = cut;
+                return TRUE;
+            }
+
+            msg_data->data_loaded = FALSE;
+            return FALSE;
+        }
+#endif
+
         mFRm_set_msg_idx(index);
         mMsg_Get_MsgDataAddressAndSize(index, &addr, &size);
 
@@ -349,6 +364,10 @@ static int mMsg_LoadMsgData(mMsg_Data_c* msg_data, int index, int cut) {
             for (i = 0; i < len; i++) {
                 *dst_p++ = *src_p++;
             }
+#ifdef VITA_MP
+            // a few of the ROM's lines read differently for a visitor
+            pc_mp_text_patch(index, msg_data->text_buf.data, (int)size);
+#endif
 
 #ifdef TARGET_PC
             /* Truncate Kapp'n's island-arrival msg (12410/12620) at the page
@@ -378,7 +397,7 @@ static int mMsg_LoadMsgData(mMsg_Data_c* msg_data, int index, int cut) {
 }
 
 extern int mMsg_ChangeMsgData(mMsg_Window_c* msg_p, int index) {
-    if (index >= 0 && index < MSG_MAX && mMsg_LoadMsgData(msg_p->msg_data, index, FALSE)) {
+    if (index >= 0 && mMsg_IDX_VALID(index) && mMsg_LoadMsgData(msg_p->msg_data, index, FALSE)) {
         msg_p->end_text_cursor_idx = 0;
         mMsg_Clear_CursolIndex(msg_p);
         mMsg_SetTimer(msg_p, 20.0f);
@@ -581,6 +600,12 @@ extern int mMsg_MoveDataCut(u8* data, int dst_idx, int src_idx, int len, int spa
                 *dst_p-- = *src_p--;
             }
         }
+#ifdef BUGFIXES
+        // (text that can't grow keeps its length: nothing is read or written past the buffer)
+        else {
+            new_len = len;
+        }
+#endif
     }
 
     return new_len;
@@ -592,6 +617,14 @@ static void mMsg_CopyString(u8* dst, const u8* src, int len) {
     for (i = 0; i < len; i++) {
         *dst++ = *src++;
     }
+}
+
+// names, letters and free strings from saves or passwords go in as text only
+static void mMsg_CopyText(u8* dst, const u8* src, int len) {
+    mMsg_CopyString(dst, src, len);
+#ifdef BUGFIXES
+    mFont_clean_save_text(dst, len);
+#endif
 }
 
 static int mMsg_Set_PlayerNameColor(u8* data, int* start_idx, int len) {
@@ -623,7 +656,7 @@ extern int mMsg_CopyPlayerName(u8* data, int start_idx, int len, u32 capitalize)
     int name_len = mMsg_Get_Length_String(name, PLAYER_NAME_LEN);
     int new_len = mMsg_MoveDataCut(data, start_idx + name_len, start_idx + command_len, len, FALSE);
 
-    mMsg_CopyString(&data[start_idx], name, name_len);
+    mMsg_CopyText(&data[start_idx], name, name_len);
 
     if (capitalize) {
         data[start_idx] = mFont_small_to_capital(data[start_idx]);
@@ -646,7 +679,7 @@ extern int mMsg_CopyTalkName(ACTOR* actor_p, u8* data, int start_idx, int len, u
     }
 
     new_len = mMsg_MoveDataCut(data, start_idx + name_len, start_idx + command_len, len, FALSE);
-    mMsg_CopyString(&data[start_idx], name, name_len);
+    mMsg_CopyText(&data[start_idx], name, name_len);
 
     if (capitalize) {
         data[start_idx] = mFont_small_to_capital(data[start_idx]);
@@ -662,7 +695,7 @@ extern int mMsg_CopyTail(ACTOR* actor_p, u8* data, int start_idx, int len, u32 c
     int new_len;
 
     new_len = mMsg_MoveDataCut(data, start_idx + tail_len, start_idx + command_len, len, FALSE);
-    mMsg_CopyString(&data[start_idx], tail_p, tail_len);
+    mMsg_CopyText(&data[start_idx], tail_p, tail_len);
 
     if (capitalize) {
         data[start_idx] = mFont_small_to_capital(data[start_idx]);
@@ -761,7 +794,7 @@ extern int mMsg_CopyFree(mMsg_Window_c* msg_p, int str_no, u8* data, int start_i
         int free_str_len = mMsg_Get_Length_String(free_str_p, mMsg_FREE_STRING_LEN);
 
         new_len = mMsg_MoveDataCut(data, start_idx + free_str_len, start_idx + command_len, len, FALSE);
-        mMsg_CopyString(&data[start_idx], free_str_p, free_str_len);
+        mMsg_CopyText(&data[start_idx], free_str_p, free_str_len);
 
         article = article != mIN_ARTICLE_NUM ? article : msg_p->free_str_article[str_no];
         if (article != mIN_ARTICLE_NONE) {
@@ -821,7 +854,7 @@ extern int mMsg_CopyDetermination(mMsg_Window_c* msg_p, u8* data, int start_idx,
     int str_len = msg_p->choice_window.data.determination_len;
     int new_len = mMsg_MoveDataCut(data, start_idx + str_len, start_idx + command_len, len, FALSE);
 
-    mMsg_CopyString(&data[start_idx], str, str_len);
+    mMsg_CopyText(&data[start_idx], str, str_len);
     return new_len;
 }
 
@@ -835,7 +868,7 @@ extern int mMsg_CopyCountryName(u8* data, int start_idx, int len, u32 capitalize
     new_start_idx = start_idx + land_name_len;
     new_len = mMsg_MoveDataCut(data, start_idx + land_name_len, start_idx + command_len, len, FALSE);
 
-    mMsg_CopyString(&data[start_idx], land_name, land_name_len);
+    mMsg_CopyText(&data[start_idx], land_name, land_name_len);
 
 // This entire block can be removed in the English version
 #ifndef IMPROVEMENTS
@@ -866,7 +899,7 @@ extern int mMsg_CopyIslandName(u8* data, int start_idx, int len, u32 capitalize)
     int str_len = mMsg_Get_Length_String(str, mISL_ISLAND_NAME_LEN);
 
     new_len = mMsg_MoveDataCut(data, start_idx + str_len, start_idx + command_len, len, FALSE);
-    mMsg_CopyString(&data[start_idx], str, str_len);
+    mMsg_CopyText(&data[start_idx], str, str_len);
 
     if (capitalize) {
         data[start_idx] = mFont_small_to_capital(data[start_idx]);
@@ -914,7 +947,7 @@ extern int mMsg_CopyItem(mMsg_Window_c* msg_p, int str_no, u8* data, int start_i
         int free_str_len = mMsg_Get_Length_String(free_str_p, mMsg_FREE_STRING_LEN);
 
         new_len = mMsg_MoveDataCut(data, start_idx + free_str_len, start_idx + command_len, len, FALSE);
-        mMsg_CopyString(&data[start_idx], free_str_p, free_str_len);
+        mMsg_CopyText(&data[start_idx], free_str_p, free_str_len);
 
         article = article != mIN_ARTICLE_NUM ? article : msg_p->item_str_article[str_no];
         if (article != mIN_ARTICLE_NONE) {
@@ -946,7 +979,13 @@ extern int mMsg_CopyMail(mMsg_Window_c* msg_p, int str_no, u8* data, int start_i
         int free_str_len = mMsg_Get_Length_String(free_str_p, mMsg_MAIL_STRING_LEN);
         int new_len = mMsg_MoveDataCut(data, start_idx + free_str_len, start_idx + command_len, len, TRUE);
 
-        mMsg_CopyString(&data[start_idx], free_str_p, free_str_len);
+#ifdef BUGFIXES
+        // (a letter too long for what's left of the buffer is cut there)
+        if (start_idx + free_str_len > mMsg_MSG_BUF_SIZE) {
+            free_str_len = mMsg_MSG_BUF_SIZE - start_idx;
+        }
+#endif
+        mMsg_CopyText(&data[start_idx], free_str_p, free_str_len);
 
         if (capitalize) {
             data[start_idx] = mFont_small_to_capital(data[start_idx]);

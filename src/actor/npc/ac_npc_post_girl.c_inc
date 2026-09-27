@@ -90,6 +90,12 @@ int aPG_check_destination(Mail_c *mail){
             } else if (mPO_count_mail(addr) >= HOME_MAILBOX_SIZE) {
                 res = 3;
             }
+#ifdef VITA_MP
+            // the other players' letters can fill the desk while this one is picked
+            else if (mPO_get_keep_mail_sum() >= mPO_MAIL_STORAGE_SIZE) {
+                res = 2;
+            }
+#endif
         }
         break;
     case 1:
@@ -303,6 +309,13 @@ void aPG_receive_menu_close_wait(NPC_POSTGIRL_ACTOR *postgirl, GAME_PLAY *play) 
             next = 0;
         } else {
             int dest = aPG_check_destination(&play->submenu.mail);
+#ifdef VITA_MP
+            // a visitor's letter goes to the host's post office, which answers for it
+            dest = pc_mp_post_letter(&play->submenu.mail, dest);
+            if (dest < 0) {
+                return;
+            }
+#endif
             switch (dest) {
             case 0:
                 mPO_receipt_proc(&play->submenu.mail, mPO_SENDTYPE_MAIL);
@@ -315,6 +328,11 @@ void aPG_receive_menu_close_wait(NPC_POSTGIRL_ACTOR *postgirl, GAME_PLAY *play) 
                 submenu_item = play->submenu.item_p;
                 play->submenu.mail.content.font = mMl_FONT_SEND;
                 mMl_copy_mail(&Now_Private->mail[submenu_item->slot_no], &play->submenu.mail);
+#ifdef VITA_MP
+                if (mp_travel_net_trip()) {
+                    mp_passport_write_async(); // (the letter handed back is the traveller's again)
+                }
+#endif
                 postgirl->dest = dest;
                 next = dest + 1;
                 break;

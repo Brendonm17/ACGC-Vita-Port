@@ -9,8 +9,14 @@
 #include "m_rcp.h"
 #include "sys_matrix.h"
 #include "zurumode.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aFSN_actor_ct(ACTOR* actorx, GAME* game);
+#ifdef VITA_MP
+static ACTOR* aFSN_mp_following; // follows another game's balloon
+#endif
 static void aFSN_actor_dt(ACTOR* actorx, GAME* game);
 static void aFSN_actor_move(ACTOR* actorx, GAME* game);
 static void aFSN_actor_draw(ACTOR* actorx, GAME* game);
@@ -52,11 +58,22 @@ static void aFSN_actor_ct(ACTOR* actorx, GAME* game) {
   fuusen->y_offset = 110.0f;
   fuusen->segment_p = ((GAME_PLAY*)game)->object_exchange.banks[actorx->data_bank_id].ram_start;
   aFSN_setupAction(fuusen, game, aFSN_ACTION_BIRTH);
+#ifdef VITA_MP
+  // made to follow another game's balloon
+  if (mp_cr_balloon_elsewhere()) {
+    aFSN_mp_following = actorx;
+  }
+#endif
 }
 
 static void aFSN_actor_dt(ACTOR* actorx, GAME* game) {
   FUUSEN_ACTOR* fuusen = (FUUSEN_ACTOR*)actorx;
 
+#ifdef VITA_MP
+  if (aFSN_mp_following == actorx) {
+    aFSN_mp_following = NULL;
+  }
+#endif
   if (fuusen->look_up_flag == TRUE) {
     Balloon_look_up();
   }
@@ -119,6 +136,10 @@ static void aFSN_moving(ACTOR* actorx, GAME* game) {
   if (-100.0f > screen_pos.x || screen_pos.x > 420.0f || -40.0f > screen_pos.y || screen_pos.y > 280.0f) {
 #else
   if (-40.0f > screen_pos.x || screen_pos.x > 360.0f || -40.0f > screen_pos.y || screen_pos.y > 280.0f) {
+#endif
+#ifdef VITA_MP
+    // a visitor standing near sees it, so it can snag a tree by them too
+    if (!mp_cr_near_player(&actorx->world.position, 320.0f))
 #endif
     return;
   }
@@ -286,7 +307,11 @@ static void aFSN_wood_stop(ACTOR* actorx, GAME* game) {
       add_calc(&actorx->world.position.y, pos.y, 1.0f - sqrtf(0.7f), 0.5f, 0.0f);
       add_calc(&actorx->world.position.z, pos.z, 1.0f - sqrtf(0.7f), 0.5f, 0.0f);
     }
-    else if (mPlib_Check_tree_shaken_big(&pos2)) {
+    else if (mPlib_Check_tree_shaken_big(&pos2)
+#ifdef VITA_MP
+             || mp_cr_balloon_popped()
+#endif
+    ) {
       actorx->shape_info.rotation.z = 0;
       aFSN_setupAction(fuusen, game, aFSN_ACTION_ESCAPE);
     }
@@ -321,13 +346,24 @@ static void aFSN_escape(ACTOR* actorx, GAME* game) {
       int ut_z;
 
       if (mFI_Wpos2UtNum(&ut_x, &ut_z, pos)) {
+#ifdef VITA_MP
+        // the present's fall shows on the other screens too
+        pc_mp_fx_capture(TRUE);
+#endif
         (*Common_Get(clip).bg_item_clip->fruit_set_proc)(ITM_PRESENT, ut_x, ut_z, 1, 1);
+#ifdef VITA_MP
+        pc_mp_fx_capture(FALSE);
+#endif
         fuusen->count = 1;
       }
     }
   }
 
   if (fuusen->count == 1 && actorx->world.position.y > balloon_y + 500.0f) {
+#ifdef VITA_MP
+    // gone for good: the others' copies go with it
+    pc_mp_cr_balloon_gone();
+#endif
     Actor_delete(actorx);
   }
 }
@@ -465,9 +501,166 @@ static void aFSN_setupAction(FUUSEN_ACTOR* fuusen, GAME* game, int action) {
   (*init_proc[action])(fuusen, game);
 }
 
+#ifdef VITA_MP
+#define aFSN_MP_SNAP 200.0f
+
+static u32 aFSN_mp_pop_ms;
+static int aFSN_mp_wobble;
+
+static void aFSN_mp_apply(ACTOR* actorx, xyz_t* to_p, const u8* b, unsigned int age);
+
+static void aFSN_mp_put(u8* b, int v) {
+  b[0] = (u8)v;
+  b[1] = (u8)(v >> 8);
+}
+
+static s16 aFSN_mp_get(const u8* b) {
+  return (s16)(b[0] | (b[1] << 8));
+}
+
+// runner: its balloon as the others draw it; the drifting bob is left for them to add
+static void aFSN_mp_report(ACTOR* actorx) {
+  FUUSEN_ACTOR* fuusen = (FUUSEN_ACTOR*)actorx;
+  xyz_t pos = actorx->world.position;
+  u8 b[MP_CR_BLOB];
+  u32 key;
+
+  if (fuusen->action != aFSN_ACTION_WOOD_STOP) {
+    mp_cr_balloon_popped(); // a late shake from a visitor
+  }
+  if (fuusen->action == aFSN_ACTION_MOVING) {
+    pos.y -= sin_s(fuusen->fuwafuwa_cycle) * 10.0f;
+  }
+  memset(b, 0, sizeof(b));
+  b[0] = (u8)fuusen->action;
+  b[1] = (u8)fuusen->count;
+  b[2] = (u8)fuusen->type_idx;
+  b[3] = (u8)fuusen->look_up_flag;
+  aFSN_mp_put(b + 4, (int)(fuusen->y_offset * 16.0f));
+  aFSN_mp_put(b + 6, actorx->shape_info.rotation.z);
+  aFSN_mp_put(b + 8, fuusen->escape_timer);
+  aFSN_mp_put(b + 10, actorx->world.angle.y);
+  aFSN_mp_put(b + 12, fuusen->fuwafuwa_cycle);
+  key = (u32)fuusen->action | ((u32)(fuusen->count & 0xF) << 4) | ((u32)(u8)(actorx->shape_info.rotation.z >> 8) << 8) |
+        ((u32)fuusen->type_idx << 16) | ((u32)(fuusen->escape_timer == aFSN_ESCAPE_TIMER) << 20);
+  pc_mp_cr_balloon_report(&pos, b, key);
+}
+
+// the runner's balloon, bobbing here as there; a hard shake of its tree asks the runner to free it
+static int aFSN_mp_follow(ACTOR* actorx, GAME* game) {
+  FUUSEN_ACTOR* fuusen = (FUUSEN_ACTOR*)actorx;
+  unsigned int age;
+  xyz_t to;
+  u8 b[MP_CR_BLOB];
+
+  if (!mp_cr_balloon_elsewhere()) {
+    return FALSE;
+  }
+  cKF_SkeletonInfo_R_play(&fuusen->keyframe);
+  if (!mp_cr_balloon(&to, b, &age)) {
+    return TRUE;
+  }
+  // (caught in a tree on the runner's screen: heard snagging here too)
+  if (b[0] == aFSN_ACTION_WOOD_STOP && fuusen->action != aFSN_ACTION_WOOD_STOP &&
+      fuusen->action != aFSN_ACTION_BIRTH && age < 1000) {
+    sAdo_OngenTrgStart(0x402, &to);
+  }
+  aFSN_mp_apply(actorx, &to, b, age);
+  if (fuusen->action == aFSN_ACTION_WOOD_STOP) {
+    xyz_t pos2;
+
+    mFI_Wpos2UtCenterWpos(&pos2, actorx->world.position);
+    if (mPlib_Check_tree_shaken_big(&pos2)) {
+      if (pc_mp_now_ms() - aFSN_mp_pop_ms > 500) {
+        aFSN_mp_pop_ms = pc_mp_now_ms();
+        pc_mp_cr_balloon_pop();
+      }
+    } else if (mPlib_Check_tree_shaken_little(&pos2)) {
+      // this player's own shake wobbles it at once
+      actorx->shape_info.rotation.z = (aFSN_mp_wobble & 4) == 0 ? 500 : 0;
+      aFSN_mp_wobble++;
+    } else {
+      aFSN_mp_wobble = 0;
+    }
+  }
+  return TRUE;
+}
+
+// the runner's report on this balloon, eased toward
+static void aFSN_mp_apply(ACTOR* actorx, xyz_t* to_p, const u8* b, unsigned int age) {
+  FUUSEN_ACTOR* fuusen = (FUUSEN_ACTOR*)actorx;
+  xyz_t to = *to_p;
+  f32 dx;
+  f32 dz;
+
+  fuusen->action = b[0];
+  fuusen->count = b[1];
+  fuusen->type_idx = b[2] % 5;
+  fuusen->look_up_flag = b[3];
+  fuusen->y_offset = (f32)aFSN_mp_get(b + 4) / 16.0f;
+  fuusen->escape_timer = aFSN_mp_get(b + 8);
+  actorx->world.angle.y = aFSN_mp_get(b + 10);
+  fuusen->fuwafuwa_cycle += 250;
+  if (age < 50) {
+    fuusen->fuwafuwa_cycle = aFSN_mp_get(b + 12) + (s16)(250 * (int)(age / 17));
+  }
+  if (fuusen->action == aFSN_ACTION_MOVING) {
+    to.y += sin_s(fuusen->fuwafuwa_cycle) * 10.0f;
+  }
+  dx = to.x - actorx->world.position.x;
+  dz = to.z - actorx->world.position.z;
+  if (dx * dx + dz * dz > aFSN_MP_SNAP * aFSN_MP_SNAP) {
+    actorx->world.position = to;
+  } else {
+    actorx->world.position.x += dx * 0.5f;
+    actorx->world.position.y += (to.y - actorx->world.position.y) * 0.5f;
+    actorx->world.position.z += dz * 0.5f;
+  }
+  actorx->shape_info.rotation.z = aFSN_mp_get(b + 6);
+}
+
+// this game flies the town's balloon now: the one it followed flies on from where it was
+static void aFSN_mp_take_over(ACTOR* actorx, GAME* game) {
+  static mActor_proc act_proc[aFSN_ACTION_NUM] = { &aFSN_birth, &aFSN_moving, &aFSN_wood_stop, &aFSN_escape };
+  FUUSEN_ACTOR* fuusen = (FUUSEN_ACTOR*)actorx;
+
+  xyz_t to;
+  u8 b[MP_CR_BLOB];
+
+  // where the runner last had it, if this copy never heard
+  if (mp_cr_balloon_last(&to, b)) {
+    aFSN_mp_apply(actorx, &to, b, 0);
+    actorx->world.position = to;
+  }
+  if (fuusen->action < 0 || fuusen->action >= aFSN_ACTION_NUM) {
+    return;
+  }
+  fuusen->action_proc = act_proc[fuusen->action];
+  fuusen->timer = 0;
+  if (fuusen->action == aFSN_ACTION_ESCAPE) {
+    actorx->max_velocity_y = 5.0f;
+    actorx->gravity = 0.5f;
+    // its present fell on the old runner's screen: it never falls twice
+    fuusen->count = 1;
+  }
+  Common_Set(balloon_state, Balloon_STATE_SPAWNED);
+}
+#endif
+
 static void aFSN_actor_move(ACTOR* actorx, GAME* game) {
   FUUSEN_ACTOR* fuusen = (FUUSEN_ACTOR*)actorx;
   cKF_SkeletonInfo_R_c* keyframe_p = &fuusen->keyframe;
+
+#ifdef VITA_MP
+  if (aFSN_mp_follow(actorx, game)) {
+    aFSN_mp_following = actorx;
+    return;
+  }
+  if (aFSN_mp_following == actorx) {
+    aFSN_mp_following = NULL;
+    aFSN_mp_take_over(actorx, game);
+  }
+#endif
 
   if (fuusen->timer == 0) {
     Actor_position_moveF(actorx);
@@ -494,6 +687,9 @@ static void aFSN_actor_move(ACTOR* actorx, GAME* game) {
 
   cKF_SkeletonInfo_R_play(keyframe_p);
   (*fuusen->action_proc)(actorx, game);
+#ifdef VITA_MP
+  aFSN_mp_report(actorx);
+#endif
 }
 
 static int aFSN_actor_draw_before(GAME* game, cKF_SkeletonInfo_R_c* keyframe, int joint_num, Gfx** gfx_pp, u8* data_p, void* arg, s_xyz* joint_p, xyz_t* pos_p) {

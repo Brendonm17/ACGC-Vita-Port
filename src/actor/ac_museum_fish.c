@@ -1,4 +1,7 @@
 #include "ac_museum_fish_priv.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 // extern data
 // clang-format off
@@ -567,6 +570,44 @@ float kusa_start_frame[14] = {
 };
 // clang-format on
 
+#ifdef VITA_MP
+// the fish record the tanks were stocked from (4 bits a fish)
+static u8 mfish_mp_fish_bit[mMmd_FISH_BIT_NUM];
+
+// a fish donated while this screen is in the room joins its tank, set up as entering the room would
+static void mfish_mp_stock(MUSEUM_FISH_ACTOR* actor, GAME* game) {
+    MUSEUM_FISH_PRIVATE_DATA* prv = actor->prvFish;
+    int i;
+
+    if (!mp_active() || mem_cmp(mfish_mp_fish_bit, Save_Get(museum_display).fish_bit, sizeof(mfish_mp_fish_bit))) {
+        return;
+    }
+
+    mem_copy(mfish_mp_fish_bit, Save_Get(museum_display).fish_bit, sizeof(mfish_mp_fish_bit));
+    for (i = 0; i < aGYO_TYPE_NUM; i++, prv++) {
+        if ((prv->_62E_flags & 1) || !mMmd_FishInfo(i)) {
+            continue;
+        }
+
+        // back to the zeroed slot ct starts every fish from (unstocked slots still get poked each frame)
+        mem_clear((u8*)prv, sizeof(MUSEUM_FISH_PRIVATE_DATA), 0);
+        prv->kf._54C = mfish_model_tbl[i];
+        prv->kf._550[0] = mfish_anime_init_tbl[i];
+        prv->_62E_flags |= 1;
+        if (i == aGYO_TYPE_FROG) {
+            // the frog takes over the pad that floated alone; its setup restarts the sway, so the pad keeps its frame
+            f32 frame = actor->_14788.keyframe.frame_control.current_frame;
+
+            prv->hasu_p = &actor->_14788;
+            Museum_Fish_Prv_data_init(prv, game, i, 1);
+            actor->_14788.keyframe.frame_control.current_frame = frame;
+        } else {
+            Museum_Fish_Prv_data_init(prv, game, i, 1);
+        }
+    }
+}
+#endif
+
 void Museum_Fish_Actor_ct(ACTOR* actorx, GAME* gamex) {
     MUSEUM_FISH_ACTOR* actor = (MUSEUM_FISH_ACTOR*)actorx;
     int i;
@@ -608,6 +649,9 @@ void Museum_Fish_Actor_ct(ACTOR* actorx, GAME* gamex) {
         actor->_14d50[i] = RANDOMF_RANGE(40, 120);
         actor->_14d78[i] = RANDOMF_RANGE(2, 5);
     }
+#ifdef VITA_MP
+    mem_copy(mfish_mp_fish_bit, Save_Get(museum_display).fish_bit, sizeof(mfish_mp_fish_bit));
+#endif
 }
 
 void Museum_Fish_Actor_dt(ACTOR* actor, GAME* game) {
@@ -628,6 +672,19 @@ int Museum_Fish_GetMsgNo(MUSEUM_FISH_ACTOR* actor) {
         mMsg_Set_free_str(mMsg_Get_base_window_p(), 0,
                           common_data.save.save.private_data[fishInfo - 1].player_ID.player_name, 8);
     }
+#ifdef VITA_MP
+    {
+        u8 mp_name[PLAYER_NAME_LEN];
+
+        // a visitor's donation the host noted reads with their name, as a resident's does
+        if (fishInfo == mMmd_DONATOR_DELETED_PLAYER &&
+            pc_mp_museum_donor(mMmd_CATEGORY_FISH, actor->fishDisplayMsgInfo[actor->fishDisplayMsgIter].fishName,
+                               mp_name)) {
+            mMsg_Set_free_str(mMsg_Get_base_window_p(), 0, mp_name, PLAYER_NAME_LEN);
+            fishInfo = mMmd_DONATOR_PLAYER1;
+        }
+    }
+#endif
 
     if (actor->fishDisplayMsgIter < actor->numFishDisplayed - 1) {
         if (fishInfo >= 1 && fishInfo <= 4) {
@@ -774,6 +831,9 @@ void Museum_Fish_Actor_move(ACTOR* actorx, GAME* game) {
     f32 v;
     MUSEUM_FISH_ACTOR* actor = (MUSEUM_FISH_ACTOR*)actorx;
     MUSEUM_FISH_PRIVATE_DATA* prv2;
+#ifdef VITA_MP
+    mfish_mp_stock(actor, game);
+#endif
     mfish_point_light_mv((MUSEUM_FISH_ACTOR*)actorx, game);
     oldplayer_area = actor->player_area;
     mfish_get_player_area((MUSEUM_FISH_ACTOR*)actorx, game);

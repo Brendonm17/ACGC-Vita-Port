@@ -22,6 +22,12 @@ static void change_FGUnit(STRUCTURE_ACTOR* buggy, int type) {
     xyz_t_move(&pos, &buggy->actor_class.world.position);
     pos.z += 80.0f;
 
+#ifdef VITA_MP
+    // (a visitor's game leaves the town's doorsteps to the host, whose lost & found takes what's there)
+    if (mp_town_keep_at(&pos, type != FALSE ? MP_KEEP_UNIT : MP_KEEP_NONE)) {
+        return;
+    }
+#endif
     if (type == FALSE) {
         mFI_SetFG_common(EMPTY_NO, pos, TRUE);
         return;
@@ -171,6 +177,27 @@ static int aBGY_check_player(ACTOR* actor, GAME_PLAY* play) {
     return res;
 }
 
+#ifdef VITA_MP
+// another player at the door opens it too
+static int aBGY_check_anyone(ACTOR* actor, GAME_PLAY* play) {
+    void* puppets[MP_MAX_PEERS];
+    int n = mp_puppets(puppets, MP_MAX_PEERS);
+    int res = aBGY_check_player(actor, play);
+    int i;
+
+    for (i = 0; i < n && res == 0; i++) {
+        ACTOR* p = (ACTOR*)puppets[i];
+        f32 dx = p->world.position.x - actor->world.position.x;
+        f32 dz = p->world.position.z - (actor->world.position.z + 60.0f);
+
+        if (dx * dx + dz * dz < 1200.0f) {
+            res = 1;
+        }
+    }
+    return res;
+}
+#endif
+
 static int aBGY_open_check() {
     int res;
 
@@ -203,7 +230,11 @@ static void aBGY_close_wait(STRUCTURE_ACTOR* buggy, GAME_PLAY* play) {
     }
 
     if (aBGY_open_check() == 2) {
+#ifdef VITA_MP
+        if (aBGY_check_anyone(actor, play) == FALSE) {
+#else
         if (aBGY_check_player(actor, play) == FALSE) {
+#endif
             return;
         }
 
@@ -236,7 +267,11 @@ static void aBGY_open_wait(STRUCTURE_ACTOR* buggy, GAME_PLAY* play) {
         return;
     }
 
+#ifdef VITA_MP
+    if ((aBGY_check_anyone(actor, play) == 0) || (aBGY_open_check() != 2)) {
+#else
     if ((aBGY_check_player(actor, play) == 0) || (aBGY_open_check() != 2)) {
+#endif
         aBGY_setup_action(buggy, aBGY_ACTION_CLOSE_DOOR);
         return;
     }

@@ -255,12 +255,21 @@ static void aINS_cull_check(ACTOR* actorx, GAME* game) {
                              &actorx->camera_w);
 
     if (insect->insect_flags.destruct && (ACTOR*)mPlib_Get_item_net_catch_label() != actorx) {
+#ifdef VITA_MP
+        // turned away by its own setup this frame (a copy only this screen refused), or flown off or faded
+        // for good where this game runs it
+        aINS_mp_lives_on = actorx == aINS_mp_fresh ? pc_mp_cr_refused(actorx) : pc_mp_cr_ended(actorx);
+#endif
         aINS_destruct(actorx, game);
     }
 
     if (Actor_draw_actor_no_culling_check(actorx) == FALSE) {
         if (actorx->actor_specific == 1) {
             if ((ACTOR*)mPlib_Get_item_net_catch_label() != actorx) {
+#ifdef VITA_MP
+                // one let go, flown out of sight: gone for good where this game runs it
+                aINS_mp_lives_on = pc_mp_cr_ended(actorx);
+#endif
                 aINS_destruct(actorx, game);
             }
         } else {
@@ -353,9 +362,169 @@ static void aINS_check_birth_ant(GAME* game) {
 
         if (actorx != NULL) {
             aINS_CLIP->ant_spawn_pending = FALSE;
+#ifdef VITA_MP
+            pc_mp_cr_ant_born(actorx, aINS_CLIP->ant_bx, aINS_CLIP->ant_bz);
+#endif
         }
     }
 }
+
+#ifdef VITA_MP
+#define aINS_MP_SNAP 150.0f
+
+static f32 aINS_mp_pose[aINS_ACTOR_NUM]; // runner: last frame's pose; follower: its own flap rate
+
+extern void aIMN_mp_set_action(aINS_INSECT_ACTOR* insect, int action, GAME* game);
+extern void aIKR_mp_set_action(aINS_INSECT_ACTOR* insect, int action, GAME* game);
+extern void aIDG_mp_set_action(aINS_INSECT_ACTOR* insect, int action, GAME* game);
+
+static void aINS_mp_put(u8* b, int v) {
+    b[0] = (u8)v;
+    b[1] = (u8)(v >> 8);
+}
+
+static s16 aINS_mp_get(const u8* b) {
+    return (s16)(b[0] | (b[1] << 8));
+}
+
+static u8 aINS_mp_u8(int v) {
+    return (u8)(v < 0 ? 0 : (v > 255 ? 255 : v));
+}
+
+// what another screen needs besides where it is; the key changes when that's worth telling at once
+static void aINS_mp_report(ACTOR* actorx, int slot) {
+    aINS_INSECT_ACTOR* insect = (aINS_INSECT_ACTOR*)actorx;
+    u8 b[MP_CR_BLOB];
+    f32 rate = insect->_1E0 - aINS_mp_pose[slot];
+    u32 key;
+
+    if (rate < 0.0f) {
+        rate += 2.0f; // wrapped
+    }
+    if (rate > 1.5f || insect->type == aINS_INSECT_TYPE_FIREFLY) {
+        rate = 0.0f; // set, not stepped (a firefly's glow steps through its frames by hand)
+    }
+    aINS_mp_pose[slot] = insect->_1E0;
+    if (!mp_cr_mine(actorx)) {
+        return;
+    }
+    memset(b, 0, sizeof(b));
+    aINS_mp_put(b + 0, actorx->shape_info.rotation.x);
+    aINS_mp_put(b + 2, actorx->shape_info.rotation.y);
+    aINS_mp_put(b + 4, actorx->shape_info.rotation.z);
+    aINS_mp_put(b + 6, (int)(actorx->scale.x * 10000.0f));
+    aINS_mp_put(b + 8, (int)(insect->_1E0 * 256.0f));
+    aINS_mp_put(b + 10, (int)(insect->_1E4 * 256.0f));
+    b[12] = aINS_mp_u8(insect->alpha0);
+    b[13] = aINS_mp_u8(insect->alpha1);
+    b[14] = aINS_mp_u8(insect->alpha2);
+    b[15] = (u8)insect->flag;
+    aINS_mp_put(b + 16, actorx->world.angle.y);
+    b[18] = (u8)(rate * 100.0f);
+    // hidden in a tree or underground, out of reach of a net, and what it's doing
+    b[19] = (u8)((actorx->drawn != 0) | (insect->insect_flags.bit_1 << 1) | ((actorx->shape_info.draw_shadow != 0) << 2));
+    b[20] = (u8)insect->action;
+    b[21] = pc_mp_cr_level_of(actorx); // (its song, or its buzz)
+    // a flapping pose goes on by its rate on the other screens; a still one is told when it changes
+    key = (b[18] != 0 ? 0x80 : ((u32)(int)insect->_1E0 & 0x7F)) | ((u32)((int)insect->_1E4 & 0xF) << 8) |
+          ((u32)(b[12] >> 6) << 12) | ((u32)(b[13] >> 6) << 14) | ((u32)(b[14] >> 6) << 16) |
+          ((u32)((u16)actorx->shape_info.rotation.x >> 12) << 18) |
+          ((u32)((u16)actorx->shape_info.rotation.y >> 12) << 22) | ((u32)(insect->flag & 0xF) << 26) |
+          ((u32)((int)(actorx->scale.x * 800.0f) & 0x3) << 30);
+    key ^= ((u32)b[19] << 3) ^ ((u32)b[20] << 24) ^ ((u32)b[21] << 11);
+    pc_mp_cr_report(actorx, &actorx->world.position, b, key);
+}
+
+// another game runs this bug: it goes where that game has it, flapping on here; it can still be netted
+static int aINS_mp_follow(ACTOR* actorx, PLAYER_ACTOR* player, int slot) {
+    aINS_INSECT_ACTOR* insect = (aINS_INSECT_ACTOR*)actorx;
+    unsigned int age;
+    xyz_t to;
+    u8 b[MP_CR_BLOB];
+    f32 dx;
+    f32 dz;
+    f32 rate;
+
+    // its own setup runs here first (where it hides, its light), then it follows
+    if (actorx->mv_proc == aINS_program_dlftbl[aINS_program_type[insect->type]] ||
+        !mp_cr_puppet(actorx, &to, b, &age)) {
+        return FALSE;
+    }
+    dx = to.x - actorx->world.position.x;
+    dz = to.z - actorx->world.position.z;
+    if (dx * dx + dz * dz > aINS_MP_SNAP * aINS_MP_SNAP) {
+        actorx->world.position = to;
+    } else {
+        actorx->world.position.x += dx * 0.5f;
+        actorx->world.position.y += (to.y - actorx->world.position.y) * 0.5f;
+        actorx->world.position.z += dz * 0.5f;
+    }
+    add_calc_short_angle2(&actorx->shape_info.rotation.x, aINS_mp_get(b + 0), 0.5f, 0x1000, 0);
+    add_calc_short_angle2(&actorx->shape_info.rotation.y, aINS_mp_get(b + 2), 0.5f, 0x1000, 0);
+    add_calc_short_angle2(&actorx->shape_info.rotation.z, aINS_mp_get(b + 4), 0.5f, 0x1000, 0);
+    actorx->world.angle.y = aINS_mp_get(b + 16);
+    actorx->scale.x = actorx->scale.y = actorx->scale.z = (f32)aINS_mp_get(b + 6) / 10000.0f;
+    rate = (f32)b[18] / 100.0f;
+    if (rate > 0.0f) {
+        insect->_1E0 += rate;
+        if (insect->_1E0 >= 2.0f) {
+            insect->_1E0 -= 2.0f;
+        }
+        if (age < 60) {
+            insect->_1E0 = (f32)aINS_mp_get(b + 8) / 256.0f + rate * (f32)age / 16.7f;
+            while (insect->_1E0 >= 2.0f) {
+                insect->_1E0 -= 2.0f;
+            }
+        }
+    } else {
+        insect->_1E0 = (f32)aINS_mp_get(b + 8) / 256.0f;
+    }
+    insect->_1E4 = (f32)aINS_mp_get(b + 10) / 256.0f;
+    // fades ease toward the runner's
+    insect->alpha0 += (b[12] - insect->alpha0) / 2;
+    insect->alpha1 += (b[13] - insect->alpha1) / 2;
+    insect->alpha2 += (b[14] - insect->alpha2) / 2;
+    insect->flag = b[15];
+    actorx->drawn = b[19] & 1;
+    insect->insect_flags.bit_1 = (b[19] >> 1) & 1;
+    actorx->shape_info.draw_shadow = (b[19] >> 2) & 1;
+    aINS_mp_action[slot] = b[20];
+    aINS_mp_followed[slot] = TRUE;
+    if (b[21] != 0) {
+        sAdo_OngenPos((u32)actorx, b[21], &actorx->world.position);
+    }
+    aINS_mp_pose[slot] = insect->_1E0;
+    aINS_set_player_info(actorx, player);
+    Actor_world_to_eye(actorx, 0.0f);
+    aINS_set_catch_range(actorx);
+    return TRUE;
+}
+
+// this game runs it again after following another: the bugs that hide pick up where that game had them
+static void aINS_mp_take_over(aINS_INSECT_ACTOR* insect, GAME* game, int slot) {
+    if (!aINS_mp_followed[slot]) {
+        return;
+    }
+    aINS_mp_followed[slot] = FALSE;
+    switch (aINS_program_type[insect->type]) {
+        case aINS_PROGRAM_MINO:
+            aIMN_mp_set_action(insect, aINS_mp_action[slot], game);
+            break;
+        case aINS_PROGRAM_KERA:
+            aIKR_mp_set_action(insect, aINS_mp_action[slot], game);
+            break;
+        case aINS_PROGRAM_DANGO:
+            aIDG_mp_set_action(insect, aINS_mp_action[slot], game);
+            break;
+        default:
+            // it was getting away there (fleeing, drowning): it finishes going
+            if (insect->insect_flags.bit_1) {
+                insect->insect_flags.destruct = TRUE;
+            }
+            break;
+    }
+}
+#endif
 
 static void aINS_actor_move(ACTOR* actorx, GAME* game) {
     aINS_CTRL_ACTOR* ctrl_actor = (aINS_CTRL_ACTOR*)actorx;
@@ -363,14 +532,45 @@ static void aINS_actor_move(ACTOR* actorx, GAME* game) {
     PLAYER_ACTOR* player = GET_PLAYER_ACTOR(play);
     aINS_INSECT_ACTOR* insect = ctrl_actor->insect_actor;
     int i;
+#ifdef VITA_MP
+    int adopt = mp_cr_adopting();
+    int act;
+    int act_x;
+    int act_z;
+
+    // another player shook a tree, dug or hit a rock: the bugs this game runs there answer it
+    if (aINS_CLIP->pl_action == aINS_PL_ACT_NONE && mp_cr_take_act(&act, &act_x, &act_z)) {
+        aINS_CLIP->pl_action = act;
+        aINS_CLIP->pl_action_ut_x = act_x;
+        aINS_CLIP->pl_action_ut_z = act_z;
+    }
+#endif
 
     for (i = 0; i < aINS_ACTOR_NUM; i++) {
         ACTOR* actorx = (ACTOR*)insect;
 
         if (insect->exist_flag == TRUE) {
             actorx->state_bitfield &= ~ACTOR_STATE_24;
+#ifdef VITA_MP
+            // this game's own bugs the list missed go on it, one let go from this player's net at once
+            {
+                int in_net = (ACTOR*)mPlib_Get_item_net_catch_label() == actorx;
+                int let_go = aINS_mp_netted[i] && !in_net;
+
+                aINS_mp_netted[i] = (u8)in_net;
+                if ((adopt || let_go) && !in_net && insect->type != aINS_INSECT_TYPE_ANT &&
+                    !insect->insect_flags.destruct) {
+                    pc_mp_cr_adopt(MP_CR_INSECT, insect->type, &actorx->world.position, actorx->actor_specific,
+                                   actorx);
+                }
+            }
+#endif
 
             if ((actorx->state_bitfield & (ACTOR_STATE_NO_MOVE_WHILE_CULLED | ACTOR_STATE_NO_CULL))) {
+#ifdef VITA_MP
+                if (!aINS_mp_follow(actorx, player, i)) {
+                aINS_mp_take_over(insect, game, i);
+#endif
                 if (insect->tools_actor.init_matrix == FALSE) {
                     (*insect->move_proc)(actorx);
                 }
@@ -380,12 +580,27 @@ static void aINS_actor_move(ACTOR* actorx, GAME* game) {
                 aINS_calc_patience(actorx, game);
                 aINS_calc_life_time(insect);
                 aINS_calc_alpha_time(insect);
+#ifdef VITA_MP
+                aINS_mp_initing =
+                    actorx->mv_proc == aINS_program_dlftbl[aINS_program_type[insect->type]] ? actorx : NULL;
+#endif
                 (*actorx->mv_proc)(actorx, game);
+#ifdef VITA_MP
+                aINS_mp_fresh = aINS_mp_initing;
+                aINS_mp_initing = NULL;
+#endif
                 Actor_world_to_eye(actorx, 0.0f);
                 aINS_set_catch_range(actorx);
+#ifdef VITA_MP
+                aINS_mp_report(actorx, i);
+                }
+#endif
             }
 
             aINS_cull_check(actorx, game);
+#ifdef VITA_MP
+            aINS_mp_fresh = NULL;
+#endif
         }
 
         insect++;

@@ -22,6 +22,15 @@ struct house_goki_actor_s {
     /* 0x18C */f32 shadow_alpha;
     /* 0x190 */f32 alpha;
     /* 0x194 */f32 anm_no;
+#ifdef VITA_MP
+    u8 mp_id;   // the room's runner knows it by this
+    u8 mp_copy; // another player's game runs it: this one follows it
+    u8 mp_act;  // as last heard
+    u8 mp_anm;
+    u8 mp_alpha;
+    s16 mp_angle;
+    xyz_t mp_to;
+#endif
 };
 
 extern ACTOR_PROFILE House_Goki_Profile;

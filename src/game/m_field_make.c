@@ -13,6 +13,9 @@
 #include "m_bg_tex.h"
 #include "m_house.h"
 #include "m_bgm.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #ifdef TARGET_PC
 #include "pc_bswap.h"
 /* Byte-swap all u16 fields in FG data loaded from big-endian ARAM. */
@@ -1236,9 +1239,15 @@ extern void mFM_FieldInit(GAME_PLAY* play) {
     }
 
     mFM_PoorTreeUnderPlayerBlock();
-    mAGrw_ChangeCedar2Tree();
-    mAGrw_RenewalFgItem(Common_GetPointer(time.rtc_time));
-    mAGrw_SetXmasTree();
+#ifdef VITA_MP
+    // a visitor's town grows only through the host
+    if (mp_town_writer_allowed())
+#endif
+    {
+        mAGrw_ChangeCedar2Tree();
+        mAGrw_RenewalFgItem(Common_GetPointer(time.rtc_time));
+        mAGrw_SetXmasTree();
+    }
     mFM_SetFruit_title_demo(Save_Get(scene_no));
 
     if (scene == SCENE_FG) {

@@ -19,6 +19,13 @@ static int aSTM_set_request_act(NPC_STATION_MASTER_ACTOR* actor, u8 priority, u8
     return ret;
 }
 
+#ifdef VITA_MP
+static void aSTM_mp_frame(NPC_STATION_MASTER_ACTOR* actor);
+#endif
+
 static void aSTM_actor_move(ACTOR* actorx, GAME* game) {
+#ifdef VITA_MP
+    aSTM_mp_frame((NPC_STATION_MASTER_ACTOR*)actorx);
+#endif
     NPC_CLIP->move_proc(actorx, game);
 }

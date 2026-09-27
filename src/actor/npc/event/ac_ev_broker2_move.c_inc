@@ -267,9 +267,18 @@ static int aEBR2_message_ctrl(EV_BROKER2_ACTOR* broker2, GAME_PLAY* play) {
 
                 mFI_Wpos2UtNum(&ux, &uz, player->forward_ut_pos);
                 item = CLIP(broker_design_clip)->get_no_proc(ux, uz);
+#ifdef VITA_MP
+                // (one another player bought is gone from his tent too)
+                if (aEBR2_mp_sold(item)) {
+                    item = EMPTY_NO;
+                }
+#endif
                 if (item != EMPTY_NO && item != RSV_NO) {
                     int idx = aEBR2_get_item_idx(item);
 
+#ifdef VITA_MP
+                    mp_shop_claim(item);
+#endif
                     mDemo_Request(mDemo_TYPE_SPEAK, actorx, aEBR2_set_talk_info_sell_item);
                     broker2->item_idx = idx;
                 }
@@ -414,6 +423,17 @@ static void aEBR2_sell_check(EV_BROKER2_ACTOR* broker2, GAME_PLAY* play) {
     if (mMsg_Check_MainNormalContinue(msg_p) == TRUE) {
         switch (mChoice_GET_CHOSENUM()) {
             case mChoice_CHOICE0:
+#ifdef VITA_MP
+                // another player is buying it or bought it: it goes as if turned down (the host's word first)
+                switch (mp_shop_claim_state(Save_Get(event_save_data).special.event.broker.items[broker2->item_idx])) {
+                    case 0:
+                        return;
+                    case 2:
+                        mMsg_Set_continue_msg_num(msg_p, 0x079D);
+                        aEBR2_setupAction(broker2, aEBR2_ACTION_TALK_END_WAIT);
+                        return;
+                }
+#endif
                 mMsg_Set_continue_msg_num(msg_p, 0x0798 + RANDOM(5));
                 aEBR2_setupAction(broker2, aEBR2_ACTION_SELL_AFTER);
                 break;
@@ -424,6 +444,21 @@ static void aEBR2_sell_check(EV_BROKER2_ACTOR* broker2, GAME_PLAY* play) {
         }
     }
 }
+
+#ifdef VITA_MP
+// an item Redd's record says went already (another player's purchase, as the host has it)
+static int aEBR2_mp_sold(mActor_name_t item) {
+    mEv_broker_c* save_p = &Save_Get(event_save_data).special.event.broker;
+    int i;
+
+    for (i = 0; i < save_p->used && i < (int)ARRAY_COUNT(save_p->sold_items); i++) {
+        if (save_p->sold_items[i] == item) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+#endif
 
 static void aEBR2_sell_after(EV_BROKER2_ACTOR* broker2, GAME_PLAY* play) {
     static int item_ux[] = {2, 4, 2};
@@ -445,8 +480,15 @@ static void aEBR2_sell_after(EV_BROKER2_ACTOR* broker2, GAME_PLAY* play) {
             if (idx == -1) {
                 mMsg_Set_continue_msg_num(msg_p, 0x079F);
             } else {
+#ifdef VITA_MP
+                mp_world_inv_mark();
+#endif
                 mPr_SetPossessionItem(Now_Private, idx, item, mPr_ITEM_COND_NORMAL);
                 mSP_get_sell_price(sell_price);
+#ifdef VITA_MP
+                mp_world_inv_follow();
+                mp_shop_claim_done(item);
+#endif
 #ifdef VITA_TROPHIES
                 vita_trophy_unlock(TROPHY_BLACK_MARKET);
 #endif

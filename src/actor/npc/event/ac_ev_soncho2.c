@@ -12,6 +12,9 @@
 #include "libultra/libultra.h"
 #include "m_event_map_npc.h"
 #include "ac_tokyoso_control.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static int aES2_change_talk_proc(ACTOR* actorx, u8 talk_proc);
 static void aES2_setup_think_proc(NPC_SONCHO2* soncho, GAME_PLAY* play, u8 think_proc);

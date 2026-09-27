@@ -1,4 +1,7 @@
 #include "ac_br_shop.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #include "m_common_data.h"
 #include "m_name_table.h"
 #include "m_player_lib.h"

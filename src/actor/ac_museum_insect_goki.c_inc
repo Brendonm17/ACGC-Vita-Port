@@ -82,6 +82,20 @@ void goki_wall_hit_angle_corect(MUSEUM_INSECT_PRIVATE_DATA* actor, GAME* game) {
 void goki_set_talk_info_init(ACTOR* actor) {
     int info = mMmd_InsectInfo(0x1c);
     int i;
+#ifdef VITA_MP
+    u8 mp_name[PLAYER_NAME_LEN];
+
+    // a visitor's donation the host noted reads with their name, as a resident's does
+    if (info == mMmd_DONATOR_DELETED_PLAYER && pc_mp_museum_donor(mMmd_CATEGORY_INSECT, 0x1c, mp_name)) {
+        mMsg_Set_free_str(mMsg_Get_base_window_p(), mMsg_FREE_STR0, mp_name, PLAYER_NAME_LEN);
+        mDemo_Set_talk_window_color(&window_color);
+        mDemo_Set_talk_display_name(0);
+        mDemo_Set_msg_num(MSG_12196);
+        mDemo_Set_use_zoom_sound(TRUE);
+        mDemo_Set_talk_turn(0);
+        return;
+    }
+#endif
     if (info < 1 || info > 4) {
         i = MSG_12197;
     } else {

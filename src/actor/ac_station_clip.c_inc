@@ -1,9 +1,17 @@
 static aSTC_clip_c aSTC_clip;
 
 static int aSTC_clip_change_talk_proc(ACTOR* actorx, int talk_idx);
+#ifdef VITA_MP
+static int aSTC_clip_net_route(ACTOR* actorx);
+static void aSTM_net_cardproc(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play);
+static int aSTM_net_save_msg(int res, int train_coming, int* msg_no);
+#endif
 
 static void aSTC_clip_ct(void) {
     aSTC_clip.change_talk_proc = &aSTC_clip_change_talk_proc;
+#ifdef VITA_MP
+    aSTC_clip.net_route_proc = &aSTC_clip_net_route;
+#endif
     CLIP(station_clip) = &aSTC_clip;
 }
 
@@ -108,7 +116,15 @@ static void aSTM_cardproc(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
     mCPk_c* cpak_p = mCPk_get_pkinfo();
     int talk_idx = -1;
     s32 chan;
-    int card_ret = mCD_CheckStation_bg(&chan);
+    int card_ret;
+
+#ifdef VITA_MP
+    if (mp_travel_net_trip()) {
+        aSTM_net_cardproc(master, play);
+        return;
+    }
+#endif
+    card_ret = mCD_CheckStation_bg(&chan);
 
     master->station_check_res = card_ret;
     switch (card_ret) {
@@ -277,6 +293,11 @@ static void aSTM_save_talk(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
             mMsg_Unset_LockContinue(msg_p);
             idx = master->train_actor_p == NULL;
             mMsg_Set_continue_msg_num(msg_p, msg_no[idx]);
+#ifdef VITA_MP
+            if (aSTM_net_save_msg(res, idx, &next_msg_no)) {
+                mMsg_Set_continue_msg_num(msg_p, next_msg_no);
+            }
+#endif
             master->next_think_idx = next_think_idx[idx];
             aSTC_clip_change_talk_proc((ACTOR*)master, aSTM_TALK_SAVE_TALK_END);
             mEv_SetGateway();
@@ -343,6 +364,9 @@ static void aSTM_save_talk(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
                     next_msg_no = 0x0946;
                     break;
             }
+#ifdef VITA_MP
+            aSTM_net_save_msg(res, FALSE, &next_msg_no);
+#endif
 
             mMsg_Unset_LockContinue(msg_p);
             mMsg_Set_continue_msg_num(msg_p, next_msg_no);
@@ -482,6 +506,10 @@ static void aSTM_repairid(NPC_STATION_MASTER_ACTOR* master, GAME_PLAY* play) {
     }
 }
 
+#ifdef VITA_MP
+#include "../src/actor/ac_station_clip_net.c_inc"
+#endif
+
 static int aSTC_clip_change_talk_proc(ACTOR* actorx, int talk_act) {
     // clang-format off
     static aSTM_TALK_PROC proc[] = {
@@ -501,6 +529,24 @@ static int aSTC_clip_change_talk_proc(ACTOR* actorx, int talk_act) {
         &aSTM_repairid_after,
         &aSTM_cardproc,
         (aSTM_TALK_PROC)&none_proc1,
+#ifdef VITA_MP
+        &aSTM_net_res_menu,
+        &aSTM_net_menu,
+        &aSTM_net_where,
+        &aSTM_net_wait,
+        &aSTM_net_list,
+        &aSTM_net_retry,
+        &aSTM_net_ledit_close,
+        &aSTM_net_ledit_open,
+        &aSTM_net_ledit_end,
+        &aSTM_net_ledit_reopen,
+        &aSTM_net_welcome,
+        &aSTM_net_depart,
+        &aSTM_net_host_status,
+        &aSTM_net_host_confirm,
+        &aSTM_net_host_portmap,
+        &aSTM_net_host_thanks,
+#endif
     };
     // clang-format on
 

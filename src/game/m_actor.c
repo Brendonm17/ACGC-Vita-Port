@@ -22,6 +22,9 @@
 #ifdef TARGET_PC
 #include "pc_platform.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 #ifdef TARGET_VITA
 #include "ac_birth_control.h"
 static void restore_fgdata_one(ACTOR* actor, GAME_PLAY* play);
@@ -567,6 +570,44 @@ extern void Actor_info_call_actor(GAME_PLAY* play, Actor_info* actor_info) {
 
     play->game.doing_point_specific = 163;
 }
+
+#ifdef VITA_MP
+// behind this game's menu only the event characters the others watch go on, with the copies of what the
+// others move
+extern void Actor_info_call_actor_mp_menu(GAME_PLAY* play, Actor_info* actor_info) {
+    static const u8 parts[] = { ACTOR_PART_UNUSED, ACTOR_PART_NPC, ACTOR_PART_CONTROL };
+    PLAYER_ACTOR* player_actor = get_player_actor_withoutCheck(play);
+    ACTOR* actor;
+    int k;
+
+    for (k = 0; k < ARRAY_COUNT(parts); k++) {
+        for (actor = actor_info->list[parts[k]].actor; actor != NULL; actor = actor->next_actor) {
+            // another player stepping into this place while the menu is up comes into view
+            if (actor->ct_proc != NULL && actor->id == mAc_PROFILE_MP_PLAYER &&
+                Actor_data_bank_dma_end_check(actor, play) == TRUE) {
+                (*actor->ct_proc)(actor, (GAME*)play);
+                actor->ct_proc = NULL;
+            }
+            if (actor->ct_proc != NULL || actor->mv_proc == NULL || !pc_mp_menu_runs(actor) ||
+                !((actor->state_bitfield & (ACTOR_STATE_NO_MOVE_WHILE_CULLED | ACTOR_STATE_NO_CULL)) ||
+                  actor->part == ACTOR_PART_NPC)) {
+                continue;
+            }
+            xyz_t_move(&actor->last_world_position, &actor->world.position);
+            actor->player_distance_xz =
+                search_position_distanceXZ(&actor->world.position, &player_actor->actor_class.world.position);
+            actor->player_distance_y = player_actor->actor_class.world.position.y - actor->world.position.y;
+            actor->player_distance = actor->player_distance_xz * actor->player_distance_xz +
+                                     actor->player_distance_y * actor->player_distance_y;
+            actor->player_angle_y =
+                search_position_angleY(&actor->world.position, &player_actor->actor_class.world.position);
+            actor->state_bitfield &= ~ACTOR_STATE_24;
+            (*actor->mv_proc)(actor, (GAME*)play);
+            CollisionCheck_Status_Clear(&actor->status_data);
+        }
+    }
+}
+#endif
 
 extern void Actor_info_draw_actor(GAME_PLAY* play, Actor_info* actor_info) {
     Actor_list* list;

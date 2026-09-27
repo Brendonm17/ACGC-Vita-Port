@@ -4,6 +4,9 @@
 #include "m_common_data.h"
 #include "m_rcp.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define aNI_GET_ACTOR() (CLIP(needlework_indoor_clip) != NULL ? CLIP(needlework_indoor_clip)->needlework_indoor_actor_p : NULL)
 
@@ -225,24 +228,52 @@ static void Needlework_Indoor_Actor_move(ACTOR* actorx, GAME* game) {
         if (actor->clip.copy_cloth_data_requested == TRUE) {
             aNI_CopyClothData(actor->clip.copy_cloth_data_idx, actor->clip.copy_cloth_data_design_p, TRUE);
             actor->clip.copy_cloth_data_requested = FALSE;
+#ifdef VITA_MP
+            mp_world_design(actor->clip.copy_cloth_data_idx & 3);
+#endif
         }
 
         if (actor->clip.exchange_cloth_data_requested == TRUE) {
             aNI_ExchangeCloth(actor->clip.exchange_cloth_data_idx, actor->clip.exchange_cloth_data_player_org_idx, TRUE);
             actor->clip.exchange_cloth_data_requested = FALSE;
+#ifdef VITA_MP
+            mp_world_design(actor->clip.exchange_cloth_data_idx & 3);
+#endif
         }
 
         if (actor->clip.copy_umb_data_requested == TRUE) {
             aNI_CopyUmbData(actor->clip.copy_umb_data_idx, actor->clip.copy_umb_data_design_p, TRUE);
             actor->clip.copy_umb_data_requested = FALSE;
+#ifdef VITA_MP
+            mp_world_design(mNW_CLOTH_DESIGN_NUM + (actor->clip.copy_umb_data_idx & 3));
+#endif
         }
 
         if (actor->clip.exchange_umb_data_requested == TRUE) {
             aNI_ExchangeUmb(actor->clip.exchange_umb_data_idx, actor->clip.exchange_umb_data_player_org_idx, TRUE);
             actor->clip.exchange_umb_data_requested = FALSE;
+#ifdef VITA_MP
+            mp_world_design(mNW_CLOTH_DESIGN_NUM + (actor->clip.exchange_umb_data_idx & 3));
+#endif
         }
     }
 }
+
+#ifdef VITA_MP
+// another player's trade changed a stand: it shows the town's copy, turning to its other buffer as a trade here does
+void aNI_mp_refresh(int slot) {
+    NEEDLEWORK_INDOOR_ACTOR* actor = (NEEDLEWORK_INDOOR_ACTOR*)aNI_GET_ACTOR();
+    int type = slot < mNW_CLOTH_DESIGN_NUM ? mNW_TYPE_MANEKIN : mNW_TYPE_UMBRELLA;
+    int idx = slot & 3;
+    int buf;
+
+    if (actor == NULL || slot < 0 || slot >= mNW_TOTAL_DESIGN_NUM) {
+        return;
+    }
+    buf = actor->design_buf_idx[type][idx] = (actor->design_buf_idx[type][idx] + 1) & 1;
+    mNW_CopyOriginalTextureClass(actor->data[buf][type][idx], &Save_Get(needlework).original_design[slot]);
+}
+#endif
 
 static int aNI_RequestCopyClothData(int manekin_idx, mNW_original_design_c* design) {
     if (aNI_GET_ACTOR() != NULL) {

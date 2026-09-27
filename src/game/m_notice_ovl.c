@@ -8,6 +8,13 @@
 #include "m_font.h"
 #include "m_quest.h"
 #include "sys_matrix.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#include "m_warning_ovl.h"
+#include "audio_defs.h"
+
+static int mNT_mp_note; // the host's no-posting note is up over the board
+#endif
 
 static mNT_Ovl_c notice_ovl_data;
 
@@ -158,6 +165,16 @@ static void mNT_Play_page_read(Submenu* submenu, mSM_MenuInfo_c* menu_info, mNT_
                (stick_area == mED_STICK_AREA_TOP || chkTrigger(BUTTON_CUP))) {
         move_page = (notice_ovl->page_count - notice_ovl->now_page) - 1;
     } else if (chkTrigger(BUTTON_A)) {
+#ifdef VITA_MP
+        // the host keeps its board to residents
+        if (!mp_visitor_may(MP_RULE_BOARD)) {
+            mNT_mp_note = TRUE;
+            menu_info->proc_status = mSM_OVL_PROC_OBEY;
+            mSM_open_submenu(submenu, mSM_OVL_WARNING, mWR_WARNING_MP_POST, 0);
+            sAdo_SysTrgStart(MONO(NA_SE_3));
+            return;
+        }
+#endif
         notice_ovl->mode = mNT_PLAY_PAGE_TO_WRITE;
         notice_ovl->now_page = mNtc_BOARD_POST_COUNT;
         menu_info->position[0] = 320.0f;
@@ -336,6 +353,16 @@ static void mNT_move_Obey(Submenu* submenu, mSM_MenuInfo_c* menu_info) {
     mSM_MenuInfo_c* editEndChk_menu = &submenu->overlay->menu_info[mSM_OVL_EDITENDCHK];
     mNT_Ovl_c* notice_ovl = submenu->overlay->notice_ovl;
 
+#ifdef VITA_MP
+    // the note put away: back to reading
+    if (mNT_mp_note) {
+        if (menu_info->next_menu_type == mSM_OVL_NONE) {
+            mNT_mp_note = FALSE;
+            menu_info->proc_status = mSM_OVL_PROC_PLAY;
+        }
+        return;
+    }
+#endif
     mNT_roll_control2(menu_info);
     if (editEndChk_menu->proc_status == mSM_OVL_PROC_MOVE && editEndChk_menu->next_proc_status == mSM_OVL_PROC_END) {
         if (editEndChk_menu->data1 == 0) {
@@ -700,6 +727,9 @@ static void mNT_notice_ovl_init(Submenu* submenu) {
     sAdo_SysTrgStart(0x17C);
     mNT_set_init_data(submenu->overlay->notice_ovl, menu_info);
     submenu->overlay->notice_ovl->stick_area = mED_STICK_AREA_CENTER;
+#ifdef VITA_MP
+    mNT_mp_note = FALSE;
+#endif
     mBGMPsComp_pause(3);
 }
 

@@ -9,6 +9,9 @@
 #include "m_handbill.h"
 #include "m_malloc.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void mFR_delete_record(mFR_record_c* record) {
     mem_clear((u8*)record, sizeof(mFR_record_c), 0);
@@ -466,6 +469,32 @@ static void mFR_Fishmail_send() {
         zelda_free(mail);
     }
 }
+
+#ifdef VITA_MP
+// a visitor holding the tourney's final record (the host's pass pins it at 6:00 PM) finds the prize letter in its
+// pouch, as a resident finds it in the mailbox; with no room for it the next look tries again
+extern void mFR_mp_visitor_prize(void) {
+    lbRTC_time_c* rtc_time = Common_GetPointer(time.rtc_time);
+    Mail_c mail;
+    int i;
+
+    if (!mp_visitor_rights() || Now_Private == NULL || rtc_time->hour < 18 ||
+        (mp_mark_get(MP_MARK_TOURNEY) & MP_MARK_TOURNEY_PRIZE) != 0) {
+        return;
+    }
+    for (i = 0; i < mFR_RECORD_NUM; i++) {
+        mFR_record_c* record = Save_Get(fishRecord) + i;
+
+        if (record->size > 0 && record->time.year == rtc_time->year && record->time.month == rtc_time->month &&
+            record->time.day == rtc_time->day && record->time.hour == 18 && record->time.min == 0 &&
+            record->time.sec == 0 && mPr_CheckCmpPersonalID(&record->pid, &Now_Private->player_ID)) {
+            mFR_GetFishPresentMail(record, &mail);
+            pc_mp_prize_mail(&mail, MP_MARK_TOURNEY, MP_MARK_TOURNEY_PRIZE);
+            return;
+        }
+    }
+}
+#endif
 
 static void mFR_fishRecord_last_holder() {
     mFR_record_c* record;

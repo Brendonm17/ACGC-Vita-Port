@@ -6,6 +6,9 @@
 #include "m_player_lib.h"
 #include "ac_shrine.h"
 #include "libultra/libultra.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aHTC_actor_ct(ACTOR* actorx, GAME* game);
 static void aHTC_actor_dt(ACTOR* actorx, GAME* game);
@@ -60,5 +63,24 @@ static void aHTC_actor_dt(ACTOR* actorx, GAME* game) {
 static void aHTC_actor_move(ACTOR* actorx, GAME* game) {
     HATUMODE_CONTROL_ACTOR* hatumode_control = (HATUMODE_CONTROL_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    mp_evstep_t step;
+
+    switch (pc_mp_ev_ctl(1, &step)) {
+        case MP_EVC_FOLLOW:
+            // the offering and prayer are for the player whose screen runs the line
+            return;
+        case MP_EVC_TAKE: {
+            // this screen runs the line now: a turn under way there ended with it
+            aEv_hatumode_save_c* hatumode_p = (aEv_hatumode_save_c*)mEv_get_save_area(1, 7);
+
+            if (hatumode_p != NULL) {
+                hatumode_p->flags0 &= ~0x8000;
+            }
+            aHTC_setup_move_proc(hatumode_control, 0);
+            break;
+        }
+    }
+#endif
     (*hatumode_control->move_proc)(hatumode_control, (GAME_PLAY*)game);
 }

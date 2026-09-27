@@ -882,19 +882,6 @@ void Sou_TrgStart(u16 id, f32 volume, f32 optVolume, f32 freqScale, u8 pan, u8 r
         }
     }
 
-#ifdef TARGET_PC
-    if (found_free == FALSE) {
-        printf("[TRG_SE] NO FREE for 0x%04X prio=%d | slots: [0x%04X f=%u p=%d] [0x%04X f=%u p=%d] [0x%04X f=%u p=%d] [0x%04X f=%u p=%d] [0x%04X f=%u p=%d] [0x%04X f=%u p=%d]\n",
-            id, TRGPRIO[se_idx_lo],
-            sou_trg_se[0].id, sou_trg_se[0].frames, sou_trg_se[0].priority,
-            sou_trg_se[1].id, sou_trg_se[1].frames, sou_trg_se[1].priority,
-            sou_trg_se[2].id, sou_trg_se[2].frames, sou_trg_se[2].priority,
-            sou_trg_se[3].id, sou_trg_se[3].frames, sou_trg_se[3].priority,
-            sou_trg_se[4].id, sou_trg_se[4].frames, sou_trg_se[4].priority,
-            sou_trg_se[5].id, sou_trg_se[5].frames, sou_trg_se[5].priority);
-    }
-#endif
-
     if (found_free == TRUE) {
         sou_trg_se[subtrack].id = id;
         sou_trg_se[subtrack].priority = TRGPRIO[se_idx_lo];
@@ -922,9 +909,6 @@ void Sou_TrgStart(u16 id, f32 volume, f32 optVolume, f32 freqScale, u8 pan, u8 r
         }
         NA_COMMAND_AUDIO_SUBTRACK_SET_PORT(SE_GROUP, subtrack, 0, se_idx_lo);
         NA_COMMAND_AUDIO_SUBTRACK_SET_PORT(SE_GROUP, subtrack, 1, se_idx_hi);
-#ifdef TARGET_PC
-        printf("[TRG_ALLOC] id=0x%04X slot=%d lo=%d hi=%d\n", id, subtrack, se_idx_lo, se_idx_hi);
-#endif
         return;
     }
 
@@ -938,9 +922,6 @@ void Sou_TrgStart(u16 id, f32 volume, f32 optVolume, f32 freqScale, u8 pan, u8 r
     }
 
     if (TRGPRIO[se_idx_lo] >= sou_trg_se[subtrack].priority) {
-#ifdef TARGET_PC
-        printf("[TRG_SE] EVICT slot %d (old=0x%04X) for 0x%04X\n", subtrack, sou_trg_se[subtrack].id, id);
-#endif
         sou_trg_se[subtrack].id = id;
         sou_trg_se[subtrack].priority = TRGPRIO[se_idx_lo];
         sou_trg_se[subtrack].frames = 1;
@@ -951,12 +932,6 @@ void Sou_TrgStart(u16 id, f32 volume, f32 optVolume, f32 freqScale, u8 pan, u8 r
         NA_COMMAND_AUDIO_SUBTRACK_SET_PORT(SE_GROUP, subtrack, 0, se_idx_lo);
         NA_COMMAND_AUDIO_SUBTRACK_SET_PORT(SE_GROUP, subtrack, 1, se_idx_hi);
     }
-#ifdef TARGET_PC
-    else {
-        printf("[TRG_SE] DROPPED 0x%04X prio=%d < slot %d prio=%d (0x%04X)\n",
-            id, TRGPRIO[se_idx_lo], subtrack, sou_trg_se[subtrack].priority, sou_trg_se[subtrack].id);
-    }
-#endif
 }
 
 void Sou_SpecialRoutine00() {
@@ -1004,19 +979,8 @@ void Sou_TrgEndCheck() {
             sou_trg_se[i].frames++;
             s8 p5 = Nap_ReadSubPort(SE_GROUP, i, 5);
 #ifdef TARGET_PC
-            /* Log port5 transitions for active slots */
-            if (p5 != 0 && !sou_trg_se[i]._1D) {
-                printf("[TRG_P5] slot %d id=0x%04X port5 ON=%d (frame %u)\n",
-                    i, sou_trg_se[i].id, p5, sou_trg_se[i].frames);
-            }
-            if (p5 == 0 && sou_trg_se[i]._1D) {
-                printf("[TRG_P5] slot %d id=0x%04X port5 OFF (frame %u) -> FREE\n",
-                    i, sou_trg_se[i].id, sou_trg_se[i].frames);
-            }
             /* Force-free stuck slots where sequencer never started the note */
             if (sou_trg_se[i].frames > 30 && !sou_trg_se[i]._1D && !p5) {
-                printf("[TRG_P5] slot %d id=0x%04X STUCK (port5 never set, %u frames) -> FORCE FREE\n",
-                    i, sou_trg_se[i].id, sou_trg_se[i].frames);
                 sou_trg_se[i].id = 0;
                 sou_trg_se[i].frames = 0;
                 sou_trg_se[i]._1D = 0;
@@ -1176,17 +1140,6 @@ void Sou_TrgMake(u8 index) {
     NA_COMMAND_AUDIO_SUBTRACK_SET_FREQ_SCALE(SE_GROUP, index, sou_trg_se[index].freqScale);
     NA_COMMAND_AUDIO_SUBTRACK_SET_PAN(SE_GROUP, index, sou_trg_se[index].pan);
     NA_COMMAND_AUDIO_SUBTRACK_REVERB_VOLUME(SE_GROUP, index, sou_trg_se[index].reverbVolume);
-#ifdef TARGET_PC
-    if (sou_trg_se[index].id != 0) {
-        static u32 trg_make_counter = 0;
-        if ((trg_make_counter++ % 15) == 0) {
-            printf("[TRG_VOL] slot=%d id=0x%04X vol=%.3f opt=%.3f fade_flag=%d fade_scale=%.3f final=%.3f\n",
-                index, sou_trg_se[index].id,
-                sou_trg_se[index].volume, sou_trg_se[index].optVolume,
-                sou_se_fadeout_flag, sou_se_fade[index].volumeScale, volume);
-        }
-    }
-#endif
 }
 
 void Sou_VoiceMake(u8 index) {
@@ -1488,6 +1441,18 @@ void Sou_Ongen_Lev_Prog(u8 index) {
     return;
 }
 
+#ifdef VITA_MP
+extern "C" int pc_mp_aero_skip(int seq_id);
+extern "C" volatile s32 Na_mp_aero_skip[AUDIO_GROUP_MAX];
+
+// the radio song joins the other players' place in it; sub_sys.c catches up there as it starts
+static void Sou_MpAeroStart(u8 seq, int group) {
+    if (seq == 0xDA && group >= 0 && group < AUDIO_GROUP_MAX) {
+        Na_mp_aero_skip[group] = pc_mp_aero_skip(seq);
+    }
+}
+#endif
+
 void Sou_BgmStart(u8 id, u16 fadeTime) {
     sou_now_bgm_num = id;
     if (id == BGM_SILENCE) {
@@ -1508,6 +1473,9 @@ void Sou_BgmStart(u8 id, u16 fadeTime) {
         NA_COMMAND_AUDIO_STOP_SEQ(oldBGMHandle, fadeTime);
         NA_COMMAND_AUDIO_STOP_SEQ(sou_now_bgm_handle, 0);
         id = Sou_BgmTenkiConv(id);
+#ifdef VITA_MP
+        Sou_MpAeroStart(SEQ_TABLE[id], sou_now_bgm_handle);
+#endif
         NA_COMMAND_AUDIO_START_SEQ(sou_now_bgm_handle, SEQ_TABLE[id], fadeTime);
         Na_StaffRollStart(SEQ_TABLE[id]);
         Na_SetKappaSeqHandle(sou_now_bgm_handle);
@@ -1612,11 +1580,17 @@ void Sou_SpecialRoutine06() {
                 sou_now_bgm_handle = BGM1_GROUP;
                 NA_COMMAND_AUDIO_STOP_SEQ(BGM0_GROUP, 700);
                 v = Sou_BgmTenkiConv(sou_bgm_call_buffer_u8);
+#ifdef VITA_MP
+                Sou_MpAeroStart(SEQ_TABLE[v], BGM1_GROUP);
+#endif
                 NA_COMMAND_AUDIO_START_SEQ(BGM1_GROUP, SEQ_TABLE[v], 700);
             } else {
                 sou_now_bgm_handle = BGM0_GROUP;
                 NA_COMMAND_AUDIO_STOP_SEQ(BGM1_GROUP, 700);
                 v = Sou_BgmTenkiConv(sou_bgm_call_buffer_u8);
+#ifdef VITA_MP
+                Sou_MpAeroStart(SEQ_TABLE[v], BGM0_GROUP);
+#endif
                 NA_COMMAND_AUDIO_START_SEQ(BGM0_GROUP, SEQ_TABLE[v], 700);
             }
         } break;
@@ -2052,9 +2026,6 @@ void Sou_WalkSe(u16 id, u16 angle, f32 distance, u8 reverb, f32 optVolume) {
         sou_last_walk_r = 0;
     }
     sou_walk_flag++;
-#ifdef TARGET_PC
-    printf("[WALK_SE] final_id=0x%04X vol=%.2f optVol=%.2f\n", id, volume, optVolume);
-#endif
     Sou_TrgStart(id, volume, optVolume, freqScale, pan, reverb, distance);
 }
 
@@ -2074,16 +2045,8 @@ void Na_PlyWalkSe(u16 id, u16 angle, f32 distance) {
             } break;
         }
 
-#ifdef TARGET_PC
-        printf("[WALK] id=0x%04X dash=%d\n", id, sou_player_dash);
-#endif
         Sou_WalkSe(id, angle, distance, reverb, optVolume);
     }
-#ifdef TARGET_PC
-    else {
-        printf("[WALK] BLOCKED: sou_scene_mode=0 id=0x%04X\n", id);
-    }
-#endif
 }
 
 void Na_PlyWalkSeRoom(u8 a, u16 angle, f32 distance) {
@@ -3721,9 +3684,6 @@ extern void Na_SubGameEnd() {
 extern void Na_SceneMode(u8 a) {
     u8 unused = 0;
     if (a != sou_scene_mode) {
-#ifdef TARGET_PC
-        printf("[SCENE_MODE] %d -> %d\n", sou_scene_mode, a);
-#endif
         sou_ongenpos_kill_countdown = 0;
         sou_se_fadeout_flag = 0;
         switch (a) {

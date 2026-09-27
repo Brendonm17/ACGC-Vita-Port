@@ -136,6 +136,17 @@ extern int mFont_char_save_data_check(u8 c) {
     return c == CHAR_CONTROL_CODE || c == CHAR_MESSAGE_TAG;
 }
 
+// text from a save, letter, password or another player never carries codes: shown, they'd run as the message's own
+extern void mFont_clean_save_text(u8* str, int len) {
+    int i;
+
+    for (i = 0; i < len; i++) {
+        if (mFont_char_save_data_check(str[i])) {
+            str[i] = CHAR_SPACE;
+        }
+    }
+}
+
 extern u8 mFont_small_to_capital(u8 small) {
     static const u8 tbl[56][2] = {
         { CHAR_a, CHAR_A },

@@ -16,6 +16,14 @@
 #include "pc_settings.h"
 #endif
 
+#ifdef VITA_MP
+#include "pc_mp.h"
+// multiplayer dialogue ids sit above the ROM table
+#define mMsg_IDX_VALID(idx) ((idx) < MSG_MAX || pc_mp_text_is_msg(idx))
+#else
+#define mMsg_IDX_VALID(idx) ((idx) < MSG_MAX)
+#endif
+
 static u32 Msg_table_rom_start = 0;
 static u32 Msg_rom_start = 0;
 

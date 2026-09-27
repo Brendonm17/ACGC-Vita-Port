@@ -14,6 +14,15 @@
 #include "m_ledit_ovl.h"
 #include "m_bgm.h"
 #include "GBA2/gba2.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+// Sable gets to know a visitor as a resident when the host lets visitors do what residents do
+#define aNNW_STRANGER() (Common_Get(player_no) == mPr_FOREIGNER && !mp_visitor_rights())
+// the host keeps the shop's displays as they are
+#define aNNW_STANDS_KEPT() (!mp_visitor_may(MP_RULE_DESIGNS))
+#else
+#define aNNW_STRANGER() (Common_Get(player_no) == mPr_FOREIGNER)
+#endif
 
 enum {
     aNNW_TALK_WHAT_HAPPEN_FIRST,

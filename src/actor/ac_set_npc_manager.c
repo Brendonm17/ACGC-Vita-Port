@@ -7,6 +7,13 @@
 #include "libultra/libultra.h"
 #include "m_random_field.h"
 #include "m_event_map_npc.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+// another player's acre is kept clear like this player's
+#define aSNMgr_VISITOR_IN(bx, bz) mp_block_occupied((bx), (bz))
+#else
+#define aSNMgr_VISITOR_IN(bx, bz) FALSE
+#endif
 
 static void aSNMgr_actor_ct(ACTOR* actorx, GAME* game);
 static void aSNMgr_actor_dt(ACTOR* actorx, GAME* game);
@@ -583,6 +590,14 @@ static int aSNMgr_set_event_info(aSNMgr_event_info_c* info_p) {
 
     if (info_p->type == mEv_EVENT_NUM) {
         type = mEvMN_GetEventTypeMap();
+#ifdef VITA_MP
+        // (a visitor's villagers at an event are the host's picks: its list is waited for, the host asked for one)
+        if (type != -1 && !mp_town_writer_allowed() && mEvMN_GetMapIdx(type) != -1 &&
+            mEv_get_save_area(type, 0xF) == NULL) {
+            mp_event_roster_ask(type);
+            type = -1;
+        }
+#endif
         if (type != -1) {
             info_p->type = type;
             info_p->event_map_idx = mEvMN_GetMapIdx(type);
@@ -595,7 +610,14 @@ static int aSNMgr_set_event_info(aSNMgr_event_info_c* info_p) {
                     }
                     mEvMN_GetNpcJointEv(info_p->save_p, type);
                 } else {
+#ifdef VITA_MP
+                    // (a visitor takes the host's list as it stands; the host fills any gap and it streams)
+                    if (mp_town_writer_allowed()) {
+                        mEvMN_SetNpcJointEv(info_p->save_p, type);
+                    }
+#else
                     mEvMN_SetNpcJointEv(info_p->save_p, type);
+#endif
                 }
 
                 ret = TRUE;
@@ -811,7 +833,8 @@ static void aSNMgr_walk_to_next_block(xyz_t* pos_p, u8* to_block_p, u8* in_block
             }
         }
 
-        if (block[0] != player_pos_p->now_block[0] || block[1] != player_pos_p->now_block[1]) {
+        if ((block[0] != player_pos_p->now_block[0] || block[1] != player_pos_p->now_block[1]) &&
+            !aSNMgr_VISITOR_IN(block[0], block[1])) {
             mFI_BkandUtNum2CenterWpos(pos_p, block[0], block[1], unit[0], unit[1]);
 
             if (change_block == TRUE) {
@@ -1012,7 +1035,8 @@ static int aSNMgr_set_go_home_status(SET_NPC_MANAGER_ACTOR* manager, int anm_idx
         chk_bz = home_bz + add_bz[i];
         
         if (mFI_BlockCheck(chk_bx, chk_bz) == TRUE) {
-            if ((chk_bx != bx || chk_bz != bz) && (chk_bx != player_bx || chk_bz != player_bz)) {
+            if ((chk_bx != bx || chk_bz != bz) && (chk_bx != player_bx || chk_bz != player_bz) &&
+                !aSNMgr_VISITOR_IN(chk_bx, chk_bz)) {
                 if (aSNMgr_set_go_home_status_sub(manager, anm_idx, chk_bx, chk_bz, walk_status[i]) == TRUE) {
                     ret = TRUE;
                     break;

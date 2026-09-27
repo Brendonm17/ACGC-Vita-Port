@@ -119,6 +119,11 @@ static void aMR_GokiInfoCt(ACTOR* actorx, GAME* game) {
     int goki_count = mCkRh_NowSceneGokiFamilyCount();
 
     mCkRh_InitCanLookGokiCount();
+#ifdef VITA_MP
+    if (aHG_mp_room_ct(game)) {
+        goki_count = 0; // (another player here runs the room's cockroaches)
+    }
+#endif
     if (goki_count != 0) {
         int max;
         int i;
@@ -179,6 +184,27 @@ static void aMR_GokiInfoCt(ACTOR* actorx, GAME* game) {
 }
 
 static void aMR_MakeGokiburi(xyz_t* pos, GAME* game, s16 arg) {
+#ifdef VITA_MP
+    // (another player here runs the room's cockroaches: its game brings this one out)
+    if (aHG_mp_follows()) {
+        if (mCkRh_NowSceneGokiFamilyCount() > 0) {
+            u8 body[7];
+            s16 v[3];
+            int i;
+
+            v[0] = (s16)(pos->x * 4.0f);
+            v[1] = (s16)(pos->y * 4.0f);
+            v[2] = (s16)(pos->z * 4.0f);
+            body[0] = MP_VFX_GOKI_MAKE;
+            for (i = 0; i < 3; i++) {
+                body[1 + i * 2] = (u8)((u16)v[i] >> 8);
+                body[2 + i * 2] = (u8)v[i];
+            }
+            mp_vfx_send(body, 7);
+        }
+        return;
+    }
+#endif
     if (mCkRh_NowSceneGokiFamilyCount() > 0 && mCkRh_GetCanLookGokiCount() < aMR_GOKI_MAX &&
         aMR_MakeIndoorGoki(pos, arg, DEG2SHORT_ANGLE(0.0f), game)) {
         mCkRh_CalcCanLookGokiCount(1);
@@ -205,7 +231,25 @@ static void aMR_GokiInfoDt(void) {
             mCkRh_PlussGokiN_NowRoom(mCkRh_GetCanLookGokiCount(), my_room->scene);
         }
     }
+#ifdef VITA_MP
+    aHG_mp_room_end();
+#endif
 }
+
+#ifdef VITA_MP
+// another player's furniture move turned a cockroach up: this game, running the room's, brings it out
+void aMR_mp_goki_make(const unsigned char* body, int len) {
+    xyz_t pos;
+
+    if (len < 7 || gamePT == NULL || aMR_CLIP == NULL || aHG_mp_follows()) {
+        return;
+    }
+    pos.x = (s16)((body[1] << 8) | body[2]) * 0.25f;
+    pos.y = (s16)((body[3] << 8) | body[4]) * 0.25f;
+    pos.z = (s16)((body[5] << 8) | body[6]) * 0.25f;
+    aMR_MakeGokiburi(&pos, gamePT, 1);
+}
+#endif
 
 static int aMR_CheckFtrAndGoki2(aFTR_collision_c* ftr_col, const xyz_t* goki_pos) {
     f32 check_pos[2];

@@ -23,14 +23,16 @@ static void aSTM_set_force_talk_info(ACTOR* actorx) {
     NPC_STATION_MASTER_ACTOR* actor = (NPC_STATION_MASTER_ACTOR*)actorx;
     aSTM_talk_data_c* data_p = &dt_tbl[actor->talk_idx];
 
-    OSReport("[PORTER] FORCE talk_idx=%d msg=0x%04x\n", actor->talk_idx, data_p->msg_no);
-
 #ifdef TARGET_PC
+#ifdef VITA_MP
+    // network visitors get the stock arrival greeting
+    if (actor->talk_idx == 0 && !mp_travel_net_trip()) {
+#else
     if (actor->talk_idx == 0) {
+#endif
         extern int mCD_CheckStation_bg(s32* chan);
         s32 chan;
         int card_ret = mCD_CheckStation_bg(&chan);
-        OSReport("[PORTER] FORCE card_ret=%d\n", card_ret);
         if (card_ret == mCD_TRANS_ERR_NONE_NEXTLAND) {
             actor->talk_idx = 2;
             aSTM_set_norm_talk_info(actorx);
@@ -60,7 +62,6 @@ static void aSTM_set_force_talk_info(ACTOR* actorx) {
 }
 
 static void aSTM_force_talk_request(ACTOR* actorx, GAME* game) {
-    OSReport("[PORTER] force_talk_request called\n");
     mDemo_Request(mDemo_TYPE_SPEAK, actorx, aSTM_set_force_talk_info);
 }
 
@@ -77,14 +78,11 @@ static void aSTM_set_norm_talk_info(ACTOR* actorx) {
     NPC_STATION_MASTER_ACTOR* actor = (NPC_STATION_MASTER_ACTOR*)actorx;
     aSTM_talk_data_c* data_p = &dt_tbl[actor->talk_idx];
 
-    OSReport("[PORTER] NORM talk_idx=%d save_exist=%d msg=0x%04x\n", actor->talk_idx, Save_Get(save_exist), data_p->msg_no);
-
     if (CLIP(aprilfool_control_clip) != NULL && !CLIP(aprilfool_control_clip)->talk_chk_proc(SP_NPC_STATION_MASTER)) {
         mDemo_Set_msg_num(CLIP(aprilfool_control_clip)->get_msg_num_proc(SP_NPC_STATION_MASTER, TRUE));
         CLIP(station_clip)->change_talk_proc(actorx, aSTM_TALK_END_WAIT);
     } else {
         if (actor->talk_idx == 2 && !Save_Get(save_exist)) {
-            OSReport("[PORTER] HIT 0x0945 PATH save_exist=%d\n", Save_Get(save_exist));
             Save_Get(save_exist) = TRUE;
             mDemo_Set_msg_num(0x0943);
             if (CLIP(station_clip) != NULL) {
@@ -93,6 +91,14 @@ static void aSTM_set_norm_talk_info(ACTOR* actorx) {
                 actor->talk_proc = (aSTM_TALK_PROC)none_proc1;
             }
         } else {
+#ifdef VITA_MP
+            // resident travel prompt grows friends' towns; an open line shows its status
+            if (actor->talk_idx == 2 && CLIP(station_clip) != NULL && CLIP(station_clip)->net_route_proc(actorx)) {
+                mDemo_Set_talk_turn(TRUE);
+                mDemo_Set_camera(CAMERA2_PROCESS_TALK);
+                return;
+            }
+#endif
             mDemo_Set_msg_num(data_p->msg_no);
             if (CLIP(station_clip) != NULL) {
                 CLIP(station_clip)->change_talk_proc(actorx, data_p->talk_idx);

@@ -13,6 +13,9 @@
 #include "m_name_table.h"
 #include "m_collision_bg.h"
 #include "m_random_field.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 #define mTRC_RTC_TIME_SECONDS(rtc_time) \
     (rtc_time->sec + (rtc_time->min + rtc_time->hour * mTM_MINUTES_IN_HOUR) * mTM_SECONDS_IN_MINUTE)
@@ -233,6 +236,9 @@ static int mTRC_schedule(GAME_PLAY* play) {
     } else {
         switch (Common_Get(train_coming_flag)) {
             case 3: {
+#ifdef VITA_MP
+                mp_travel_pulling_in(); // a visitor's train: the others see it come in with them
+#endif
                 Common_Set(train_coming_flag, 0);
                 mTRC_demo_init();
                 res = 0;
@@ -345,6 +351,12 @@ static void mTRC_trainControl(GAME_PLAY* play, int state) {
         }
 
         case mTRC_ACTION_WAIT_STOPPED: {
+#ifdef VITA_MP
+            // (a train another screen runs leaves when that screen says so)
+            if (mp_train_follow()) {
+                break;
+            }
+#endif
             if (Common_Get(train_control_state) != Common_Get(train_last_control_state)) {
                 Common_Set(train_control_state, Common_Get(train_last_control_state));
                 signal = FALSE;
@@ -506,7 +518,43 @@ extern void mTRC_move(GAME* game) {
         return;
     }
 
+#ifdef VITA_MP
+    // (a train another screen runs is followed, unless this screen's own Porter or arrival wants it now)
+    if (mp_train_follow() && (Common_Get(train_coming_flag) == 0 || !mp_train_claim())) {
+        mp_train_take();
+        mTRC_trainControl(play, -1);
+        mTRC_trainSet(play);
+        return;
+    }
+#endif
     state = mTRC_schedule(play);
     mTRC_trainControl(play, state);
     mTRC_trainSet(play);
+#ifdef VITA_MP
+    mp_train_report(state);
+#endif
 }
+
+#ifdef VITA_MP
+// the train runs on behind the host's menus for everyone (its cars catch up once the menu closes)
+extern void mTRC_mp_menu_move(GAME* game) {
+    GAME_PLAY* play = (GAME_PLAY*)game;
+    int state;
+
+    if (!mTRC_go_process() || get_player_actor_withoutCheck(play) == NULL) {
+        return;
+    }
+    if (mp_train_follow()) {
+        mp_train_take();
+        mTRC_trainControl(play, -1);
+        return;
+    }
+    state = mTRC_schedule(play);
+    mTRC_trainControl(play, state);
+    mp_train_report(state);
+}
+
+extern void mTRC_mp_start_sound(int start) {
+    mTRC_KishaStatusTrg((u8)start);
+}
+#endif

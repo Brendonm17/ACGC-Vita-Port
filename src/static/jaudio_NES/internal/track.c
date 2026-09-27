@@ -8,6 +8,13 @@
 #include "jaudio_NES/system.h"
 #include "dolphin/os.h"
 
+#ifdef VITA_MP
+extern void Na_MpNoteStart(group* grp);
+extern void Na_MpNoteCounter(group* grp, u16 was);
+
+#define NA_MP_SKIP_CHUNK 128 // extra updates a joining song catches up by, each update
+#endif
+
 #define COMMON_SCRIPT_END -1
 
 /**
@@ -2012,7 +2019,17 @@ static void Nas_GroupSeq(group* grp) {
                                 grp->flags.stop_seq_script = TRUE;
                                 return;
                             case GRP_CMD_UPDATE_COUNTER: // update counter
+#ifdef VITA_MP
+                            {
+                                u16 was = grp->counter;
+
                                 grp->counter = Nas_ReadWordData(m);
+                                // the song opening, or going round again (the radio song's shared timeline)
+                                Na_MpNoteCounter(grp, was);
+                            }
+#else
+                                grp->counter = Nas_ReadWordData(m);
+#endif
                                 break;
                             case GRP_CMD_EF: //
                                 Nas_ReadWordData(m);
@@ -2128,6 +2145,18 @@ extern void Nas_MySeqMain(u32 frames_left) {
         grp = &AG.groups[i];
 
         if (grp->flags.enabled == TRUE) {
+#ifdef VITA_MP
+            // a song joining another player's place in it catches up a little each update, silently
+            {
+                s32 n = NA_MP_SKIP_CHUNK;
+
+                while (grp->skip_ticks > 0 && n-- > 0) {
+                    Nas_GroupSeq(grp);
+                    Nas_MainCtrl(grp);
+                    grp->skip_ticks--;
+                }
+            }
+#endif
             Nas_GroupSeq(grp);
             Nas_MainCtrl(grp);
         }
@@ -2170,6 +2199,9 @@ extern void Nas_InitMySeq(group* grp) {
     grp->short_note_gate_time_tbl = DEFAULT_GTABLE;
     grp->script_counter = 0;
     grp->counter = 0;
+#ifdef VITA_MP
+    Na_MpNoteStart(grp);
+#endif
 
     for (i = 0; i < AUDIO_SUBTRACK_NUM; i++) {
         Nas_InitSubTrack(grp->subtracks[i]);

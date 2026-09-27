@@ -8,6 +8,9 @@
 #include "m_skin_matrix.h"
 #include "m_rcp.h"
 #include "m_player_lib.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 static void aGYO_actor_ct(ACTOR* actorx, GAME* game);
 static void aGYO_actor_dt(ACTOR* actorx, GAME* game);
@@ -66,6 +69,10 @@ static void aGYO_actor_dt(ACTOR* actorx, GAME* game) {
     int i;
     aGYO_CTRL_ACTOR* ctrl = gyoei->ctrl;
 
+#ifdef VITA_MP
+    // its fish go with it; nothing may point into it after this
+    pc_mp_cr_unbind_kind(MP_CR_FISH);
+#endif
     for (i = 0; i < aGYO_MAX_GYOEI; i++) {
         if (ctrl->overlay_p != NULL) {
             ctrl->overlay_p = NULL;

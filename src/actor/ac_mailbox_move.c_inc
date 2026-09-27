@@ -183,11 +183,42 @@ static void aMBX_setupAction(MAILBOX_ACTOR* actor, int action) {
     
     actor->action = action;
     actor->act_proc = process[action];
+#ifdef VITA_MP
+    // the owner opening it: the lid opens and shuts on the other screens
+    if (action == aMBX_ACT_PL_OPEN) {
+        u8 body[2];
+
+        body[0] = MP_VFX_MAILBOX;
+        body[1] = (u8)actor->arrange_idx;
+        mp_vfx_send(body, sizeof(body));
+    }
+#endif
     
     info = &aMBX_animeTable[anim_idx];
     cKF_SkeletonInfo_R_init(kf, kf->skeleton, info->anim, info->start, info->end, info->start, 0.5f, 0.0f, cKF_FRAMECONTROL_STOP, NULL);
     actor->anim_idx0 = anim_idx;
 }
+
+#ifdef VITA_MP
+void aMBX_mp_replay(struct game_play_s* play_s, const u8* body, int len) {
+    GAME_PLAY* play = (GAME_PLAY*)play_s;
+    ACTOR* actorx;
+
+    if (len < 2) {
+        return;
+    }
+    for (actorx = play->actor_info.list[ACTOR_PART_ITEM].actor; actorx != NULL; actorx = actorx->next_actor) {
+        MAILBOX_ACTOR* actor = (MAILBOX_ACTOR*)actorx;
+
+        if (actorx->id == mAc_PROFILE_MAILBOX && actor->arrange_idx == body[1]) {
+            if (actor->action == aMBX_ACT_WAIT) {
+                aMBX_setupAction(actor, aMBX_ACT_OPEN_AND_CLOSE);
+            }
+            return;
+        }
+    }
+}
+#endif
 
 static void aMBX_actor_move(ACTOR* actorx, GAME* game) {
     MAILBOX_ACTOR* actor = (MAILBOX_ACTOR*)actorx;

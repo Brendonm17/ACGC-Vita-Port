@@ -4,6 +4,13 @@
 #include "m_room_type.h"
 #include "m_scene_table.h"
 #include "m_common_data.h"
+#ifdef VITA_MP
+#include "pc_mp.h"
+// a visitor too, when the host lets visitors do what residents do (theirs reads as a former resident's)
+#define mMmd_MAY_DONATE() (mLd_PlayerManKindCheck() == FALSE || mp_visitor_rights())
+#else
+#define mMmd_MAY_DONATE() (mLd_PlayerManKindCheck() == FALSE)
+#endif
 
 extern int mMmd_FossilInfo(int fossil_no) {
   int valid = FALSE;
@@ -62,28 +69,28 @@ extern int mMmd_FishInfo(int fish_no) {
 }
 
 extern void mMmd_SetFossil(int fossil_no) {
-  if (fossil_no >= 0 && fossil_no < mMmd_FOSSIL_NUM && mLd_PlayerManKindCheck() == FALSE) {
+  if (fossil_no >= 0 && fossil_no < mMmd_FOSSIL_NUM && mMmd_MAY_DONATE()) {
     mMmd_FOSSIL_CLR(Save_Get(museum_display), fossil_no);
     mMmd_FOSSIL_SET(Save_Get(museum_display), fossil_no, Common_Get(player_no) + 1);
   }
 }
 
 extern void mMmd_SetArt(int art_no) {
-  if (art_no >= 0 && art_no < mMmd_ART_NUM && mLd_PlayerManKindCheck() == FALSE) {
+  if (art_no >= 0 && art_no < mMmd_ART_NUM && mMmd_MAY_DONATE()) {
     mMmd_ART_CLR(Save_Get(museum_display), art_no);
     mMmd_ART_SET(Save_Get(museum_display), art_no, Common_Get(player_no) + 1);
   }
 }
 
 extern void mMmd_SetInsect(int insect_no) {
-  if (insect_no >= 0 && insect_no < mMmd_INSECT_NUM && mLd_PlayerManKindCheck() == FALSE) {
+  if (insect_no >= 0 && insect_no < mMmd_INSECT_NUM && mMmd_MAY_DONATE()) {
     mMmd_INSECT_CLR(Save_Get(museum_display), insect_no);
     mMmd_INSECT_SET(Save_Get(museum_display), insect_no, Common_Get(player_no) + 1);
   }
 }
 
 extern void mMmd_SetFish(int fish_no) {
-  if (fish_no >= 0 && fish_no < mMmd_FISH_NUM && mLd_PlayerManKindCheck() == FALSE) {
+  if (fish_no >= 0 && fish_no < mMmd_FISH_NUM && mMmd_MAY_DONATE()) {
     mMmd_FISH_CLR(Save_Get(museum_display), fish_no);
     mMmd_FISH_SET(Save_Get(museum_display), fish_no, Common_Get(player_no) + 1);
   }
@@ -163,7 +170,7 @@ extern int mMmd_GetDisplayInfo(mActor_name_t item) {
 }
 
 extern int mMmd_RequestMuseumDisplay(mActor_name_t item) {
-  if (mLd_PlayerManKindCheck() == FALSE) {
+  if (mMmd_MAY_DONATE()) {
     if (item >= FTR_START(FTR_DIN_TRIKERA_HEAD) && item <= FTR_END(FTR_DIN_TRILOBITE)) {
       int fossil_idx;
       int valid = FALSE;
@@ -307,6 +314,23 @@ static void mMmd_MuseumFossilProcess_MakeFgData() {
     }
   }
 }
+
+#ifdef VITA_MP
+// a part's tile in the fossil room and the furniture it shows once donated (MakeFgData's pick for it)
+extern int mMmd_mp_fossil_unit(int fossil_no, int* ut_x, int* ut_z, mActor_name_t* item) {
+  mMmd_fossil_data_c* fossil_data;
+
+  if (fossil_no < 0 || fossil_no >= mMmd_FOSSIL_NUM) {
+    return FALSE;
+  }
+
+  fossil_data = &mMmd_museum_fossil_data[fossil_no];
+  *ut_x = fossil_data->ut & 0xF;
+  *ut_z = (fossil_data->ut >> 4) & 0xF;
+  *item = (mActor_name_t)(FTR_START(FTR_DIN_TRIKERA_HEAD) + FTR_NO_2_IDX(fossil_no) + (fossil_data->rotation & 3));
+  return TRUE;
+}
+#endif
 
 static void mMmd_dummy_process() { }
 

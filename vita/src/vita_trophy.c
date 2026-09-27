@@ -23,6 +23,7 @@
 #include "m_room_type.h"
 #include "m_name_table.h"
 #include "m_personal_id.h"
+#include "m_land.h"
 
 #ifndef PSP2_SDK_VERSION
 #define PSP2_SDK_VERSION 0x03570011
@@ -169,7 +170,114 @@ void vita_trophy_init(void) {
     s_available = 1;
 }
 
+// one player's own progress; home is NULL for a traveller, whose house is elsewhere
+static void poll_player(Private_c* pr, mHm_hs_c* hm) {
+    if (hm != NULL) {
+        if (pr->inventory.loan != 0 || hm->size_info.size > mHm_HOMESIZE_SMALL) {
+            vita_trophy_unlock(TROPHY_WELCOME_TO_TOWN);
+        }
+        if (hm->size_info.size >= mHm_HOMESIZE_STATUE || hm->size_info.statue_ordered) {
+            vita_trophy_unlock(TROPHY_PAID_IN_FULL);
+        }
+        if (hm->flags.hra_reward1) {
+            vita_trophy_unlock(TROPHY_INTERIOR_DESIGNER);
+        }
+    }
+    if (pr->reset_count > 0) {
+        vita_trophy_unlock(TROPHY_RESETTIS_WRATH);
+    }
+    if (pr->golden_items_collected != 0) {
+        vita_trophy_unlock(TROPHY_GOING_FOR_GOLD);
+    }
+    if ((pr->golden_items_collected & TROPHY_GOLDEN_ALL_MASK) == TROPHY_GOLDEN_ALL_MASK) {
+        vita_trophy_unlock(TROPHY_ALL_THAT_GLITTERS);
+    }
+    if (pr->state_flags & mPr_FLAG_TOTAKEKE_INTRODUCTION) {
+        vita_trophy_unlock(TROPHY_SATURDAY_NIGHT);
+    }
+    if (pr->bank_account >= 100000u) {
+        vita_trophy_unlock(TROPHY_NOUVEAU_RICHE);
+    }
+    if (pr->bank_account >= 999999u) {
+        vita_trophy_unlock(TROPHY_BELL_BARON);
+    }
+
+    const u32* air = pr->aircheck_collect_bitfield;
+    if (air[0] == 0xFFFFFFFFu && (air[1] & 0xFFFFFu) == 0xFFFFFu) {
+        vita_trophy_unlock(TROPHY_BOOTLEG_COLLECTOR);
+    }
+
+    int nes_any = 0;
+    int nes_all = 1;
+    for (int k = 0; k < (int)(sizeof(s_nes_items) / sizeof(s_nes_items[0])); k++) {
+        int idx = mRmTp_FtrItemNo2FtrIdx(s_nes_items[k]);
+        int got = idx >= 0 && (pr->furniture_collected_bitfield[idx >> 5] & (1u << (idx & 31)));
+        if (got) {
+            nes_any = 1;
+        } else {
+            nes_all = 0;
+        }
+    }
+    if (nes_any) {
+        vita_trophy_unlock(TROPHY_RETRO_GAMER);
+    }
+    if (nes_all) {
+        vita_trophy_unlock(TROPHY_FULL_LIBRARY);
+    }
+
+    // designs init to "blank"; slots 0..3 carry ROM defaults, so a created
+    // design shows as a non-"blank" name in slots 4..7.
+    for (int d = mNW_DEFAULT_ORIGINAL_TEX_NUM; d < mPr_ORIGINAL_DESIGN_COUNT; d++) {
+        const u8* nm = pr->my_org[d].name;
+        if (!(nm[0] == 'b' && nm[1] == 'l' && nm[2] == 'a' && nm[3] == 'n' && nm[4] == 'k')) {
+            vita_trophy_unlock(TROPHY_PATTERN_DESIGNER);
+            break;
+        }
+    }
+
+    for (mActor_name_t it = HANIWA_START; it <= HANIWA_END; it += 4) {
+        int idx = mRmTp_FtrItemNo2FtrIdx(it);
+        if (idx >= 0 && (pr->furniture_collected_bitfield[idx >> 5] & (1u << (idx & 31)))) {
+            vita_trophy_unlock(TROPHY_GYROID_FOUND);
+            break;
+        }
+    }
+
+    int furn_count = 0;
+    for (int k = 0; k < (int)(sizeof(pr->furniture_collected_bitfield) / sizeof(u32)); k++) {
+        furn_count += __builtin_popcount(pr->furniture_collected_bitfield[k]);
+    }
+    if (furn_count >= 50) {
+        vita_trophy_unlock(TROPHY_PACK_RAT);
+    }
+    if (pr->reset_count >= 5) {
+        vita_trophy_unlock(TROPHY_RESETTIS_NEMESIS);
+    }
+    if (pr->sunburn.rank > 0) {
+        vita_trophy_unlock(TROPHY_BEACH_BUM);
+    }
+}
+
+// friendship only counts with this town's own residents, not its visitors
+static int memory_is_resident(const Anmmem_c* mem) {
+    for (int p = 0; p < PLAYER_NUM; p++) {
+        if (mPr_CheckCmpPersonalID((PersonalID_c*)&mem->memory_player_id,
+                                   &Save_Get(private_data[p]).player_ID) == TRUE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void poll_save_state(void) {
+    // visiting someone else's town: only the traveller's own progress counts
+    if (mLd_PlayerManKindCheck()) {
+        if (Now_Private != NULL) {
+            poll_player(Now_Private, NULL);
+        }
+        return;
+    }
+
     int fish = mMmd_CountDisplayedFish();
     int insect = mMmd_CountDisplayedInsect();
     int fossil = mMmd_CountDisplayedFossil();
@@ -195,91 +303,7 @@ static void poll_save_state(void) {
     }
 
     for (int p = 0; p < PLAYER_NUM; p++) {
-        Private_c* pr = &Save_Get(private_data[p]);
-        mHm_hs_c* hm = &Save_Get(homes[p]);
-
-        if (pr->inventory.loan != 0 || hm->size_info.size > mHm_HOMESIZE_SMALL) {
-            vita_trophy_unlock(TROPHY_WELCOME_TO_TOWN);
-        }
-        if (hm->size_info.size >= mHm_HOMESIZE_STATUE || hm->size_info.statue_ordered) {
-            vita_trophy_unlock(TROPHY_PAID_IN_FULL);
-        }
-        if (pr->reset_count > 0) {
-            vita_trophy_unlock(TROPHY_RESETTIS_WRATH);
-        }
-        if (pr->golden_items_collected != 0) {
-            vita_trophy_unlock(TROPHY_GOING_FOR_GOLD);
-        }
-        if ((pr->golden_items_collected & TROPHY_GOLDEN_ALL_MASK) == TROPHY_GOLDEN_ALL_MASK) {
-            vita_trophy_unlock(TROPHY_ALL_THAT_GLITTERS);
-        }
-        if (pr->state_flags & mPr_FLAG_TOTAKEKE_INTRODUCTION) {
-            vita_trophy_unlock(TROPHY_SATURDAY_NIGHT);
-        }
-        if (pr->bank_account >= 100000u) {
-            vita_trophy_unlock(TROPHY_NOUVEAU_RICHE);
-        }
-        if (pr->bank_account >= 999999u) {
-            vita_trophy_unlock(TROPHY_BELL_BARON);
-        }
-        if (hm->flags.hra_reward1) {
-            vita_trophy_unlock(TROPHY_INTERIOR_DESIGNER);
-        }
-
-        const u32* air = pr->aircheck_collect_bitfield;
-        if (air[0] == 0xFFFFFFFFu && (air[1] & 0xFFFFFu) == 0xFFFFFu) {
-            vita_trophy_unlock(TROPHY_BOOTLEG_COLLECTOR);
-        }
-
-        int nes_any = 0;
-        int nes_all = 1;
-        for (int k = 0; k < (int)(sizeof(s_nes_items) / sizeof(s_nes_items[0])); k++) {
-            int idx = mRmTp_FtrItemNo2FtrIdx(s_nes_items[k]);
-            int got = idx >= 0 && (pr->furniture_collected_bitfield[idx >> 5] & (1u << (idx & 31)));
-            if (got) {
-                nes_any = 1;
-            } else {
-                nes_all = 0;
-            }
-        }
-        if (nes_any) {
-            vita_trophy_unlock(TROPHY_RETRO_GAMER);
-        }
-        if (nes_all) {
-            vita_trophy_unlock(TROPHY_FULL_LIBRARY);
-        }
-
-        // designs init to "blank"; slots 0..3 carry ROM defaults, so a created
-        // design shows as a non-"blank" name in slots 4..7.
-        for (int d = mNW_DEFAULT_ORIGINAL_TEX_NUM; d < mPr_ORIGINAL_DESIGN_COUNT; d++) {
-            const u8* nm = pr->my_org[d].name;
-            if (!(nm[0] == 'b' && nm[1] == 'l' && nm[2] == 'a' && nm[3] == 'n' && nm[4] == 'k')) {
-                vita_trophy_unlock(TROPHY_PATTERN_DESIGNER);
-                break;
-            }
-        }
-
-        for (mActor_name_t it = HANIWA_START; it <= HANIWA_END; it += 4) {
-            int idx = mRmTp_FtrItemNo2FtrIdx(it);
-            if (idx >= 0 && (pr->furniture_collected_bitfield[idx >> 5] & (1u << (idx & 31)))) {
-                vita_trophy_unlock(TROPHY_GYROID_FOUND);
-                break;
-            }
-        }
-
-        int furn_count = 0;
-        for (int k = 0; k < (int)(sizeof(pr->furniture_collected_bitfield) / sizeof(u32)); k++) {
-            furn_count += __builtin_popcount(pr->furniture_collected_bitfield[k]);
-        }
-        if (furn_count >= 50) {
-            vita_trophy_unlock(TROPHY_PACK_RAT);
-        }
-        if (pr->reset_count >= 5) {
-            vita_trophy_unlock(TROPHY_RESETTIS_NEMESIS);
-        }
-        if (pr->sunburn.rank > 0) {
-            vita_trophy_unlock(TROPHY_BEACH_BUM);
-        }
+        poll_player(&Save_Get(private_data[p]), &Save_Get(homes[p]));
     }
 
     if (Save_Get(num_statues) > 0) {
@@ -300,7 +324,7 @@ static void poll_save_state(void) {
             vita_trophy_unlock(TROPHY_NEW_NEIGHBOR);
         }
         for (int m = 0; m < ANIMAL_MEMORY_NUM; m++) {
-            if (an->memories[m].friendship >= TROPHY_FRIENDSHIP_MAX) {
+            if (an->memories[m].friendship >= TROPHY_FRIENDSHIP_MAX && memory_is_resident(&an->memories[m])) {
                 vita_trophy_unlock(TROPHY_BEST_FRIENDS);
                 break;
             }
@@ -309,13 +333,14 @@ static void poll_save_state(void) {
 
     Animal_c* islander = &Get_Island().animal;
     for (int m = 0; m < ANIMAL_MEMORY_NUM; m++) {
-        if (islander->memories[m].friendship >= TROPHY_FRIENDSHIP_MAX) {
+        if (islander->memories[m].friendship >= TROPHY_FRIENDSHIP_MAX && memory_is_resident(&islander->memories[m])) {
             vita_trophy_unlock(TROPHY_ISLAND_HOSPITALITY);
             break;
         }
     }
     for (int m = 0; m < ANIMAL_MEMORY_NUM; m++) {
-        if (mPr_NullCheckPersonalID(&islander->memories[m].memory_player_id) == FALSE) {
+        if (mPr_NullCheckPersonalID(&islander->memories[m].memory_player_id) == FALSE &&
+            memory_is_resident(&islander->memories[m])) {
             vita_trophy_unlock(TROPHY_ISLAND_GETAWAY);
             break;
         }

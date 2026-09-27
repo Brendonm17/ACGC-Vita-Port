@@ -15,6 +15,9 @@
 #ifdef TARGET_VITA
 #include "pc_settings.h"
 #endif
+#ifdef VITA_MP
+#include "pc_mp.h"
+#endif
 
 enum {
     Cottage_DATA_PLAYER_STANDARD,
@@ -732,6 +735,13 @@ static void Cottage_move_closed(STRUCTURE_ACTOR* cottage, GAME_PLAY* play) {
         return;
     }
 
+#ifdef VITA_MP
+    // another player through this door: it opens and shuts as it does for the islander
+    if (cottage->request_type == Cottage_ACTION_NONE && mp_door_take(cottage, NULL)) {
+        Cottage_move_open_npc_out_init(cottage);
+        return;
+    }
+#endif
     door_action = Cottage_check_door_action(cottage, play);
     cottage_data = Cottage_data_get(cottage);
     if (door_action != Cottage_ACTION_NONE) {
