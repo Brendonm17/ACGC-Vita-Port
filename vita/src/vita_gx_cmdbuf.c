@@ -391,6 +391,26 @@ static inline u32 gx_wrap_to_gxm(u32 w) {
 // GX sets wrap per draw, vitaGL per texture: each unit gets its own descriptor copy with this
 // draw's wrap, in the control-word bits vitaGL's glTexParameteri writes (0xFF keeps the texture's)
 static SceGxmTexture gxm_unit_desc[8];
+
+// white 1x1 for units a draw leaves unbound. shaders sample their units whatever the stage uses
+// (the 3-stage uber reads unit 2), and a unit never set makes the GPU fault: a hard freeze
+static GLuint s_blank_tex = 0;
+static GLuint vita_blank_tex(void) {
+    if (s_blank_tex == 0) {
+        static const u8 white[4] = {255, 255, 255, 255};
+        glGenTextures(1, &s_blank_tex);
+        gl_cache_active_texture(GL_TEXTURE7);
+        glBindTexture(GL_TEXTURE_2D, s_blank_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl_cache_active_texture(GL_TEXTURE0);
+    }
+    return s_blank_tex;
+}
+
 static inline int gxm_push_unit(SceGxmContext* ctx, int u, GLuint tid, u32 ws, u32 wt) {
     const SceGxmTexture* gt = vglGetGxmTextureById(tid);
     if (!gt) return 0;
@@ -1067,10 +1087,15 @@ void pc_gx_submit_frame(void) {
     extern SceGxmContext* vglGetGxmContext(void);
     extern const SceGxmTexture* vglGetGxmTextureById(GLuint id);
     SceGxmContext* gxm_ctx = vglGetGxmContext();
+    GLuint blank = vita_blank_tex();
     vgl_fast_draw_mode = 1;
     GLuint gxm_frag_tex[8] = {0};
     u32 gxm_unit_ws[8], gxm_unit_wt[8];
     for (int u = 0; u < 8; u++) gxm_unit_ws[u] = gxm_unit_wt[u] = 0xFF;
+    // every sampled unit starts the frame on the blank, never unset or on a texture since deleted
+    for (int u = 0; u < 3; u++) {
+        if (gxm_push_unit(gxm_ctx, u, blank, 0xFF, 0xFF)) gxm_frag_tex[u] = blank;
+    }
     int tex_run_missing = 0;
 
     static int dbg_ctr = 0;
