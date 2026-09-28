@@ -863,6 +863,8 @@ static void mp_on_event(const mp_event_t* ev) {
                 mp_npc_on_evarea(ev->conn, ev->data, ev->len);
             } else if (ev->len > 0 && ev->data[0] == MP_S_MOD) {
                 mp_mod_on_state(ev->conn, ev->data, ev->len);
+            } else if (ev->len > 0 && ev->data[0] == MP_S_PORTER) {
+                mp_porter_on_state(ev->conn, ev->data, ev->len);
             } else {
                 mp_player_on_state(ev->conn, ev->data, ev->len);
             }

@@ -17,11 +17,20 @@
 #ifdef VITA_MP
 #include "pc_mp.h"
 #endif
+#ifdef TARGET_PC
+#include "dolphin/os.h"
+#endif
+#ifdef TARGET_VITA
+#include <psp2/kernel/sysmem.h>
+#endif
 
 static int famicom_done = FALSE;
 static int famicom_done_countdown = 0;
 static void* freeXfbBase = NULL;
 static u32 freeXfbSize = 0;
+#ifdef TARGET_VITA
+static SceUID s_nes_block = -1; // the emulator's heap when the game heap had no 4 MB in one piece
+#endif
 
 static void my_alloc_init(GAME* game, void* start, size_t size) {
 #ifdef TARGET_PC
@@ -193,6 +202,21 @@ extern void famicom_emu_init(GAME* game) {
     /* On PC there are no XFBs to repurpose — allocate a heap for the NES emulator */
     freeXfbSize = 0x400000; /* 4MB — enough for NES state + ROM + buffers */
     freeXfbBase = malloc(freeXfbSize);
+#ifdef TARGET_VITA
+    // a busy game heap (a town kept running for visitors) can't always spare 4 MB in one piece
+    if (freeXfbBase == NULL) {
+        s_nes_block = sceKernelAllocMemBlock("ac_nes", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, freeXfbSize, NULL);
+        if (s_nes_block < 0 || sceKernelGetMemBlockBase(s_nes_block, &freeXfbBase) < 0) {
+            pc_log_error("[NES] no 4 MB for the emulator: game heap and system memory both full (0x%08X)\n",
+                         (unsigned)s_nes_block);
+            if (s_nes_block >= 0) {
+                sceKernelFreeMemBlock(s_nes_block);
+            }
+            s_nes_block = -1;
+            freeXfbBase = NULL;
+        }
+    }
+#endif
     my_alloc_init(game, freeXfbBase, freeXfbSize);
 #else
     manager = JC_JFWDisplay_getManager();
@@ -215,6 +239,9 @@ extern void famicom_emu_init(GAME* game) {
 #endif
 
     if (famicom_init(rom_id, &my_malloc_func, player) != 0) {
+#ifdef TARGET_PC
+        pc_log_error("[NES] game %d didn't start\n", rom_id);
+#endif
         Common_Set(my_room_message_control_flags, Common_Get(my_room_message_control_flags) | 1);
         return_emu_game(game);
     }
@@ -234,6 +261,12 @@ extern void famicom_emu_cleanup(GAME* game) {
 
     if (freeXfbBase != NULL) {
 #ifdef TARGET_PC
+#ifdef TARGET_VITA
+        if (s_nes_block >= 0) {
+            sceKernelFreeMemBlock(s_nes_block);
+            s_nes_block = -1;
+        } else
+#endif
         free(freeXfbBase);
 #else
         JC_JFWDisplay_changeToDoubleXfb(JC_JFWDisplay_getManager());

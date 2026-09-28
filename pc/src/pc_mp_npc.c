@@ -1394,7 +1394,7 @@ static int mp_seen_fresh(int i) {
     return s_s2.seen[i].valid && pc_mp_now_ms() - s_s2.seen[i].ms < MP_POSE_STALE_MS;
 }
 
-static void mp_pose_capture(ACTOR* actor, int i, mp_npose_t* q) {
+static void mp_pose_look(ACTOR* actor, mp_npose_t* q) {
     NPC_ACTOR* npc = (NPC_ACTOR*)actor;
     cKF_FrameControl_c* fc = &npc->draw.main_animation.keyframe.frame_control;
     TOOLS_ACTOR* tool = (TOOLS_ACTOR*)npc->right_hand.item_actor_p;
@@ -1431,9 +1431,14 @@ static void mp_pose_capture(ACTOR* actor, int i, mp_npose_t* q) {
             q->tool_act = (unsigned char)tool->work0;
         }
     }
-    q->lsnd = s_s2.lsnd[i];
+    q->lsnd = 0;
     q->frame = fc->current_frame;
     q->speed = fc->speed;
+}
+
+static void mp_pose_capture(ACTOR* actor, int i, mp_npose_t* q) {
+    mp_pose_look(actor, q);
+    q->lsnd = s_s2.lsnd[i];
 }
 
 static u16 mp_vel16(f32 v) {
@@ -1517,6 +1522,228 @@ static int mp_npc_held_by(int owner, int i) {
     return owner < MP_MAX_PEERS && id != 0 && s_npc.lock[owner] == id;
 }
 
+// the Porter: each game runs its own (his logic drives that game's train, camera and boarding); while one screen's
+// player arrives, talks to him or boards, the other screens show that screen's Porter, and then he rests
+#define MP_PORTER_EVERY    3     // frames between reports while he's busy
+#define MP_PORTER_TAIL_MS  500   // ...and on this long after, so the others see where he came to rest
+#define MP_PORTER_QUIET_MS 1500  // follower: no report this long and he's this game's again
+#define MP_PORTER_PACE     1.0f  // an NPC's walk, per frame
+#define MP_PORTER_FAR      20.0f // this far from where he should stand, he walks there
+#define MP_PORTER_NEAR     3.0f  // ...until this close
+
+static struct {
+    u8 busy;         // this screen's player has him
+    u32 busy_ms;     // ...last time
+    int tick;
+    u8 have;         // his spot last frame, for his pace
+    f32 x;
+    f32 y;
+    f32 z;
+    mp_npose_t sent; // the last report this screen sent
+    u8 sent_have;
+    u8 heard_any;    // follower: the screen whose Porter this one shows, and its latest report
+    u8 from;
+    mp_npose_t pose;
+    u32 ms;
+    int heard;
+    u8 following;    // he showed another screen's; after, he goes back to his post if it left him away
+    u8 homing;
+    u8 walking;      // a walk of his own to where he should stand
+} s_porter;
+
+void mp_porter_reset(void) {
+    s_porter.busy = FALSE;
+    s_porter.busy_ms = 0;
+    s_porter.have = FALSE;
+    s_porter.sent_have = FALSE;
+    s_porter.following = FALSE;
+    s_porter.homing = FALSE;
+    s_porter.walking = FALSE;
+}
+
+void mp_porter_busy(int busy) {
+    s_porter.busy = busy != 0;
+    if (busy) {
+        s_porter.busy_ms = pc_mp_now_ms();
+    }
+}
+
+// the host's goes to every visitor in town, a visitor's to the host, which passes it on
+static void mp_porter_to_guests(const u8* msg, int len, int except) {
+    int g;
+
+    for (g = 1; g < MP_MAX_PEERS; g++) {
+        if (g != except && mp_lobby_guest_arrived(g) && mp_lobby_guest_conn(g) >= 0) {
+            mp_lobby_send_state_to(mp_lobby_guest_conn(g), msg, len);
+        }
+    }
+}
+
+static void mp_porter_send(const mp_npose_t* q) {
+    u8 msg[2 + MP_POSE_WIRE];
+
+    msg[0] = MP_S_PORTER;
+    msg[1] = (u8)mp_lobby_self_slot();
+    mp_pose_pack(msg + 2, 0, q);
+    if (mp_is_host()) {
+        mp_porter_to_guests(msg, (int)sizeof(msg), 0);
+    } else if (mp_lobby_host_conn() >= 0) {
+        mp_lobby_send_state_to(mp_lobby_host_conn(), msg, (int)sizeof(msg));
+    }
+}
+
+void mp_porter_moved(void* actorx) {
+    ACTOR* actor = (ACTOR*)actorx;
+    mp_npose_t q;
+
+    if (mp_town_shared() && s_porter.busy_ms != 0 &&
+        (s_porter.busy || pc_mp_now_ms() - s_porter.busy_ms < MP_PORTER_TAIL_MS) &&
+        ((NPC_ACTOR*)actor)->draw.animation_id < aNPC_ANIM_NUM && ++s_porter.tick % MP_PORTER_EVERY == 0) {
+        mp_pose_look(actor, &q);
+        q.vx = q.vy = q.vz = 0.0f;
+        if (s_porter.have) {
+            q.vx = actor->world.position.x - s_porter.x;
+            q.vy = actor->world.position.y - s_porter.y;
+            q.vz = actor->world.position.z - s_porter.z;
+        }
+        s_porter.sent = q;
+        s_porter.sent_have = TRUE;
+        mp_porter_send(&q);
+    }
+    s_porter.have = TRUE;
+    s_porter.x = actor->world.position.x;
+    s_porter.y = actor->world.position.y;
+    s_porter.z = actor->world.position.z;
+}
+
+// a menu stopped this game mid-talk with him (the travel menu): the others keep showing him as he stands
+static void mp_porter_still(void) {
+    mp_npose_t q;
+
+    if (s_porter.busy && s_porter.sent_have && ++s_porter.tick % MP_PORTER_EVERY == 0) {
+        q = s_porter.sent;
+        q.vx = q.vy = q.vz = 0.0f;
+        mp_porter_send(&q);
+    }
+}
+
+void mp_porter_on_state(int conn, const unsigned char* data, int len) {
+    int from;
+
+    if (len < 2 + MP_POSE_WIRE || data[0] != MP_S_PORTER) {
+        return;
+    }
+    from = data[1];
+    if (mp_is_host()) {
+        if (from <= 0 || from != mp_lobby_guest_slot(conn) + 1) {
+            return;
+        }
+        mp_porter_to_guests(data, 2 + MP_POSE_WIRE, from);
+    } else if (conn != mp_lobby_host_conn() || from == mp_lobby_self_slot()) {
+        return;
+    }
+    // one screen's at a time: another busy one waits until that one goes quiet
+    if (s_porter.heard_any && s_porter.from != from && pc_mp_now_ms() - s_porter.ms < MP_PORTER_QUIET_MS) {
+        return;
+    }
+    mp_pose_unpack(data + 2, &s_porter.pose);
+    s_porter.heard_any = TRUE;
+    s_porter.from = (u8)from;
+    s_porter.ms = pc_mp_now_ms();
+    s_porter.heard = s_s2.frame;
+}
+
+static int mp_porter_control(ACTOR* actor, mp_npose_t* pose) {
+    NPC_ACTOR* npc = (NPC_ACTOR*)actor;
+    int live = s_porter.heard_any && pc_mp_now_ms() - s_porter.ms < MP_PORTER_QUIET_MS && mp_town_shared();
+    f32 tx;
+    f32 tz;
+    f32 dx;
+    f32 dz;
+    f32 d;
+    int still;
+
+    if (s_porter.busy || (!live && !s_porter.following)) {
+        if (s_porter.following) {
+            s_porter.following = FALSE;
+            s_porter.homing = FALSE;
+            s_porter.walking = FALSE;
+            return MP_NPC_RESUME;
+        }
+        return MP_NPC_LOCAL;
+    }
+    if (live) {
+        *pose = s_porter.pose;
+        pose->fresh = s_porter.heard == s_s2.frame;
+        mp_pose_carry(pose, s_s2.frame - s_porter.heard);
+        s_porter.following = TRUE;
+        s_porter.homing = FALSE;
+        tx = pose->x;
+        tz = pose->z;
+    } else {
+        // that screen's done with him: back to his post (where he stands after greeting an arrival) if it left him
+        // away from it, and from there he's this game's again
+        tx = actor->home.position.x + mFI_UT_WORLDSIZE_X_F;
+        tz = actor->home.position.z;
+        dx = tx - actor->world.position.x;
+        dz = tz - actor->world.position.z;
+        if (!s_porter.homing && dx * dx + dz * dz > MP_PORTER_FAR * MP_PORTER_FAR) {
+            s_porter.homing = TRUE;
+            s_porter.walking = TRUE;
+        }
+        if (!s_porter.homing) {
+            s_porter.following = FALSE;
+            s_porter.walking = FALSE;
+            return MP_NPC_RESUME;
+        }
+    }
+    dx = tx - actor->world.position.x;
+    dz = tz - actor->world.position.z;
+    d = sqrtf(dx * dx + dz * dz);
+    // (one standing somewhere else, as a visitor's Porter waits where their train stops: he walks over; one walking
+    // is followed as he goes)
+    still = !live || pose->vx * pose->vx + pose->vz * pose->vz < 0.01f;
+    if (d > MP_PORTER_FAR && still) {
+        s_porter.walking = TRUE;
+    } else if (d < MP_PORTER_NEAR || !still) {
+        s_porter.walking = FALSE;
+    }
+    if (!s_porter.walking) {
+        if (!live) {
+            s_porter.following = FALSE;
+            s_porter.homing = FALSE;
+            return MP_NPC_RESUME;
+        }
+        return MP_NPC_PUPPET;
+    }
+    // his own walk there, a step a frame
+    mp_pose_look(actor, pose);
+    actor->world.position.x += dx / d * (d < MP_PORTER_PACE ? d : MP_PORTER_PACE);
+    actor->world.position.z += dz / d * (d < MP_PORTER_PACE ? d : MP_PORTER_PACE);
+    pose->x = actor->world.position.x;
+    pose->y = actor->world.position.y;
+    pose->z = actor->world.position.z;
+    pose->rot_y = atans_table(dz, dx);
+    pose->head_x = 0;
+    pose->head_y = 0;
+    if (npc->draw.animation_id != aNPC_ANIM_WALK1) {
+        pose->frame = 1.0f;
+    }
+    pose->anim = aNPC_ANIM_WALK1;
+    pose->sub_anim = aNPC_SUB_ANIM_NONE;
+    pose->talk = FALSE;
+    pose->kutipaku = FALSE;
+    pose->hidden = FALSE;
+    pose->umb = FALSE;
+    pose->prop = FALSE;
+    pose->tool = 0xFF;
+    pose->tool_act = 0xFF;
+    pose->speed = npc->draw.frame_speed;
+    pose->fresh = FALSE;
+    pose->vx = pose->vy = pose->vz = 0.0f;
+    return MP_NPC_PUPPET;
+}
+
 int mp_npc_control(void* actorx, mp_npose_t* pose) {
     ACTOR* actor = (ACTOR*)actorx;
     int self = mp_lobby_self_slot();
@@ -1524,6 +1751,9 @@ int mp_npc_control(void* actorx, mp_npose_t* pose) {
     int k;
     int owner;
 
+    if (actor->part == ACTOR_PART_NPC && actor->npc_id == SP_NPC_STATION_MASTER) {
+        return mp_porter_control(actor, pose);
+    }
     if (!mp_town_shared()) {
         // the others gone: what followed them is this game's again
         if (mp_active() && (i = mp_npc_idx(actor)) >= 0 && s_s2.puppet[i]) {
@@ -3461,6 +3691,7 @@ void mp_npc_still(GAME_PLAY* play) {
     if (!mp_town_shared()) {
         return;
     }
+    mp_porter_still();
     if (s_npc.state == MP_TALK_SETTLING && ++s_npc.settle_still > MP_STILL_SETTLE) {
         mp_talk_finish();
     }

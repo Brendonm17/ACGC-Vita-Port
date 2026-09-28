@@ -797,21 +797,6 @@ static void mp_trip_force_home(GAME_PLAY* play) {
     s_trip.boarding = !mp_trip_board_train(play);
 }
 
-// host: a visitor's train is pulling in; every Porter but theirs steps off the spot they land on
-static void mp_trip_train(int conn) {
-    u8 msg[2] = { MP_M_TRAIN, 1 };
-    int g;
-
-    aSTM_mp_arriving();
-    for (g = 1; g < MP_MAX_PEERS; g++) {
-        int c = mp_lobby_guest_conn(g);
-
-        if (c >= 0 && c != conn && mp_lobby_guest_arrived(g)) {
-            mp_lobby_send_rel(c, msg, (int)sizeof(msg));
-        }
-    }
-}
-
 // one train for everyone: the host runs it, and while a screen's own Porter or arrival holds it, that screen runs it;
 // the others take its reports and step it the same way between them (only the runner decides when it leaves)
 #define MP_TRAIN_LEN     24
@@ -1150,7 +1135,6 @@ void mp_travel_on_rel(int conn, const unsigned char* data, int len) {
                 u8 name[MP_NAME_LEN];
                 u8 town[MP_NAME_LEN];
 
-                mp_trip_train(conn);
                 if (mp_lobby_guest_names(conn, name, town)) {
                     mp_notice_push(MP_MSG_N_ARRIVED, town, name);
                 }
@@ -1176,11 +1160,6 @@ void mp_travel_on_rel(int conn, const unsigned char* data, int len) {
                 if (s_trip.state == MP_TRAVEL_VISITING) {
                     mp_notice_push(MP_MSG_N_LAST_TRAIN, NULL, NULL);
                 }
-            }
-            break;
-        case MP_M_TRAIN:
-            if (len >= 2 && conn == mp_lobby_host_conn() && s_trip.state == MP_TRAVEL_VISITING && data[1]) {
-                aSTM_mp_arriving();
             }
             break;
         case MP_M_TRAIN_STATE:

@@ -53,9 +53,6 @@ static void aSTM_schedule_proc(NPC_ACTOR*, GAME_PLAY*, int);
 static void aSTM_talk_request(ACTOR* actorx, GAME* game);
 static int aSTM_change_talk_proc(NPC_STATION_MASTER_ACTOR*, u8);
 static void aSTM_setup_think_proc(NPC_STATION_MASTER_ACTOR* actor, GAME_PLAY* play, u8 think_idx);
-#ifdef VITA_MP
-static void aSTM_mp_reset(void);
-#endif
 
 // clang-format off
 ACTOR_PROFILE Npc_Station_Master_Profile = {
@@ -96,7 +93,7 @@ static void aSTM_actor_ct(ACTOR* actorx, GAME* game) {
         actor->melody_save = 0;
         actor->npc_class.palActorIgnoreTimer = -1;
 #ifdef VITA_MP
-        aSTM_mp_reset(); // (a new Porter: nothing left over from the last one)
+        mp_porter_reset(); // (a new Porter: nothing left over from the last one)
 #endif
     }
 }
@@ -108,6 +105,9 @@ static void aSTM_actor_save(ACTOR* actorx, GAME* game) {
 static void aSTM_actor_dt(ACTOR* actorx, GAME* game) {
     NPC_STATION_MASTER_ACTOR* actor = (NPC_STATION_MASTER_ACTOR*)actorx;
 
+#ifdef VITA_MP
+    mp_porter_reset(); // (gone: nothing of his goes out any more)
+#endif
     if (actor->sound != 0) {
         mBGMPsComp_delete_ps_demo(actor->sound, 0x168);
     }

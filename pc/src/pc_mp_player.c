@@ -1691,13 +1691,6 @@ static void mp_vfx_play(GAME_PLAY* play) {
             }
             continue;
         }
-        // (a visitor's Porter at its arrival, even from the arrival's own scene: the station is the same one)
-        if (body[0] == MP_VFX_PORTER) {
-            if (blen >= 6 && mp_players_live()) {
-                aSTM_mp_replay(body[1], (s16)mp_r16(body + 2), (s16)mp_r16(body + 4));
-            }
-            continue;
-        }
         if (!mp_vfx_here(msg) ||
             (!mp_vfx_lasting(body[0]) && pc_mp_now_ms() - s_vfxq[i].ms > MP_VFX_STALE_MS)) {
             continue;

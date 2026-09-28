@@ -13,7 +13,7 @@ extern "C" {
 #ifdef VITA_MP
 
 #define MP_MAX_PEERS     4
-#define MP_PROTO_VERSION 13
+#define MP_PROTO_VERSION 14
 
 typedef enum {
     MP_ROLE_NONE,
@@ -36,7 +36,6 @@ enum {
     MP_M_ARRIVED,         // guest: stepped off the train
     MP_M_LEAVING,         // guest: boarding the train home
     MP_M_CLOSING,         // host: last train, then the line closes
-    MP_M_TRAIN,           // host: a visitor's train is pulling in (Porter steps off their landing spot)
     MP_M_PULLING_IN,      // guest: its train is pulling into the host's station now
     MP_M_RULES,           // host: its switches for the shared town, on joining and on a change
     MP_M_TRAIN_STATE,     // the screen running the train: where it is and what it's doing, for the others
@@ -116,6 +115,7 @@ enum {
 #define MP_S_CRITTERS 0x03 // bugs, fish shadows and the present balloon from the games that run them
 #define MP_S_EVAREA   0x04 // a host's grouped event (a race, a tug of war) as the screen running it has it
 #define MP_S_MOD      0x05 // mods' latest values, bundled (pc_mp_mod.c)
+#define MP_S_PORTER   0x06 // the Porter as the screen whose player has him busy shows him
 
 // lobby (pc_mp_lobby.c): discovery, handshake, line bookkeeping
 void mp_lobby_tick(unsigned int now_ms);
@@ -804,6 +804,12 @@ enum {
 };
 
 int mp_npc_control(void* actor, mp_npose_t* pose);
+// the Porter: each game runs its own, and while one screen's player arrives, talks to him or boards, the others show
+// that screen's (each frame: busy before he moves, what he did after)
+void mp_porter_busy(int busy);
+void mp_porter_moved(void* actor);
+void mp_porter_reset(void);
+void mp_porter_on_state(int conn, const unsigned char* data, int len);
 int mp_door_take(void* structure, int* coming_out); // a building: another player just used this door
 int mp_npc_is_puppet(void* actor);
 unsigned short mp_player_place(void); // whose house this player stands in (0 outdoors)
@@ -996,10 +1002,7 @@ enum {
     MP_VFX_PRESENT,    // a villager (or Tortimer) coming to a player's door with a present: whose look it has
     MP_VFX_GOKI_KILL,  // to the game running the room's cockroaches: one of them stepped on
     MP_VFX_GOKI_MAKE,  // to the game running the room's cockroaches: one a furniture move turned up
-    MP_VFX_PORTER,     // a visitor's Porter: {0 greeting / 1 back to his spot / 2 aside for boarding, x lo hi, z lo hi}
 };
-void aSTM_mp_replay(int what, int x, int z); // ac_npc_station_master: Porter goes where the visitor's stands
-void aSTM_mp_arriving(void);                 // ...and steps off their landing spot as their train pulls in
 void mp_npc_present_look(const unsigned char* body, int len); // pc_mp_npc.c
 void mp_house_angles_in(const unsigned char* body, int len); // pc_mp_world.c
 unsigned int mp_player_here_mask(void); // the other players in this room with this one, a bit each

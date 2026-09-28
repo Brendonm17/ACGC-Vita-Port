@@ -1706,6 +1706,12 @@ static void famicom_mount_archive_wait() {
     }
 }
 
+#ifdef TARGET_PC
+#define FAMICOM_MALLOC_FAILED(dst, size) pc_log_error("[NES] %s: %u bytes not available\n", dst, (unsigned)(size))
+#else
+#define FAMICOM_MALLOC_FAILED(dst, size) ((void)0)
+#endif
+
 // clang-format off
 #define MALLOC_MALLOC(type, size, dst, line) \
     if (dst != nullptr) {   \
@@ -1715,6 +1721,7 @@ static void famicom_mount_archive_wait() {
     if (dst == nullptr) {   \
         /* MALLOC_MALLOC: %s %s %dByte allocation failed. */    \
         OSReport("MALLOC_MALLOC: %s %s %dByte 確保失敗\n", #type, #size, size); \
+        FAMICOM_MALLOC_FAILED(#dst, size); \
         goto exit;  \
     }   \
     /* MALLOC_MALLOC: %s %s %dByte successfully allocated. */    \
@@ -1839,6 +1846,9 @@ extern int famicom_init(int rom_idx, Famicom_MallocInfo* malloc_info, int player
                 if (i == 0) {
                     if (nesrom_count == 0) {
                         OSReport("no nesfile specified\n");
+#ifdef TARGET_PC
+                        pc_log_error("[NES] famicom.arc lists no games\n");
+#endif
                         goto exit;
                     }
 
@@ -1860,6 +1870,9 @@ extern int famicom_init(int rom_idx, Famicom_MallocInfo* malloc_info, int player
     }
 
     // error
+#ifdef TARGET_PC
+    pc_log_error("[NES] famicom.arc: noise.bin.szs unreadable\n");
+#endif
 exit:
     if (famicomCommon.wp != nullptr) {
         my_free(famicomCommon.wp);

@@ -37,6 +37,9 @@
 #define MP_CHAT_EDGE_MS   300   // ...for this long
 #define MP_CHAT_SWAP_MS   750   // and never sooner than this after the last change
 #define MP_CHAT_TOP_LEN   (MP_NAME_LEN + 2 + MP_CHAT_MAX)
+#define MP_CHAT_WHERE     7     // after a message's text: sent indoors, the building's doorway out in town (1, x y z)
+#define MP_CHAT_DOOR_BACK 40.0f // the doorway, behind where a player comes back out
+#define MP_CHAT_DOOR_UP   40.0f
 #define MP_CHAT_NG_NUM    mED_NG_WORD_NUM
 
 extern float g_aspect_factor; // pc_gx.c: widescreen shows more of the UI plane than 0..320
@@ -83,6 +86,10 @@ typedef struct {
     unsigned int swap_ms; // last change between balloon and edge line
     int timer;
     f32 opacity;
+    int where; // the message came from inside a building: its doorway in town
+    f32 wx;
+    f32 wy;
+    f32 wz;
 } mp_chat_t;
 
 typedef struct {
@@ -97,6 +104,10 @@ typedef struct {
     int placed;
     f32 cx; // where it sits, easing along the screen's edge as the two players move
     f32 cy;
+    int where; // (its speaker's building, as mp_chat_t has it)
+    f32 wx;
+    f32 wy;
+    f32 wz;
 } mp_chat_top_t;
 
 static mp_chat_t s_chat[MP_MAX_PEERS];
@@ -396,6 +407,10 @@ static void mp_chat_top_push(int slot, const u8* text, int len) {
     t->msg_len = len;
     t->ms = pc_mp_now_ms();
     t->show_ms = mp_chat_show_ms(len, 60);
+    t->where = s_chat[slot].where;
+    t->wx = s_chat[slot].wx;
+    t->wy = s_chat[slot].wy;
+    t->wz = s_chat[slot].wz;
 }
 
 // a message to show; the next play frame places it (messages come in during loads too)
@@ -447,14 +462,51 @@ static void mp_chat_send_typing(int on) {
     mp_chat_send_msg(msg, sizeof(msg));
 }
 
+static void mp_chat_w16(u8* p, f32 v) {
+    s16 k = (s16)v;
+
+    p[0] = (u8)k;
+    p[1] = (u8)((u16)k >> 8);
+}
+
+static f32 mp_chat_r16(const u8* p) {
+    return (f32)(s16)(p[0] | (p[1] << 8));
+}
+
+// indoors: the doorway of the building out in town (behind the spot a player comes back out on), so the players out
+// there see the message come from it
+static void mp_chat_where_out(u8* p) {
+    const Door_data_c* d = Common_GetPointer(structure_exit_door_data);
+    s16 angle = (s16)(d->exit_orientation * DEG2SHORT_ANGLE(45.0f));
+
+    memset(p, 0, MP_CHAT_WHERE);
+    if (Save_Get(scene_no) == SCENE_FG || d->next_scene_id != SCENE_FG) {
+        return;
+    }
+    p[0] = 1;
+    mp_chat_w16(p + 1, d->exit_position.x - sin_s(angle) * MP_CHAT_DOOR_BACK);
+    mp_chat_w16(p + 3, d->exit_position.y);
+    mp_chat_w16(p + 5, d->exit_position.z - cos_s(angle) * MP_CHAT_DOOR_BACK);
+}
+
+static void mp_chat_where_in(mp_chat_t* c, const u8* p) {
+    c->where = p != NULL && p[0] == 1;
+    if (c->where) {
+        c->wx = mp_chat_r16(p + 1);
+        c->wy = mp_chat_r16(p + 3);
+        c->wz = mp_chat_r16(p + 5);
+    }
+}
+
 static void mp_chat_send_now(const u8* text, int len) {
-    u8 msg[3 + MP_CHAT_MAX];
+    u8 msg[3 + MP_CHAT_MAX + MP_CHAT_WHERE];
 
     msg[0] = MP_M_CHAT;
     msg[1] = (u8)mp_chat_self();
     msg[2] = (u8)len;
     memcpy(msg + 3, text, len);
-    mp_chat_send_msg(msg, 3 + len);
+    mp_chat_where_out(msg + 3 + len);
+    mp_chat_send_msg(msg, 3 + len + MP_CHAT_WHERE);
     s_out.last_ms = pc_mp_now_ms();
     mp_chat_put(mp_chat_self(), text, len);
 }
@@ -506,8 +558,9 @@ void mp_chat_on_rel(int slot, const unsigned char* data, int len) {
         return;
     }
     {
-        u8 msg[3 + MP_CHAT_MAX];
+        u8 msg[3 + MP_CHAT_MAX + MP_CHAT_WHERE];
         int n = data[2];
+        const u8* where = len >= 3 + n + MP_CHAT_WHERE ? data + 3 + n : NULL;
 
         memcpy(msg, data, 3 + n);
         mp_text_clean(msg + 3, n);
@@ -527,9 +580,15 @@ void mp_chat_on_rel(int slot, const unsigned char* data, int len) {
             }
             c->host_ms = pc_mp_now_ms();
             msg[2] = (u8)n;
-            mp_player_relay(slot, msg, 3 + n);
+            if (where != NULL) {
+                memcpy(msg + 3 + n, where, MP_CHAT_WHERE);
+            } else {
+                memset(msg + 3 + n, 0, MP_CHAT_WHERE);
+            }
+            mp_player_relay(slot, msg, 3 + n + MP_CHAT_WHERE);
         }
         c->typing = FALSE;
+        mp_chat_where_in(c, where);
         mp_chat_put(slot, msg + 3, n);
     }
 }
@@ -1138,9 +1197,8 @@ static void mp_chat_draw_typing(GAME_PLAY* play) {
     }
 }
 
-// which way a speaker off this screen is, as the camera looks: screen right and down; FALSE when not in this place
-static int mp_chat_toward(GAME_PLAY* play, int slot, f32* ux, f32* uy) {
-    MP_PLAYER_ACTOR* pup = (MP_PLAYER_ACTOR*)mp_player_puppet(slot);
+// which way a spot is from this player, as the camera looks: screen right and down; FALSE when right here
+static int mp_chat_way(GAME_PLAY* play, f32 x, f32 z, f32* ux, f32* uy) {
     PLAYER_ACTOR* me = GET_PLAYER_ACTOR(play);
     f32 fx = play->camera.lookat.center.x - play->camera.lookat.eye.x;
     f32 fz = play->camera.lookat.center.z - play->camera.lookat.eye.z;
@@ -1149,7 +1207,7 @@ static int mp_chat_toward(GAME_PLAY* play, int slot, f32* ux, f32* uy) {
     f32 f;
     f32 d;
 
-    if (pup == NULL || me == NULL) {
+    if (me == NULL) {
         return FALSE;
     }
     f = sqrtf(fx * fx + fz * fz);
@@ -1160,8 +1218,8 @@ static int mp_chat_toward(GAME_PLAY* play, int slot, f32* ux, f32* uy) {
         fx /= f;
         fz /= f;
     }
-    dx = pup->actor_class.world.position.x - me->actor_class.world.position.x;
-    dz = pup->actor_class.world.position.z - me->actor_class.world.position.z;
+    dx = x - me->actor_class.world.position.x;
+    dz = z - me->actor_class.world.position.z;
     *ux = dx * -fz + dz * fx;
     *uy = -(dx * fx + dz * fz);
     d = sqrtf(*ux * *ux + *uy * *uy);
@@ -1173,10 +1231,79 @@ static int mp_chat_toward(GAME_PLAY* play, int slot, f32* ux, f32* uy) {
     return TRUE;
 }
 
-// players not on this screen: "Name: message" at the screen's edge facing them (the top when that's unknown)
-static void mp_chat_draw_tops(GAME_PLAY* play) {
+// which way a speaker off this screen is; FALSE when not in this place
+static int mp_chat_toward(GAME_PLAY* play, int slot, f32* ux, f32* uy) {
+    MP_PLAYER_ACTOR* pup = (MP_PLAYER_ACTOR*)mp_player_puppet(slot);
+
+    return pup != NULL && mp_chat_way(play, pup->actor_class.world.position.x, pup->actor_class.world.position.z, ux, uy);
+}
+
+// the doorway of the building a speaker is in, on this screen outdoors; FALSE when it's off it
+static int mp_chat_door(GAME_PLAY* play, const mp_chat_top_t* t, f32* x, f32* y) {
+    xyz_t pos;
+    xyz_t clip;
+    f32 w;
     f32 half = mp_chat_half_w();
+
+    pos.x = t->wx;
+    pos.y = t->wy + MP_CHAT_DOOR_UP;
+    pos.z = t->wz;
+    Skin_Matrix_PrjMulVector(&play->projection_matrix, &pos, &clip, &w);
+    if (w < 1.0f) {
+        return FALSE;
+    }
+    *x = 160.0f + (clip.x / w) * 160.0f;
+    *y = 120.0f - (clip.y / w) * 120.0f;
+    return *x > 160.0f - half + 16.0f && *x < 160.0f + half - 16.0f && *y > 24.0f && *y < 232.0f;
+}
+
+static int mp_chat_level(int scene) {
+    if (scene == SCENE_MY_ROOM_LL2 || scene == SCENE_DEPART_2) {
+        return 1;
+    }
+    return mSc_IS_SCENE_BASEMENT(scene) ? -1 : 0;
+}
+
+// a speaker on another floor of the building this player is in: above (1), below (-1), else 0
+static int mp_chat_floor(int slot) {
+    unsigned int age;
+    const mp_pstate_t* st = mp_player_state(slot, &age);
+    int here = Save_Get(scene_no);
+    int d;
+
+    if (st == NULL || st->scene == here) {
+        return 0;
+    }
+    if (!(mSc_IS_SCENE_PLAYER_HOUSE_ROOM(st->scene) && mSc_IS_SCENE_PLAYER_HOUSE_ROOM(here) &&
+          st->owner == mp_player_place()) &&
+        !((st->scene == SCENE_DEPART || st->scene == SCENE_DEPART_2) && (here == SCENE_DEPART || here == SCENE_DEPART_2))) {
+        return 0;
+    }
+    d = mp_chat_level(st->scene) - mp_chat_level(here);
+    return d > 0 ? 1 : (d < 0 ? -1 : 0);
+}
+
+// out along a way from the middle until the balloon meets the screen's edge
+static void mp_chat_edge(const mp_chat_box_t* b, f32 ux, f32 uy, f32* tx, f32* ty) {
+    f32 hx = mp_chat_half_w() - b->w * 0.5f - 4.0f;
+    f32 hy = 120.0f - b->h * 0.5f - 4.0f;
+    f32 s = 1.0e6f;
+
+    if (ux != 0.0f && hx / fabsf(ux) < s) {
+        s = hx / fabsf(ux);
+    }
+    if (uy != 0.0f && hy / fabsf(uy) < s) {
+        s = hy / fabsf(uy);
+    }
+    *tx = 160.0f + ux * s;
+    *ty = 120.0f + uy * s;
+}
+
+// players not on this screen: "Name: message" at the screen's edge facing them (the top when that's unknown); from
+// inside a building, over its door or facing it for the players outdoors, and from above or below on another floor
+static void mp_chat_draw_tops(GAME_PLAY* play) {
     f32 top_y = 8.0f;
+    f32 bottom_y = 232.0f;
     mp_chat_box_t box[MP_CHAT_TOPS];
     mp_chat_lines_t lines[MP_CHAT_TOPS];
     f32 in_x[MP_CHAT_TOPS];
@@ -1190,6 +1317,10 @@ static void mp_chat_draw_tops(GAME_PLAY* play) {
         f32 uy;
         f32 tx;
         f32 ty;
+        f32 hx;
+        f32 hy;
+        int door;
+        int on;
 
         lines[k].lines = 0;
         if (t->len == 0 || t->opacity <= 0.0f) {
@@ -1200,22 +1331,26 @@ static void mp_chat_draw_tops(GAME_PLAY* play) {
             continue;
         }
         mp_chat_box(&lines[k], b);
-        if (mp_chat_toward(play, t->slot, &ux, &uy)) {
-            // out along that way from the middle until the balloon meets the edge
-            f32 hx = half - b->w * 0.5f - 4.0f;
-            f32 hy = 120.0f - b->h * 0.5f - 4.0f;
-            f32 s = 1.0e6f;
-
-            if (ux != 0.0f && hx / fabsf(ux) < s) {
-                s = hx / fabsf(ux);
-            }
-            if (uy != 0.0f && hy / fabsf(uy) < s) {
-                s = hy / fabsf(uy);
-            }
-            tx = 160.0f + ux * s;
-            ty = 120.0f + uy * s;
+        door = t->where && Save_Get(scene_no) == SCENE_FG;
+        on = door && mp_chat_door(play, t, &hx, &hy);
+        if (mp_chat_toward(play, t->slot, &ux, &uy) || (door && !on && mp_chat_way(play, t->wx, t->wz, &ux, &uy))) {
+            mp_chat_edge(b, ux, uy, &tx, &ty);
             in_x[k] = -ux;
             in_y[k] = -uy;
+        } else if (on) {
+            f32 dots;
+
+            mp_chat_place(hx, hy, b, &dots);
+            tx = b->cx;
+            ty = b->cy;
+            in_x[k] = 0.0f;
+            in_y[k] = -1.0f;
+        } else if (mp_chat_floor(t->slot) < 0) {
+            tx = 160.0f;
+            ty = bottom_y - b->h * 0.5f;
+            bottom_y -= b->h + 2.0f;
+            in_x[k] = 0.0f;
+            in_y[k] = -1.0f;
         } else {
             tx = 160.0f;
             ty = top_y + b->h * 0.5f;
