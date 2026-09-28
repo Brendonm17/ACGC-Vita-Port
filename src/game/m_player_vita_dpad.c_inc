@@ -101,6 +101,13 @@ static void Vita_DPad_BeginStash(GAME* game,
     Player_actor_request_main_putin_item(game, mPlayer_REQUEST_PRIORITY_37);
 }
 
+// the stash and takeout play the request pending when they began, so a swap waits for plain moves: a tree shake
+// still playing (or just asked for) can't be started over
+static int Vita_DPad_IsMoveState(int main_index) {
+    return main_index == mPlayer_INDEX_WAIT || main_index == mPlayer_INDEX_WALK || main_index == mPlayer_INDEX_RUN ||
+           main_index == mPlayer_INDEX_DASH;
+}
+
 static int Vita_DPad_IsFreeState(int main_index) {
     return main_index == mPlayer_INDEX_WAIT ||
            main_index == mPlayer_INDEX_WALK ||
@@ -214,6 +221,8 @@ static void Vita_DPad_Cycle(GAME* game, int dir) {
 }
 
 static void Vita_Handle_DPad_ToolCycle(ACTOR* actor, GAME* game) {
+    PLAYER_ACTOR* player = (PLAYER_ACTOR*)actor;
+
     Vita_DPad_TickPending(actor, game);
 
     if (!Vita_DPad_IsOutdoor()) return;
@@ -229,6 +238,7 @@ static void Vita_Handle_DPad_ToolCycle(ACTOR* actor, GAME* game) {
     // submenu's gate guarantees no animation interrupts (fishing/talking/etc all
     // run at higher priority and would fail this check)
     if (!mPlib_able_submenu_type1(game)) return;
+    if (!Vita_DPad_IsMoveState(player->now_main_index) || !Vita_DPad_IsMoveState(player->requested_main_index)) return;
 
     if (chkTrigger(BUTTON_DDOWN)) {
         Vita_DPad_PutAway(game);

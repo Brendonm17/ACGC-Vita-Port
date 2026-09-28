@@ -51,11 +51,17 @@ int main(int argc, char* argv[]) {
     // without a disc image and the user has no idea why.
     if (!pc_disc_init()) {
         extern void vita_fatal_dialog_and_exit(const char* msg);
-        vita_fatal_dialog_and_exit(
-            "Animal Crossing ROM not found.\n\n"
-            "Please place an Animal Crossing (USA) disc image\n"
-            "(.iso, .ciso, or .gcm) at:\n\n"
-            "ux0:data/AnimalCrossing/rom/");
+        static char msg[512];
+
+        snprintf(msg, sizeof(msg),
+                 "Animal Crossing ROM not found.\n\n"
+                 "Please place an Animal Crossing (USA) disc image\n"
+                 "(.iso, .ciso, or .gcm) at:\n\n"
+                 "%s\n\n"
+                 "or set rom_path in\n"
+                 "ux0:data/AnimalCrossing/settings.ini",
+                 g_pc_settings.rom_path[0] != '\0' ? g_pc_settings.rom_path : "ux0:data/AnimalCrossing/rom/");
+        vita_fatal_dialog_and_exit(msg);
     }
     pc_assets_init();
 

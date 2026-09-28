@@ -22,6 +22,9 @@ typedef struct {
     int render_w;         // computed from render_scale
     int render_h;
 
+    // where the disc image is: a folder or the image file, empty = the default folders
+    char rom_path[256];
+
     // Vita display
     int aspect_mode;      // 0=widescreen, 1=original 4:3
     char banner_name[32]; // banner filename in banners/, empty = none

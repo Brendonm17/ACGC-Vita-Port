@@ -52,6 +52,11 @@ static const char* SETTINGS_FILE = "settings.ini";
 static const char* DEFAULT_SETTINGS =
     "# Animal Crossing Vita Settings\n"
     "\n"
+    "[Paths]\n"
+    "# rom_path: the folder your disc image (.iso, .ciso or .gcm) is in, or the image file itself\n"
+    "# Empty = ux0:data/AnimalCrossing/rom/\n"
+    "rom_path = \n"
+    "\n"
     "[Graphics]\n"
     "# render_scale: 100 (native 960x544), 75 (720x408), 50 (480x272)\n"
     "render_scale = 100\n"
@@ -206,6 +211,23 @@ static void apply_setting(const char* key, const char* value) {
         update_render_dims(val);
     } else if (strcmp(key, "aspect_mode") == 0) {
         g_pc_settings.aspect_mode = (val == 1) ? 1 : 0;
+    } else if (strcmp(key, "rom_path") == 0) {
+        char* p = g_pc_settings.rom_path;
+        int n;
+
+        // (quotes around it, and a slash at the end, are fine)
+        if (*value == '"') {
+            value++;
+        }
+        strncpy(p, value, sizeof(g_pc_settings.rom_path) - 1);
+        p[sizeof(g_pc_settings.rom_path) - 1] = '\0';
+        n = (int)strlen(p);
+        if (n > 0 && p[n - 1] == '"') {
+            p[--n] = '\0';
+        }
+        while (n > 1 && (p[n - 1] == '/' || p[n - 1] == '\\') && p[n - 2] != ':') {
+            p[--n] = '\0';
+        }
     } else if (strcmp(key, "banner") == 0) {
         strncpy(g_pc_settings.banner_name, value, sizeof(g_pc_settings.banner_name) - 1);
         g_pc_settings.banner_name[sizeof(g_pc_settings.banner_name) - 1] = '\0';
@@ -267,6 +289,10 @@ void pc_settings_save(void) {
     }
 #ifdef TARGET_VITA
     fprintf(f, "# Animal Crossing Vita Settings\n\n");
+    fprintf(f, "[Paths]\n");
+    fprintf(f, "# rom_path: the folder your disc image (.iso, .ciso or .gcm) is in, or the image file itself\n");
+    fprintf(f, "# Empty = ux0:data/AnimalCrossing/rom/\n");
+    fprintf(f, "rom_path = %s\n\n", g_pc_settings.rom_path);
     fprintf(f, "[Graphics]\n");
     fprintf(f, "# render_scale: 100 (native 960x544), 75 (720x408), 50 (480x272)\n");
     fprintf(f, "render_scale = %d\n\n", g_pc_settings.render_scale);

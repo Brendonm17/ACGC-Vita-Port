@@ -8,6 +8,9 @@
 #include <dirent.h>
 #include "types.h"
 #include "pc_disc.h"
+#ifdef TARGET_VITA
+#include "pc_settings.h"
+#endif
 
 extern int g_pc_verbose;
 
@@ -290,6 +293,30 @@ static int str_ends_ci(const char* s, const char* suffix) {
     return 1;
 }
 
+static int is_disc_image_name(const char* name) {
+    return str_ends_ci(name, ".ciso") || str_ends_ci(name, ".iso") || str_ends_ci(name, ".gcm");
+}
+
+// the first disc image in a folder
+static int find_in_dir(const char* dir, char* out_path, int out_sz) {
+    DIR* dp = opendir(dir);
+    struct dirent* ent;
+
+    if (!dp) return 0;
+    while ((ent = readdir(dp)) != NULL) {
+        if (is_disc_image_name(ent->d_name)) {
+            if (strcmp(dir, ".") == 0)
+                snprintf(out_path, out_sz, "%s", ent->d_name);
+            else
+                snprintf(out_path, out_sz, "%s/%s", dir, ent->d_name);
+            closedir(dp);
+            return 1;
+        }
+    }
+    closedir(dp);
+    return 0;
+}
+
 static int find_disc_image(char* out_path, int out_sz) {
 #ifdef TARGET_VITA
     static const char* dirs[] = {
@@ -298,28 +325,30 @@ static int find_disc_image(char* out_path, int out_sz) {
         "app0:rom",
         NULL
     };
+    const char* rom_path = g_pc_settings.rom_path;
 #else
     static const char* dirs[] = { ".", "orig", "rom", NULL };
 #endif
     int d;
 
-    for (d = 0; dirs[d]; d++) {
-        DIR* dp = opendir(dirs[d]);
-        struct dirent* ent;
-        if (!dp) continue;
-        while ((ent = readdir(dp)) != NULL) {
-            if (str_ends_ci(ent->d_name, ".ciso") ||
-                str_ends_ci(ent->d_name, ".iso")  ||
-                str_ends_ci(ent->d_name, ".gcm")) {
-                if (strcmp(dirs[d], ".") == 0)
-                    snprintf(out_path, out_sz, "%s", ent->d_name);
-                else
-                    snprintf(out_path, out_sz, "%s/%s", dirs[d], ent->d_name);
-                closedir(dp);
+#ifdef TARGET_VITA
+    // settings.ini's rom_path first: the image itself, or the folder it's in
+    if (rom_path[0] != '\0') {
+        if (is_disc_image_name(rom_path)) {
+            FILE* f = fopen(rom_path, "rb");
+
+            if (f) {
+                fclose(f);
+                snprintf(out_path, out_sz, "%s", rom_path);
                 return 1;
             }
+        } else if (find_in_dir(rom_path, out_path, out_sz)) {
+            return 1;
         }
-        closedir(dp);
+    }
+#endif
+    for (d = 0; dirs[d]; d++) {
+        if (find_in_dir(dirs[d], out_path, out_sz)) return 1;
     }
     return 0;
 }
