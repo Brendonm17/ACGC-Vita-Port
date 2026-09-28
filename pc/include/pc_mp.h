@@ -1090,7 +1090,8 @@ void vita_mp_sleep_ms(int ms);
 unsigned int vita_mp_heap_free(void);
 const mp_transport_t* vita_mp_udp_open(int host, unsigned short disc_port, unsigned short game_port, int* port_idx);
 void vita_mp_udp_close(void);
-void vita_mp_udp_reopen(void);              // after sleep: fresh sockets on the same ports
+void vita_mp_udp_reopen(void);              // after sleep: fresh sockets (a host's on the same ports)
+int vita_mp_udp_move_game(unsigned short port); // host: the game socket moves to this port
 void vita_mp_udp_tick(unsigned int now_ms); // retries a reopen that found no network yet
 
 // ad hoc (vita_mp_adhoc.c): the system's connection dialog, then PDP by MAC
@@ -1108,7 +1109,8 @@ void vita_ime_update(void);
 int vita_mp_wifi_recovering(void);
 
 // far away (vita_mp_nat.c): the router forwards the game port; worker thread, polled
-void vita_mp_nat_open(unsigned short port);
+void vita_mp_nat_open(unsigned short port, unsigned short first, int count); // port, else another from first on
+unsigned short vita_mp_nat_port(void);      // the port forwarded, once poll says DONE
 void vita_mp_nat_lookup(void);              // guest: just this house's outside address
 int vita_mp_nat_poll(unsigned int* ext_ip); // MP_UI_BUSY, then DONE / NOPORTMAP / CGNAT
 int vita_mp_nat_idle(void);                 // no worker left from an earlier line

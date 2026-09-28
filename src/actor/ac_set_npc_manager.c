@@ -302,6 +302,11 @@ static int aSNMgr_check_move_npc_schedule(mNPS_schedule_c* sched_p, Animal_c* an
 }
 
 static void aSNMgr_get_block_ut_num_set_npc(int* bx, int* bz, int* ux, int* uz, mNpc_NpcList_c* list_p) {
+    // -Og can leave these unset on lookup failure; default so a bad position defers the spawn instead of using garbage
+    *bx = -1;
+    *bz = -1;
+    *ux = -1;
+    *uz = -1;
     if (mFI_Wpos2BlockNum(bx, bz, list_p->position) == TRUE) {
         mFI_Wpos2UtNum_inBlock(ux, uz, list_p->position);
     }

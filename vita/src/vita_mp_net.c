@@ -423,8 +423,8 @@ static unsigned int s_bcast_ip;
 static unsigned short s_port_game; // bound ports, taken again after a sleep
 static unsigned short s_port_disc;
 static int s_udp_open;
+static int s_udp_host; // its ports are the ones its ticket and forward name
 static int s_reopen;
-static int s_reopen_tries;
 static unsigned int s_reopen_ms;
 
 static void mp_sockaddr(struct sockaddr_in* a, unsigned int ip, unsigned short port) {
@@ -542,6 +542,7 @@ void vita_mp_udp_close(void) {
     s_sock_game = -1;
     s_sock_disc = -1;
     s_udp_open = 0;
+    s_udp_host = 0;
     s_reopen = 0;
 }
 
@@ -549,7 +550,6 @@ void vita_mp_udp_close(void) {
 void vita_mp_udp_reopen(void) {
     if (s_udp_open) {
         s_reopen = 1;
-        s_reopen_tries = 0;
         s_reopen_ms = pc_mp_now_ms() - 1000;
         vita_mp_udp_tick(pc_mp_now_ms());
     }
@@ -566,8 +566,8 @@ void vita_mp_udp_tick(unsigned int now_ms) {
     if (s_sock_disc >= 0) {
         close(s_sock_disc);
     }
-    // a guest's own port can go to any free one if its old number stays taken
-    s_sock_game = mp_udp_socket(s_reopen_tries++ < 5 || s_port_disc != 0 ? s_port_game : 0);
+    // a visitor takes any free port (the Vita never gives an app its old one back from the automatic range)
+    s_sock_game = mp_udp_socket(s_udp_host ? s_port_game : 0);
     s_sock_disc = (s_port_disc != 0) ? mp_udp_socket(s_port_disc) : -1;
     if (s_sock_game < 0) {
         return;
@@ -593,6 +593,7 @@ const mp_transport_t* vita_mp_udp_open(int host, unsigned short disc_port, unsig
         s_udp_open = s_sock_game >= 0;
         return s_sock_game >= 0 ? &s_udp_transport : NULL;
     }
+    s_udp_host = 1;
 
     // ticket play still works when another app holds the discovery port
     s_sock_disc = mp_udp_socket(disc_port);
@@ -610,6 +611,23 @@ const mp_transport_t* vita_mp_udp_open(int host, unsigned short disc_port, unsig
     s_port_disc = (s_sock_disc >= 0) ? disc_port : 0;
     s_udp_open = 1;
     return &s_udp_transport;
+}
+
+// host: the game port moves to another the router forwards, before any line is open on it
+int vita_mp_udp_move_game(unsigned short port) {
+    int s;
+
+    if (!s_udp_host || s_sock_game < 0) {
+        return 0;
+    }
+    s = mp_udp_socket(port);
+    if (s < 0) {
+        return 0;
+    }
+    close(s_sock_game);
+    s_sock_game = s;
+    s_port_game = port;
+    return 1;
 }
 
 #endif

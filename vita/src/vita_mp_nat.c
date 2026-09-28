@@ -50,7 +50,10 @@ static struct {
     volatile int closing;
     volatile int alive; // a worker is still running
     int mode;
-    unsigned short port;
+    unsigned short port;  // the one asked for, the same outside and in
+    unsigned short bound; // the game port already open here
+    unsigned short first; // the game's ports a ticket can name
+    int count;
     unsigned int ext_ip;
     int via;
     unsigned int gw;
@@ -84,6 +87,40 @@ static int mp_nat_udp(void) {
         return -1;
     }
     return s;
+}
+
+static int mp_nat_port_free(unsigned short port) {
+    struct sockaddr_in a;
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    int ok;
+
+    if (s < 0) {
+        return 0;
+    }
+    mp_nat_addr(&a, 0, port);
+    ok = bind(s, (struct sockaddr*)&a, sizeof(a)) == 0;
+    close(s);
+    return ok;
+}
+
+// the k-th port to ask the router for: the one already open, then the game's others still free here
+static int mp_nat_try(int k) {
+    int seen = 0;
+    int i;
+
+    s_nat.port = s_nat.bound;
+    if (k == 0) {
+        return 1;
+    }
+    for (i = 0; i < s_nat.count; i++) {
+        unsigned short p = (unsigned short)(s_nat.first + i);
+
+        if (p != s_nat.bound && ++seen == k) {
+            s_nat.port = p;
+            return mp_nat_port_free(p);
+        }
+    }
+    return 0;
 }
 
 static int mp_nat_wait(int s, int ms, int for_write) {
@@ -163,16 +200,23 @@ static int mp_natpmp_map(unsigned int lifetime) {
 static int mp_natpmp_open(void) {
     unsigned char req[2] = { 0, 0 };
     unsigned char resp[12];
+    int k;
 
     if (s_nat.gw == 0 || !mp_natpmp_ask(req, sizeof(req), resp, sizeof(resp), 0)) {
         return 0;
     }
     s_nat.ext_ip = mp_nat_rd32(resp + 8);
-    if (!mp_natpmp_map(MP_LEASE_SEC)) {
-        return 0;
+    for (k = 0; k < s_nat.count && !s_nat.closing; k++) {
+        if (!mp_nat_try(k)) {
+            continue;
+        }
+        if (mp_natpmp_map(MP_LEASE_SEC)) {
+            s_nat.via = MP_NAT_VIA_PMP;
+            return 1;
+        }
+        mp_natpmp_map(0); // (given another outside port: that one goes back)
     }
-    s_nat.via = MP_NAT_VIA_PMP;
-    return 1;
+    return 0;
 }
 
 // UPnP IGD
@@ -408,6 +452,46 @@ static int mp_upnp_soap(const char* action, const char* args) {
     return strncmp(s_nat.http + 9, "200", 3) == 0;
 }
 
+// the router's own record of the port: this Vita's, or someone else's that it kept (a router that won't say is taken
+// at its word)
+static int mp_upnp_ours(void) {
+    char args[256];
+    char who[20];
+    char url[32];
+    char path[4];
+    const char* c;
+    const char* p;
+    unsigned int ip;
+    unsigned short port;
+    int n = 0;
+
+    snprintf(args, sizeof(args),
+             "<NewRemoteHost></NewRemoteHost><NewExternalPort>%u</NewExternalPort><NewProtocol>UDP</NewProtocol>",
+             s_nat.port);
+    if (!mp_upnp_soap("GetSpecificPortMappingEntry", args) ||
+        (c = mp_find_ci(s_nat.http, "NewInternalClient>")) == NULL) {
+        return 1;
+    }
+    c += 18;
+    while (*c == ' ') {
+        c++;
+    }
+    while (c[n] != '<' && c[n] != ' ' && c[n] != '\0' && n < (int)sizeof(who) - 1) {
+        who[n] = c[n];
+        n++;
+    }
+    who[n] = '\0';
+    p = mp_find_ci(s_nat.http, "NewInternalPort>");
+    snprintf(url, sizeof(url), "http://%s", who);
+    // (only a plain address other than this Vita's counts as someone else's)
+    if (!mp_url_split(url, &ip, &port, path, sizeof(path)) ||
+        (ip == vita_mp_local_ip_u32() && (p == NULL || atoi(p + 16) == s_nat.port))) {
+        return 1;
+    }
+    pc_mp_log("[MP] UPnP: port %u goes to %s:%d", s_nat.port, who, p != NULL ? atoi(p + 16) : 0);
+    return 0;
+}
+
 static int mp_upnp_map(unsigned int lease) {
     char args[512];
     char me[20];
@@ -426,6 +510,7 @@ static int mp_upnp_map(unsigned int lease) {
 static int mp_upnp_open(void) {
     char location[256];
     const char* ext;
+    int k;
 
     if (!mp_upnp_discover(location, sizeof(location))) {
         pc_mp_log("[MP] UPnP: no router answered the search");
@@ -435,9 +520,21 @@ static int mp_upnp_open(void) {
         pc_mp_log("[MP] UPnP: %.120s has no WAN connection service", location);
         return 0;
     }
-    // routers that only keep permanent mappings refuse a lease (error 725)
-    if (!mp_upnp_map(MP_LEASE_SEC) && !mp_upnp_map(0)) {
-        pc_mp_log("[MP] UPnP: AddPortMapping refused: %.80s", s_nat.http);
+    // a port the router refuses, or keeps for another device, gives way to the next
+    for (k = 0; k < s_nat.count && !s_nat.closing; k++) {
+        if (!mp_nat_try(k)) {
+            continue;
+        }
+        // routers that only keep permanent mappings refuse a lease (error 725)
+        if (!mp_upnp_map(MP_LEASE_SEC) && !mp_upnp_map(0)) {
+            pc_mp_log("[MP] UPnP: port %u refused: %.80s", s_nat.port, s_nat.http);
+            continue;
+        }
+        if (mp_upnp_ours()) {
+            break;
+        }
+    }
+    if (k >= s_nat.count || s_nat.closing) {
         return 0;
     }
     s_nat.via = MP_NAT_VIA_UPNP;
@@ -543,7 +640,7 @@ static int mp_nat_thread(SceSize args, void* argp) {
     return mp_nat_done(MP_NAT_IDLE);
 }
 
-static void mp_nat_start(int mode, unsigned short port) {
+static void mp_nat_start(int mode, unsigned short port, unsigned short first, int count) {
     SceUID thread;
 
     // a worker still giving back an old port finishes first
@@ -553,6 +650,9 @@ static void mp_nat_start(int mode, unsigned short port) {
     memset(s_nat.ctl_path, 0, sizeof(s_nat.ctl_path));
     s_nat.mode = mode;
     s_nat.port = port;
+    s_nat.bound = port;
+    s_nat.first = first;
+    s_nat.count = count > 0 ? count : 1;
     s_nat.ext_ip = 0;
     s_nat.via = MP_NAT_VIA_NONE;
     s_nat.closing = 0;
@@ -568,14 +668,19 @@ static void mp_nat_start(int mode, unsigned short port) {
     }
 }
 
-void vita_mp_nat_open(unsigned short port) {
-    mp_nat_start(MP_NAT_MAP, port);
+void vita_mp_nat_open(unsigned short port, unsigned short first, int count) {
+    mp_nat_start(MP_NAT_MAP, port, first, count);
+}
+
+// the port the router forwards, once poll says DONE
+unsigned short vita_mp_nat_port(void) {
+    return s_nat.port;
 }
 
 // guest: the outside address of this house, to spot a ticket from under the same roof
 void vita_mp_nat_lookup(void) {
     if (!s_nat.alive) {
-        mp_nat_start(MP_NAT_LOOKUP, 0);
+        mp_nat_start(MP_NAT_LOOKUP, 0, 0, 0);
     }
 }
 

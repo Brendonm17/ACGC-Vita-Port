@@ -1096,7 +1096,8 @@ static void mp_host_open_step(void) {
             if (!vita_mp_nat_idle()) {
                 return; // the last line's worker is still giving its port back
             }
-            vita_mp_nat_open((unsigned short)(MP_PORT_GAME + s_host.port_idx));
+            // (a ticket has room for four ports)
+            vita_mp_nat_open((unsigned short)(MP_PORT_GAME + s_host.port_idx), MP_PORT_GAME, 4);
             s_host.mapping = TRUE;
             return;
         }
@@ -1104,6 +1105,15 @@ static void mp_host_open_step(void) {
         res = vita_mp_nat_poll(&ip);
         if (res == MP_UI_BUSY) {
             return;
+        }
+        // the router forwards another of the game's ports: the line moves there before any ticket names the old one
+        if (res == MP_UI_DONE && vita_mp_nat_port() != MP_PORT_GAME + s_host.port_idx) {
+            if (vita_mp_udp_move_game(vita_mp_nat_port())) {
+                s_host.port_idx = vita_mp_nat_port() - MP_PORT_GAME;
+            } else {
+                vita_mp_nat_close();
+                res = MP_UI_NOPORTMAP;
+            }
         }
     }
     // no outside address known: a same-Wi-Fi ticket still helps

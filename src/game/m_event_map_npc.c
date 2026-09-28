@@ -106,6 +106,10 @@ static int mEvMN_GetDataBaseIdx(u32 block_kind) {
 
     if (block_kind == mRF_BLOCKKIND_POOL) {
         res = mFI_GetPuleIdx();
+        // clamp the pond-variant index so an out-of-range read can't index actor_info[] past its 7 entries
+        if (res < 0 || res >= 7) {
+            res = 0;
+        }
     }
 
     return res;
